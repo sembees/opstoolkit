@@ -37,6 +37,7 @@ class PxeConfig:
     kernel_path: str = "ubuntu/22.04/vmlinuz"
     initrd_path: str = "ubuntu/22.04/initrd"
     squashfs_path: str = "ubuntu/22.04/installer.squashfs"
+    deploy_mode: str = "standalone"  # standalone(独立DHCP) / proxy(ProxyDHCP) / relay(中继模式)
 
 
 def _hash_pw(plaintext):
@@ -214,35 +215,86 @@ def _ipxe_menu(c, mac=""):
 
 # ===== dnsmasq 配置 =====
 def _dnsmasq(c, installs=None):
+    """三种部署模式：
+    standalone - 独立 DHCP（专用装机网络，裸机接入即装）
+    proxy      - ProxyDHCP（与现有 DHCP 并存，只提供 PXE 引导信息）
+    relay      - 中继模式（仅 TFTP+HTTP，依赖交换机 DHCP 中继）
+    """
     installs = installs or []
     nc = c.net_config or {}
+    iface = nc.get("interface", "eth0")
+    gateway = nc.get("gateway", "192.168.1.1")
+    mode = c.deploy_mode or "standalone"
+
     L = [
-        "# dnsmasq DHCP + TFTP + PXE",
+        "# dnsmasq PXE 配置 (OpsToolkit 生成)",
+        "# 部署模式: " + _mode_label(mode),
         "port=0",
-        "",
-        "interface=" + nc.get("interface", "eth0"),
+        "interface=" + iface,
         "bind-interfaces",
-        "dhcp-range=" + nc.get("dhcp_start", "192.168.1.100") + "," + nc.get("dhcp_end", "192.168.1.200") + ",12h",
-        "dhcp-option=option:router," + nc.get("gateway", "192.168.1.1"),
-        "dhcp-option=option:dns-server," + nc.get("gateway", "192.168.1.1"),
         "",
-        "enable-tftp",
-        "tftp-root=/srv/tftp",
-        "",
-        "# PXE: BIOS -> undionly.kpxe, UEFI -> ipxe.efi",
-        "dhcp-match=set:efi-x86_64,option:client-arch,7",
-        "dhcp-match=set:efi-x86_64,option:client-arch,9",
-        "dhcp-boot=tag:efi-x86_64,ipxe.efi",
-        "dhcp-boot=tag:!efi-x86_64,undionly.kpxe",
-        "",
-        "# 按 MAC 指定 iPXE 菜单",
     ]
+
+    if mode == "relay":
+        # 中继模式：不开 DHCP，只做 TFTP + HTTP 文件服务
+        L.append("# 仅 TFTP，DHCP 由网络中继转发，确保交换机 IP Helper 指向本机")
+        L.append("no-dhcp-interface=")
+        L.append("")
+        L.append("enable-tftp")
+        L.append("tftp-root=/srv/tftp")
+        L.append("")
+        L.append("# PXE 引导文件: BIOS -> undionly.kpxe, UEFI -> ipxe.efi")
+        L.append("dhcp-match=set:efi-x86_64,option:client-arch,7")
+        L.append("dhcp-match=set:efi-x86_64,option:client-arch,9")
+        L.append("dhcp-boot=tag:efi-x86_64,ipxe.efi")
+        L.append("dhcp-boot=tag:!efi-x86_64,undionly.kpxe")
+    elif mode == "proxy":
+        # ProxyDHCP：不分配 IP，只提供 PXE 引导信息，与现有 DHCP 并存
+        L.append("# ProxyDHCP 模式: 不分配 IP，仅提供 PXE 引导，与现有 DHCP 服务器并存")
+        L.append("# 必须设置 pxeserver 本机 IP")
+        pxeserver = c.server_ip or "192.168.1.100"
+        L.append('dhcp-range=' + pxeserver + ',proxy')
+        L.append('dhcp-option=option:server-ip-address,' + pxeserver)
+        L.append('pxe-service=tag:!efi-x86_64,x86PC,"PXE Boot",undionly.kpxe')
+        L.append('pxe-service=tag:efi-x86_64,X86-64_EFI,"PXE Boot",ipxe.efi')
+        L.append("")
+        L.append("enable-tftp")
+        L.append("tftp-root=/srv/tftp")
+    else:
+        # standalone：独立 DHCP + TFTP，完整分配 IP
+        L.append("# 独立 DHCP 模式: 完整分配 IP + PXE 引导（确保网段内无其他 DHCP）")
+        L.append("dhcp-range=" + nc.get("dhcp_start", "192.168.1.100") + "," + nc.get("dhcp_end", "192.168.1.200") + ",12h")
+        L.append("dhcp-option=option:router," + gateway)
+        L.append("dhcp-option=option:dns-server," + nc.get("dns_server", gateway))
+        L.append("")
+        L.append("enable-tftp")
+        L.append("tftp-root=/srv/tftp")
+        L.append("")
+        L.append("# PXE 引导: BIOS -> undionly.kpxe, UEFI -> ipxe.efi")
+        L.append("dhcp-match=set:efi-x86_64,option:client-arch,7")
+        L.append("dhcp-match=set:efi-x86_64,option:client-arch,9")
+        L.append("dhcp-boot=tag:efi-x86_64,ipxe.efi")
+        L.append("dhcp-boot=tag:!efi-x86_64,undionly.kpxe")
+
+    L.append("")
+    L.append("# 按 MAC 指定 iPXE 菜单")
     for inst in installs:
         if inst.get("mac"):
             menu = c.http_root + "/boot/" + inst["mac"].lower().replace(":", "-") + ".ipxe"
             L.append("dhcp-host=" + inst["mac"] + "," + menu)
     L.append("")
     return "\n".join(L) + "\n"
+
+
+def _mode_label(mode):
+    return {
+        "standalone": "standalone - 独立 DHCP (专用装机网络)",
+        "proxy": "proxy - ProxyDHCP (与现有 DHCP 并存)",
+        "relay": "relay - 中继模式 (仅 TFTP, 依赖交换机中继)",
+    }.get(mode, mode)
+
+
+
 
 
 def _readme(c):

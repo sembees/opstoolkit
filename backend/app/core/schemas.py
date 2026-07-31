@@ -180,6 +180,7 @@ class PxeProfileIn(BaseModel):
     kernel_path: str = ""
     initrd_path: str = ""
     squashfs_path: str = ""
+    deploy_mode: str = "standalone"  # standalone / proxy / relay
 
 
 class PxeProfileOut(ORMBase):

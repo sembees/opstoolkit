@@ -130,6 +130,15 @@
     <el-dialog v-model="genDialog" title="PXE 部署文件生成" width="860px" top="5vh">
       <el-form label-width="90px" size="small" style="margin-bottom: 12px">
         <el-row :gutter="8">
+          <el-col :span="8">
+            <el-form-item label="部署模式">
+              <el-select v-model="genForm.deploy_mode" style="width:100%">
+                <el-option label="独立DHCP (专用装机网络)" value="standalone" />
+                <el-option label="ProxyDHCP (与现有DHCP并存)" value="proxy" />
+                <el-option label="中继模式 (仅TFTP, 依赖交换机)" value="relay" />
+              </el-select>
+            </el-form-item>
+          </el-col>
           <el-col :span="6"><el-form-item label="主机名"><el-input v-model="genForm.hostname" /></el-form-item></el-col>
           <el-col :span="6"><el-form-item label="PXE服务IP"><el-input v-model="genForm.server_ip" /></el-form-item></el-col>
           <el-col :span="6"><el-form-item label="内核路径"><el-input v-model="genForm.kernel_path" placeholder="rhel/9/vmlinuz" /></el-form-item></el-col>
@@ -172,7 +181,7 @@ const emptyForm = () => ({
 })
 const form = reactive(emptyForm())
 
-const genForm = reactive({ hostname: "server01", server_ip: "192.168.1.100", http_root: "", kernel_path: "", initrd_path: "", squashfs_path: "" })
+const genForm = reactive({ hostname: "server01", server_ip: "192.168.1.100", http_root: "", kernel_path: "", initrd_path: "", squashfs_path: "", deploy_mode: "standalone" })
 
 function osLabel(row) { return row.os_type + " " + row.os_version }
 function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", failed: "danger" }[s] || "info" }
@@ -279,6 +288,7 @@ async function doGenerate() {
       kernel_path: genForm.kernel_path,
       initrd_path: genForm.initrd_path,
       squashfs_path: genForm.squashfs_path,
+      deploy_mode: genForm.deploy_mode,
       installs: installs.value.map(i => ({ mac: i.mac, hostname: i.hostname })),
     }
     const res = await http.post("/it/pxe/profiles/" + pid + "/generate", body)

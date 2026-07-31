@@ -34,7 +34,8 @@ def _safe_decrypt(enc):
 
 
 def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
-                  kernel_path="", initrd_path="", squashfs_path="") -> PxeConfig:
+                  kernel_path="", initrd_path="", squashfs_path="",
+                  deploy_mode="standalone") -> PxeConfig:
     return PxeConfig(
         os_type=p.os_type, os_version=p.os_version,
         hostname="default", timezone=p.timezone, locale=p.locale, keyboard=p.keyboard,
@@ -49,6 +50,7 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
         server_ip=server_ip or "192.168.1.100",
         http_root=http_root or ("http://" + (server_ip or "192.168.1.100") + ":8000/pxe"),
         kernel_path=kernel_path, initrd_path=initrd_path, squashfs_path=squashfs_path,
+        deploy_mode=deploy_mode,
     )
 
 
@@ -163,6 +165,7 @@ async def generate_files(pid: str, body: dict = None, db: AsyncSession = Depends
         kernel_path=body.get("kernel_path", ""),
         initrd_path=body.get("initrd_path", ""),
         squashfs_path=body.get("squashfs_path", ""),
+        deploy_mode=body.get("deploy_mode", "standalone"),
     )
     cfg.hostname = body.get("hostname", "default")
 
