@@ -1,6 +1,45 @@
 <template>
   <div>
-    <!-- 模板列表 -->
+    <!-- PXE 服务器本机状态 -->
+    <el-card shadow="never" style="margin-bottom: 16px">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
+        <span style="font-weight: 600">
+          <el-icon><Cpu /></el-icon> PXE 服务器（本机）
+          <el-tag v-if="serverStatus.dnsmasq" :type="serverStatus.dnsmasq.active ? 'success' : 'danger'" size="small" style="margin-left: 8px">
+            dnsmasq {{ serverStatus.dnsmasq.active ? '运行中' : '未运行' }}
+          </el-tag>
+        </span>
+        <div>
+          <el-button size="small" @click="controlService('start')" :disabled="serverStatus.supported === false">启动</el-button>
+          <el-button size="small" @click="controlService('stop')" :disabled="serverStatus.supported === false">停止</el-button>
+          <el-button size="small" @click="controlService('restart')" :disabled="serverStatus.supported === false">重启 dnsmasq</el-button>
+          <el-button size="small" @click="loadServerStatus"><el-icon><Refresh /></el-icon> 刷新</el-button>
+        </div>
+      </div>
+      <el-descriptions v-if="serverStatus.supported" :column="3" size="small" border>
+        <el-descriptions-item label="sudo 免密">{{ serverStatus.sudo_ok ? '是' : '否' }}</el-descriptions-item>
+        <el-descriptions-item label="开机自启">{{ serverStatus.dnsmasq && serverStatus.dnsmasq.enabled ? '是' : '否' }}</el-descriptions-item>
+        <el-descriptions-item label="TFTP">{{ serverStatus.tftp_root }}</el-descriptions-item>
+      </el-descriptions>
+      <el-row :gutter="16" style="margin-top: 8px" v-if="serverStatus.supported">
+        <el-col :span="12">
+          <div style="font-size: 12px; color: #999; margin-bottom: 4px">TFTP 文件</div>
+          <el-tag v-for="f in serverStatus.tftp_files" :key="f" size="small" style="margin: 2px">{{ f }}</el-tag>
+          <span v-if="!serverStatus.tftp_files || !serverStatus.tftp_files.length" style="color: #ccc; font-size: 12px">空</span>
+        </el-col>
+        <el-col :span="12">
+          <div style="font-size: 12px; color: #999; margin-bottom: 4px">HTTP 文件</div>
+          <el-tag v-for="f in serverStatus.web_files" :key="f" size="small" style="margin: 2px">{{ f }}</el-tag>
+          <span v-if="!serverStatus.web_files || !serverStatus.web_files.length" style="color: #ccc; font-size: 12px">空</span>
+        </el-col>
+      </el-row>
+      <div v-if="deployLog.length" style="margin-top: 8px">
+        <div style="font-size: 12px; color: #999; margin-bottom: 4px">部署日志</div>
+        <div class="terminal-output" style="white-space: pre; max-height: 200px">{{ deployLog.join("\n") }}</div>
+      </div>
+      <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" style="margin-top: 8px">本机部署需 Linux 环境（当前：{{ serverStatus.platform }}），可用「下载 ZIP」手动部署</el-alert>
+    </el-card>
+        <!-- 模板列表 -->
     <el-card shadow="never" style="margin-bottom: 16px">
       <div style="display: flex; justify-content: space-between; margin-bottom: 12px">
         <span style="font-weight: 600"><el-icon><Cpu /></el-icon> PXE 装机模板</span>
@@ -17,9 +56,10 @@
         <el-table-column prop="net_mode" label="网络" width="70" />
         <el-table-column prop="timezone" label="时区" width="120" />
         <el-table-column prop="mirror" label="镜像源" min-width="160" show-overflow-tooltip />
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="openGenDialog(row)">生成配置</el-button>
+            <el-button type="success" link size="small" @click="deployProfile(row)">部署</el-button>
             <el-button link type="primary" size="small" @click="openProfileDialog(row)">编辑</el-button>
             <el-popconfirm title="确定删除?" @confirm="delProfile(row.id)">
               <template #reference><el-button type="danger" link size="small">删除</el-button></template>
@@ -170,6 +210,28 @@ const genDialog = ref(false)
 const generating = ref(false)
 const genFiles = ref({})
 const activeFile = ref("")
+const serverStatus = ref({ supported: false })
+const deployLog = ref([])
+const deploying = ref(false)
+
+async function loadServerStatus() {
+  try { serverStatus.value = await http.get("/it/pxe/server/status") } catch(e) {}
+}
+async function controlService(action) {
+  try { const r = await http.post("/it/pxe/server/service", { action }); ElMessage.success(r.msg || action) } catch(e) {}
+  loadServerStatus()
+}
+async function deployProfile(row) {
+  deploying.value = true
+  try {
+    const r = await http.post("/it/pxe/profiles/" + row.id + "/deploy", { deploy_mode: "standalone", hostname: "default", installs: [] })
+    deployLog.value = r.log || []
+    if (r.ok) ElMessage.success("部署完成")
+    else ElMessage.warning("部署未完全成功，查看日志")
+    loadServerStatus()
+  } finally { deploying.value = false }
+}
+
 
 const emptyForm = () => ({
   name: "", os_type: "rhel", os_version: "9.3",
@@ -324,5 +386,5 @@ async function delInstall(id) {
 async function loadProfiles() { profiles.value = await http.get("/it/pxe/profiles") }
 async function loadInstalls() { installs.value = await http.get("/it/pxe/installs") }
 
-onMounted(() => { loadProfiles(); loadInstalls() })
+onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus() })
 </script>

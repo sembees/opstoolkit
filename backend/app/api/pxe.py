@@ -1,4 +1,5 @@
 """PXE 装机接口。"""
+import socket
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,9 +9,22 @@ from app.core.auth import get_current_user
 from app.core.schemas import PxeGenerateResult, PxeInstallIn, PxeInstallOut, PxeProfileIn, PxeProfileOut
 from app.database import get_db
 from app.core.ziputil import files_to_zip_response
+from app.it.pxe import server as pxe_server
 from app.it.pxe.generator import PxeConfig, generate_all
 
 router = APIRouter()
+
+
+def _local_ip():
+    """检测本机主要网卡 IP。"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        sock.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 def _profile_out(p: models.PxeProfile) -> PxeProfileOut:
@@ -183,3 +197,28 @@ async def download_files(pid: str, body: dict = None, db: AsyncSession = Depends
     """下载全部 PXE 部署文件 (zip 压缩包)。"""
     files = await _gen_pxe_files(pid, body, db)
     return files_to_zip_response(files, "pxe-deploy.zip")
+
+
+# ---------- 本机部署与服务管控 ----------
+@router.get("/server/status")
+async def server_status(_user=Depends(get_current_user)):
+    """查看本机 PXE 服务状态 (dnsmasq + TFTP + HTTP 文件 + 端口)。"""
+    return pxe_server.server_status()
+
+
+@router.post("/server/service")
+async def service_control(body: dict = None, _user=Depends(get_current_user)):
+    """控制 dnsmasq 服务: start/stop/restart/reload/status。"""
+    action = (body or {}).get("action", "status")
+    return pxe_server.service_control(action)
+
+
+@router.post("/profiles/{pid}/deploy")
+async def deploy_to_host(pid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """一键部署到本机: 生成配置 -> 落地文件 -> 重启 dnsmasq。"""
+    body = body or {}
+    if not body.get("server_ip"):
+        body["server_ip"] = _local_ip()
+    body["http_root"] = "http://" + body["server_ip"] + ":8000/pxe/serve"
+    files = await _gen_pxe_files(pid, body, db)
+    return pxe_server.deploy_files(files, pid)

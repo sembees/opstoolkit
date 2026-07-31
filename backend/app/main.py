@@ -44,3 +44,11 @@ try:
         app.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
 except Exception:  # noqa: BLE001
     pass
+
+# PXE HTTP 文件服务 (本机部署后生效，供 dnsmasq 下载内核/应答文件)
+try:
+    _pxe_web = Path("/srv/opstk/pxe-web")
+    if _pxe_web.is_dir():
+        app.mount("/pxe/serve", StaticFiles(directory=str(_pxe_web)), name="pxe-serve")
+except Exception:
+    pass
