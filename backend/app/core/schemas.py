@@ -289,3 +289,85 @@ class NetConfigResult(BaseModel):
     script: str
     format: str
     filename: str
+
+
+# ---------- CT ZTP ?? ----------
+class ZtpDeviceIn(BaseModel):
+    template_id: str = ""
+    hostname: str = ""
+    mac: str = ""
+    serial: str = ""
+    mgmt_ip: Optional[str] = None
+
+
+class ZtpDeviceOut(ORMBase):
+    id: str
+    template_id: str
+    hostname: str
+    mac: str
+    serial: str
+    mgmt_ip: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class ZtpTemplateIn(BaseModel):
+    name: str
+    vendor: str = "h3c"                    # h3c / huawei / cisco
+    mgmt_vlan: int = 10
+    mgmt_interface: str = "Vlan-interface10"
+    mgmt_netmask: str = "255.255.255.0"
+    mgmt_gateway: str = "10.0.0.254"
+    dns_servers: list[str] = ["114.114.114.114"]
+    ntp_server: str = "10.0.0.254"
+    snmp_community: str = "public"
+    domain_name: str = ""
+    vlans: list[dict[str, Any]] = []
+    admin_user: str = "admin"
+    admin_password: Optional[str] = None
+    enable_secret: Optional[str] = None
+    ssh_keys: list[str] = []
+    uplink_port: str = ""
+    access_ports: list[str] = []
+    extra_config: str = ""
+    server_ip: str = "10.0.0.250"
+    tftp_root: str = "/srv/tftp"
+    http_root: str = "http://10.0.0.250:8000/ztp"
+    deploy_mode: str = "standalone"
+    dhcp_iface: str = "eth0"
+    dhcp_start: str = "10.0.0.100"
+    dhcp_end: str = "10.0.0.200"
+    remark: str = ""
+
+
+class ZtpTemplateOut(ORMBase):
+    id: str
+    name: str
+    vendor: str
+    mgmt_vlan: int
+    mgmt_interface: str
+    mgmt_netmask: str
+    mgmt_gateway: str
+    dns_servers: list = []
+    ntp_server: str
+    snmp_community: str
+    domain_name: str
+    vlans: list = []
+    admin_user: str
+    ssh_keys: list = []
+    uplink_port: str
+    access_ports: list = []
+    extra_config: str
+    server_ip: str
+    tftp_root: str
+    http_root: str
+    deploy_mode: str
+    dhcp_iface: str
+    dhcp_start: str
+    dhcp_end: str
+    remark: str
+    created_at: Optional[datetime] = None
+
+
+class ZtpGenerateResult(BaseModel):
+    files: dict[str, str] = {}
+

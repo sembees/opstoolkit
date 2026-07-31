@@ -169,3 +169,56 @@ class InspectionResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     task: Mapped[InspectionTask] = relationship(back_populates="results")
+
+
+class ZtpTemplate(Base):
+    """ZTP ?????vendor: h3c / huawei / cisco?"""
+    __tablename__ = "ztp_templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    vendor: Mapped[str] = mapped_column(String(16))                     # h3c / huawei / cisco
+    mgmt_vlan: Mapped[int] = mapped_column(Integer, default=10)
+    mgmt_interface: Mapped[str] = mapped_column(String(64), default="Vlan-interface10")
+    mgmt_netmask: Mapped[str] = mapped_column(String(32), default="255.255.255.0")
+    mgmt_gateway: Mapped[str] = mapped_column(String(64), default="10.0.0.254")
+    dns_servers: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+    ntp_server: Mapped[str] = mapped_column(String(64), default="10.0.0.254")
+    snmp_community: Mapped[str] = mapped_column(String(64), default="public")
+    domain_name: Mapped[str] = mapped_column(String(128), default="")
+    vlans: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+
+    admin_user: Mapped[str] = mapped_column(String(64), default="admin")
+    admin_password_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    enable_secret_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ssh_keys: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+
+    uplink_port: Mapped[str] = mapped_column(String(128), default="")
+    access_ports: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+    extra_config: Mapped[str] = mapped_column(Text, default="")
+
+    server_ip: Mapped[str] = mapped_column(String(64), default="10.0.0.250")
+    tftp_root: Mapped[str] = mapped_column(String(255), default="/srv/tftp")
+    http_root: Mapped[str] = mapped_column(String(255), default="http://10.0.0.250:8000/ztp")
+    deploy_mode: Mapped[str] = mapped_column(String(16), default="standalone")
+    dhcp_iface: Mapped[str] = mapped_column(String(32), default="eth0")
+    dhcp_start: Mapped[str] = mapped_column(String(64), default="10.0.0.100")
+    dhcp_end: Mapped[str] = mapped_column(String(64), default="10.0.0.200")
+
+    remark: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ZtpDevice(Base):
+    """ZTP ??????? MAC/??????????"""
+    __tablename__ = "ztp_devices"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    template_id: Mapped[str] = mapped_column(ForeignKey("ztp_templates.id", ondelete="CASCADE"), index=True)
+    hostname: Mapped[str] = mapped_column(String(128), default="")
+    mac: Mapped[str] = mapped_column(String(32), index=True)
+    serial: Mapped[str] = mapped_column(String(128), default="")
+    mgmt_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
