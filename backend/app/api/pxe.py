@@ -50,9 +50,20 @@ def _safe_decrypt(enc):
         return ""
 
 
+def _default_media(p):
+    """根据 OS 类型/版本计算默认的 kernel/initrd/squashfs 路径。"""
+    ost = (p.os_type or "ubuntu").strip()
+    ver = (p.os_version or "22.04").strip()
+    base = ost + "/" + ver + "/"
+    if ost == "rhel":
+        return base + "vmlinuz", base + "initrd.img", ""
+    return base + "vmlinuz", base + "initrd", base + "installer.squashfs"
+
+
 def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
                   kernel_path="", initrd_path="", squashfs_path="",
                   deploy_mode="standalone") -> PxeConfig:
+    _dk, _di, _ds = _default_media(p)
     return PxeConfig(
         os_type=p.os_type, os_version=p.os_version,
         hostname="default", timezone=p.timezone, locale=p.locale, keyboard=p.keyboard,
@@ -66,7 +77,7 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
         post_script=p.post_script,
         server_ip=server_ip or "192.168.1.100",
         http_root=http_root or ("http://" + (server_ip or "192.168.1.100") + ":8000/pxe"),
-        kernel_path=kernel_path, initrd_path=initrd_path, squashfs_path=squashfs_path,
+        kernel_path=kernel_path or _dk, initrd_path=initrd_path or _di, squashfs_path=squashfs_path or _ds,
         deploy_mode=deploy_mode,
     )
 
