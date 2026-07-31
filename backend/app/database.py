@@ -28,6 +28,9 @@ async def init_db() -> None:
 
     from app.core.auth import hash_password
     from app.core.crud import get_user_by_username
+    from app.ct.seeding import seed_default_templates
+
+    await seed_default_templates()
 
     async with async_session() as session:
         if not await get_user_by_username(session, settings.admin_username):

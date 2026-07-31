@@ -85,6 +85,33 @@ def _connect_and_run(params, key_text, metric_cmds, custom_cmds, disable_pager, 
     return outputs
 
 
+async def _resolve_template_cmds(db, asset, template_name):
+    """按模板名+厂商从数据库解析巡检命令列表；DB 无则回落驱动内置默认。"""
+    from sqlalchemy import select
+    from app.core.models import InspectionTemplate
+
+    vendor = asset.vendor or "generic"
+    stmt = select(InspectionTemplate).where(InspectionTemplate.vendor == vendor)
+    if template_name:
+        stmt = stmt.where(InspectionTemplate.name == template_name)
+    else:
+        # 无指定模板时优先取该厂商的标准模板
+        stmt = stmt.where(InspectionTemplate.name == "standard")
+    stmt = stmt.limit(1)
+    row = (await db.execute(stmt)).scalar_one_or_none()
+
+    if row is not None and row.items:
+        return [MetricCommand(
+            it["key"], it["label"], it["command"],
+            it.get("textfsm", ""), it.get("unit", ""),
+        ) for it in row.items]
+
+    # 回落：驱动内置
+    driver = get_driver(vendor)
+    templates = driver.templates()
+    return templates.get(driver.default_template, [])
+
+
 async def inspect_one(db: AsyncSession, asset: models.Asset, kind: str = "default",
                       template: Optional[str] = None, commands: Optional[list] = None,
                       on_event: Optional[ProgressCb] = None) -> dict:
@@ -94,10 +121,7 @@ async def inspect_one(db: AsyncSession, asset: models.Asset, kind: str = "defaul
     cred_plain = await crud.decrypt_credential(cred) if cred else {"username": "", "password": ""}
     key_text = cred_plain.get("ssh_key", "") if cred_plain else ""
     params = _build_connect_params(asset, cred_plain)
-    driver = get_driver(asset.vendor)
-    templates = driver.templates()
-    tmpl_name = template or driver.default_template
-    metric_cmds = templates.get(tmpl_name, templates.get(driver.default_template, []))
+    metric_cmds = await _resolve_template_cmds(db, asset, template)
     custom_cmds = list(commands) if (kind == "custom" and commands) else []
     emit({"type": "start", "asset_id": asset.id, "asset_name": asset_name})
 

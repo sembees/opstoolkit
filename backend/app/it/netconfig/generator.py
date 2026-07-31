@@ -143,7 +143,8 @@ def _build_netplan(req):
     out.append("# /etc/netplan/99-opstk.yaml")
     out.append("network:")
     out.append("  version: 2")
-    out.append("  renderer: NetworkManager")
+    renderer = getattr(req, "netplan_renderer", "networkd") or "networkd"
+    out.append(f"  renderer: {renderer}")
     out.append("  ethernets:")
     ind = "    "
     for o in req.interfaces:

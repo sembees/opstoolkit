@@ -1,16 +1,17 @@
 <template>
   <div>
+    <!-- 巡检控制区 -->
     <el-card shadow="never" style="margin-bottom: 16px">
       <el-form label-width="90px">
         <el-row :gutter="16">
-          <el-col :span="14">
+          <el-col :span="12">
             <el-form-item label="选择设备">
               <el-select v-model="selectedAssets" multiple filterable placeholder="选择 CT 设备" style="width: 100%">
-                <el-option v-for="a in ctAssets" :key="a.id" :label="`${a.name} (${a.host})`" :value="a.id" />
+                <el-option v-for="a in ctAssets" :key="a.id" :label="a.name + ' (' + a.host + ')'" :value="a.id" />
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="10">
+          <el-col :span="7">
             <el-form-item label="巡检模式">
               <el-radio-group v-model="mode">
                 <el-radio-button label="default">默认巡检</el-radio-button>
@@ -18,24 +19,38 @@
               </el-radio-group>
             </el-form-item>
           </el-col>
+          <el-col :span="5">
+            <el-form-item label=" ">
+              <el-button type="primary" :loading="running" :disabled="!selectedAssets.length" @click="startInspection">
+                <el-icon><VideoPlay /></el-icon> 开始巡检
+              </el-button>
+              <el-button @click="clearOutput" :disabled="running"><el-icon><Delete /></el-icon> 清屏</el-button>
+            </el-form-item>
+          </el-col>
         </el-row>
-        <el-form-item label="自定义命令" v-if="mode === 'custom'">
-          <el-input v-model="customCommands" type="textarea" :rows="4" placeholder="每行一条命令，例如&#10;display cpu-usage&#10;display interface brief" />
-        </el-form-item>
-        <el-form-item v-if="mode === 'default' && templatesLoaded">
-          <el-alert type="info" :closable="false" show-icon>
-            默认巡检将根据设备厂商自动下发关键指标命令（CPU 内存 接口 电源风扇 告警日志等）
-          </el-alert>
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" :loading="running" :disabled="!selectedAssets.length" @click="startInspection">
-            <el-icon><VideoPlay /></el-icon> 开始巡检
+
+        <!-- 默认巡检：选模板 -->
+        <el-form-item label="巡检模板" v-if="mode === 'default'">
+          <el-select v-model="selectedTemplateId" clearable placeholder="自动匹配厂商默认模板" style="width: 420px" @change="onTemplateChange">
+            <el-option-group v-for="(tpls, vendor) in groupedTemplates" :key="vendor" :label="vendorLabel(vendor)">
+              <el-option v-for="t in tpls" :key="t.id" :value="t.id" :label="t.name + (t.is_system ? ' (系统)' : ' (自定义)') + ' - ' + t.items.length + '项'" />
+            </el-option-group>
+          </el-select>
+          <el-button type="info" plain size="small" style="margin-left: 12px" @click="loadTemplates(); templateDrawer = true">
+            <el-icon><Setting /></el-icon> 模板管理
           </el-button>
-          <el-button @click="clearOutput" :disabled="running"><el-icon><Delete /></el-icon> 清屏</el-button>
+          <el-tag v-if="currentTemplate" size="small" style="margin-left: 8px" :type="currentTemplate.is_system ? 'info' : 'warning'">
+            {{ currentTemplate.vendor }} | {{ currentTemplate.items.length }} 项指标
+          </el-tag>
+        </el-form-item>
+
+        <el-form-item label="自定义命令" v-if="mode === 'custom'">
+          <el-input v-model="customCommands" type="textarea" :rows="4" placeholder="每行一条命令" />
         </el-form-item>
       </el-form>
     </el-card>
 
+    <!-- 实时输出 -->
     <el-card shadow="never" v-show="outputLines.length" style="margin-bottom: 16px">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center">
@@ -49,6 +64,7 @@
       </div>
     </el-card>
 
+    <!-- 巡检结果 -->
     <el-card shadow="never" v-if="results.length">
       <template #header><span style="font-weight: 600"><el-icon><DataAnalysis /></el-icon> 巡检结果</span></template>
       <el-collapse v-model="activeResults">
@@ -80,26 +96,101 @@
       </el-collapse>
     </el-card>
 
+    <!-- 原文详情弹窗 -->
     <el-dialog v-model="rawDialogVisible" :title="rawDetail ? rawDetail.label : ''" width="720px">
       <div class="terminal-output" style="max-height: 400px">
         <div class="terminal-line-info">{{ rawDetail ? rawDetail.output : '' }}</div>
       </div>
-      <div v-if="rawDetail && rawDetail.parsed && Array.isArray(rawDetail.parsed) && rawDetail.parsed.length" style="margin-top: 12px; color: #909399">
-        {{ rawDetail.parsed.length }} 条结构化数据
+    </el-dialog>
+
+    <!-- 模板管理抽屉 -->
+    <el-drawer v-model="templateDrawer" title="巡检模板管理" size="640px">
+      <div style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center">
+        <el-select v-model="tplFilterVendor" placeholder="全部厂商" clearable size="small" style="width: 140px" @change="loadTemplates">
+          <el-option label="H3C" value="h3c" /><el-option label="华为" value="huawei" /><el-option label="思科" value="cisco" />
+        </el-select>
+        <el-button type="primary" size="small" @click="openTplEdit(null)"><el-icon><Plus /></el-icon> 新建模板</el-button>
       </div>
+      <el-table :data="templates" size="small" stripe>
+        <el-table-column prop="name" label="模板名称" min-width="120" />
+        <el-table-column prop="vendor" label="厂商" width="70">
+          <template #default="{ row }">{{ vendorLabel(row.vendor) }}</template>
+        </el-table-column>
+        <el-table-column label="指标" width="55">
+          <template #default="{ row }">{{ row.items.length }}</template>
+        </el-table-column>
+        <el-table-column label="类型" width="70">
+          <template #default="{ row }">
+            <el-tag :type="row.is_system ? 'info' : 'success'" size="small">{{ row.is_system ? '系统' : '自定义' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="190" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" @click="openTplView(row)">查看</el-button>
+            <el-button link type="primary" size="small" @click="cloneTpl(row)">克隆</el-button>
+            <el-button link type="warning" size="small" :disabled="row.is_system" @click="openTplEdit(row)">编辑</el-button>
+            <el-popconfirm title="确定删除?" @confirm="delTpl(row.id)">
+              <template #reference><el-button link type="danger" size="small" :disabled="row.is_system">删除</el-button></template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
+
+    <!-- 模板查看弹窗 -->
+    <el-dialog v-model="tplViewVisible" :title="(tplViewData ? tplViewData.name : '') + ' - 指标详情'" width="720px">
+      <el-table :data="tplViewData ? tplViewData.items : []" size="small" stripe>
+        <el-table-column type="index" width="40" />
+        <el-table-column prop="label" label="指标名" width="140" />
+        <el-table-column prop="command" label="下发命令" min-width="220" />
+        <el-table-column prop="key" label="标识" width="100" />
+        <el-table-column prop="textfsm" label="解析模板" width="160" />
+      </el-table>
+    </el-dialog>
+
+    <!-- 模板编辑弹窗 -->
+    <el-dialog v-model="tplEditVisible" :title="tplEditingId ? '编辑模板' : '新建模板'" width="820px" :close-on-click-modal="false">
+      <el-form label-width="70px">
+        <el-row :gutter="12">
+          <el-col :span="12"><el-form-item label="名称"><el-input v-model="tplForm.name" /></el-form-item></el-col>
+          <el-col :span="6">
+            <el-form-item label="厂商">
+              <el-select v-model="tplForm.vendor" style="width: 100%">
+                <el-option label="H3C" value="h3c" /><el-option label="华为" value="huawei" /><el-option label="思科" value="cisco" /><el-option label="通用" value="generic" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="6"><el-form-item label="备注"><el-input v-model="tplForm.description" /></el-form-item></el-col>
+        </el-row>
+        <div style="margin-bottom: 8px; font-size: 13px; color: #606266; font-weight: 600">巡检指标项（可增删改命令）</div>
+        <el-table :data="tplForm.items" size="small" stripe border>
+          <el-table-column type="index" width="38" />
+          <el-table-column label="指标标识" width="120"><template #default="{ row }"><el-input v-model="row.key" size="small" /></template></el-table-column>
+          <el-table-column label="显示名" width="120"><template #default="{ row }"><el-input v-model="row.label" size="small" /></template></el-table-column>
+          <el-table-column label="下发命令" min-width="200"><template #default="{ row }"><el-input v-model="row.command" size="small" /></template></el-table-column>
+          <el-table-column label="TextFSM" width="150"><template #default="{ row }"><el-input v-model="row.textfsm" size="small" placeholder="可选" /></template></el-table-column>
+          <el-table-column label="操作" width="50"><template #default="{ $index }"><el-button link type="danger" size="small" @click="tplForm.items.splice($index,1)"><el-icon><Delete /></el-icon></el-button></template></el-table-column>
+        </el-table>
+        <el-button plain size="small" style="margin-top: 8px" @click="tplForm.items.push({ key: '', label: '', command: '', textfsm: '', unit: '' })"><el-icon><Plus /></el-icon> 添加指标</el-button>
+      </el-form>
+      <template #footer>
+        <el-button @click="tplEditVisible = false">取消</el-button>
+        <el-button type="primary" :loading="tplSaving" @click="saveTpl">保存模板</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import http from '../api'
+import { ElMessage } from 'element-plus'
 
 const ctAssets = ref([])
 const selectedAssets = ref([])
 const mode = ref('default')
 const customCommands = ref('')
-const templatesLoaded = ref(false)
+const selectedTemplateId = ref('')
 const running = ref(false)
 const completed = ref(false)
 const outputLines = ref([])
@@ -108,6 +199,32 @@ const activeResults = ref([])
 const terminalRef = ref()
 const rawDialogVisible = ref(false)
 const rawDetail = ref(null)
+
+// 模板管理状态
+const templateDrawer = ref(false)
+const templates = ref([])
+const tplFilterVendor = ref('')
+const tplViewVisible = ref(false)
+const tplViewData = ref(null)
+const tplEditVisible = ref(false)
+const tplEditingId = ref(null)
+const tplSaving = ref(false)
+const tplForm = reactive({ name: '', vendor: 'h3c', description: '', items: [] })
+
+const groupedTemplates = computed(() => {
+  const g = {}
+  for (const t of templates.value) {
+    if (!g[t.vendor]) g[t.vendor] = []
+    g[t.vendor].push(t)
+  }
+  return g
+})
+
+const currentTemplate = computed(() => templates.value.find(t => t.id === selectedTemplateId.value))
+
+function vendorLabel(v) {
+  return { h3c: 'H3C', huawei: '华为', cisco: '思科', generic: '通用' }[v] || v
+}
 
 function statusColor(s) {
   return { ok: '#52c41a', warning: '#faad14', critical: '#ff4d4f', unknown: '#909399' }[s] || '#909399'
@@ -118,44 +235,87 @@ function pushLine(text, type) {
   nextTick(() => { if (terminalRef.value) terminalRef.value.scrollTop = terminalRef.value.scrollHeight })
 }
 
-function clearOutput() {
-  outputLines.value = []
-  results.value = []
-  completed.value = false
+function clearOutput() { outputLines.value = []; results.value = []; completed.value = false }
+function showRaw(row) { rawDetail.value = row; rawDialogVisible.value = true }
+
+function onTemplateChange() {
+  if (currentTemplate.value) ElMessage.info('已选模板: ' + currentTemplate.value.name + ' (' + currentTemplate.value.items.length + ' 项)')
 }
 
-function showRaw(row) {
-  rawDetail.value = row
-  rawDialogVisible.value = true
+async function loadTemplates() {
+  try {
+    const q = tplFilterVendor.value ? ('?vendor=' + tplFilterVendor.value) : ''
+    templates.value = await http.get('/ct/inspection/templates/list' + q)
+  } catch (e) { /* handled */ }
+}
+
+function openTplView(row) { tplViewData.value = row; tplViewVisible.value = true }
+
+function openTplEdit(row) {
+  tplForm.name = ''
+  tplForm.vendor = 'h3c'
+  tplForm.description = ''
+  tplForm.items = []
+  tplEditingId.value = null
+  if (row) {
+    tplEditingId.value = row.id
+    tplForm.name = row.name
+    tplForm.vendor = row.vendor
+    tplForm.description = row.description
+    tplForm.items = row.items.map(i => ({ key: i.key, label: i.label, command: i.command, textfsm: i.textfsm || '', unit: i.unit || '' }))
+  }
+  tplEditVisible.value = true
+}
+
+async function saveTpl() {
+  if (!tplForm.name) { ElMessage.warning('请输入模板名称'); return }
+  if (!tplForm.items.length) { ElMessage.warning('请至少添加一个指标'); return }
+  tplSaving.value = true
+  try {
+    const payload = { name: tplForm.name, vendor: tplForm.vendor, description: tplForm.description, items: tplForm.items }
+    if (tplEditingId.value) await http.put('/ct/inspection/templates/' + tplEditingId.value, payload)
+    else await http.post('/ct/inspection/templates', payload)
+    ElMessage.success('保存成功')
+    tplEditVisible.value = false
+    loadTemplates()
+  } finally { tplSaving.value = false }
+}
+
+async function cloneTpl(row) {
+  await http.post('/ct/inspection/templates/' + row.id + '/clone')
+  ElMessage.success('克隆成功')
+  loadTemplates()
+}
+
+async function delTpl(id) {
+  await http.delete('/ct/inspection/templates/' + id)
+  ElMessage.success('已删除')
+  loadTemplates()
 }
 
 async function startInspection() {
   clearOutput()
   running.value = true
-  const commands = mode.value === 'custom'
-    ? customCommands.value.split('\n').map(c => c.trim()).filter(Boolean)
-    : null
-
+  const commands = mode.value === 'custom' ? customCommands.value.split('\n').map(c => c.trim()).filter(Boolean) : null
+  const tmpl = currentTemplate.value
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const wsUrl = wsProto + '://' + location.host + '/api/ct/inspection/ws'
-  const ws = new WebSocket(wsUrl)
+  const ws = new WebSocket(wsProto + '://' + location.host + '/api/ct/inspection/ws')
 
   ws.onopen = () => {
     pushLine('[连接已建立] 开始巡检 ' + selectedAssets.value.length + ' 台设备...', 'info')
-    ws.send(JSON.stringify({
-      asset_ids: selectedAssets.value,
-      kind: mode.value,
-      commands: commands,
-    }))
+    const payload = { asset_ids: selectedAssets.value, kind: mode.value, commands: commands }
+    if (mode.value === 'default' && tmpl) {
+      payload.template = tmpl.name
+      pushLine('[模板] ' + tmpl.vendor + ' / ' + tmpl.name + ' (' + tmpl.items.length + ' 项)', 'info')
+    }
+    ws.send(JSON.stringify(payload))
   }
 
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data)
     if (msg.type === 'start') pushLine('\n--- ' + msg.asset_name + ' ---', 'info')
     else if (msg.type === 'cmd') pushLine('> ' + msg.cmd, 'cmd')
-    else if (msg.type === 'output') {
-      msg.output.split('\n').forEach(l => { if (l.trim()) pushLine(l, 'info') })
-    }
+    else if (msg.type === 'output') msg.output.split('\n').forEach(l => { if (l.trim()) pushLine(l, 'info') })
     else if (msg.type === 'error') pushLine('[ERROR] ' + msg.error, 'err')
     else if (msg.type === 'done') pushLine('[完成] ' + msg.asset_name, 'ok')
     else if (msg.type === 'complete') {
@@ -166,10 +326,7 @@ async function startInspection() {
       pushLine('\n=== 全部巡检完成 ===', 'ok')
       ws.close()
     }
-    else if (msg.type === 'fatal') {
-      pushLine('[FATAL] ' + msg.error, 'err')
-      running.value = false
-    }
+    else if (msg.type === 'fatal') { pushLine('[FATAL] ' + msg.error, 'err'); running.value = false }
   }
 
   ws.onerror = () => { pushLine('[WebSocket 连接失败]', 'err'); running.value = false }
@@ -179,8 +336,7 @@ async function startInspection() {
 onMounted(async () => {
   try {
     ctAssets.value = await http.get('/assets?category=ct')
-    await http.get('/ct/inspection/templates')
-    templatesLoaded.value = true
-  } catch (e) { /* handled by interceptor */ }
+    await loadTemplates()
+  } catch (e) { /* handled */ }
 })
 </script>

@@ -19,6 +19,13 @@
                 </el-select>
               </el-form-item>
             </el-col>
+            <el-col :span="8" v-if="config.os === 'ubuntu' && config.format === 'netplan'">
+              <el-form-item label="后端引擎">
+                <el-select v-model="config.netplan_renderer">
+                  <el-option v-for="r in meta.netplan_renderers" :key="r.id" :label="r.name" :value="r.id" />
+                </el-select>
+              </el-form-item>
+            </el-col>
             <el-col :span="8">
               <el-form-item label="主机名"><el-input v-model="config.hostname" placeholder="web01" /></el-form-item>
             </el-col>
@@ -118,13 +125,13 @@ import { ref, reactive, onMounted } from 'vue'
 import http from '../api'
 import { ElMessage } from 'element-plus'
 
-const meta = reactive({ os_options: [], formats: [], bond_modes: [] })
+const meta = reactive({ os_options: [], formats: [], bond_modes: [], netplan_renderers: [] })
 const loading = ref(false)
 const script = ref('')
 const filename = ref('')
 
 const config = reactive({
-  os: 'rhel', format: 'nmcli', hostname: '',
+  os: 'rhel', format: 'nmcli', hostname: '', netplan_renderer: 'networkd',
   interfaces: [], bonds: [], vlans: [], bridges: [],
 })
 
@@ -138,7 +145,7 @@ function onOsChange() { if (config.os !== 'ubuntu') config.format = 'nmcli' }
 function buildPayload() {
   const parseDns = (t) => (t || '').split(',').map(s => s.trim()).filter(Boolean)
   return {
-    os: config.os, hostname: config.hostname || null, format: config.format,
+    os: config.os, hostname: config.hostname || null, format: config.format, netplan_renderer: config.netplan_renderer,
     interfaces: config.interfaces.map(i => ({ name: i.name, mode: i.mode, ip: i.ip || null, cidr: i.cidr, gateway: i.gateway || null, dns: parseDns(i.dnsText) })),
     bonds: config.bonds.map(b => ({ name: b.name, mode: b.mode, interfaces: (b.ifaceText || '').split(',').map(s => s.trim()).filter(Boolean), ip: b.ip || null, cidr: b.cidr, gateway: b.gateway || null, miimon: b.miimon, primary: b.primary || null, dns: parseDns(b.dnsText) })),
     vlans: config.vlans.map(v => ({ parent: v.parent, vlan_id: v.vlan_id, mode: 'static', ip: v.ip || null, cidr: v.cidr, gateway: v.gateway || null })),

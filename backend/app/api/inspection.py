@@ -3,13 +3,13 @@ import asyncio
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crud, models
 from app.core.auth import get_current_user
-from app.core.schemas import InspectionCreate, InspectionResultOut, InspectionTaskOut
+from app.core.schemas import InspectionCreate, InspectionResultOut, InspectionTaskOut, InspectionTemplateIn, InspectionTemplateOut
 from app.ct.drivers import DRIVERS, get_driver
 from app.ct.drivers.base import MetricCommand
 from app.ct.inspection.service import inspect_many, inspect_one
@@ -119,3 +119,64 @@ async def list_tasks(db: AsyncSession = Depends(get_db), _user=Depends(get_curre
 async def get_task_results(task_id: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     res = await db.execute(select(models.InspectionResult).where(models.InspectionResult.task_id == task_id))
     return list(res.scalars().all())
+
+
+# ---------- 巡检模板管理 ----------
+@router.get('/templates/list', response_model=list[InspectionTemplateOut])
+async def list_templates_db(vendor: str = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    stmt = select(models.InspectionTemplate).order_by(models.InspectionTemplate.vendor, models.InspectionTemplate.created_at)
+    if vendor:
+        stmt = stmt.where(models.InspectionTemplate.vendor == vendor)
+    res = await db.execute(stmt)
+    return list(res.scalars().all())
+
+
+@router.post('/templates', response_model=InspectionTemplateOut)
+async def create_template(body: InspectionTemplateIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    t = models.InspectionTemplate(name=body.name, vendor=body.vendor, is_system=False,
+        items=[it.model_dump() for it in body.items], description=body.description)
+    db.add(t)
+    await db.commit()
+    await db.refresh(t)
+    return t
+
+
+@router.put('/templates/{tid}', response_model=InspectionTemplateOut)
+async def update_template(tid: str, body: InspectionTemplateIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    t = await db.get(models.InspectionTemplate, tid)
+    if not t:
+        raise HTTPException(status_code=404, detail='模板不存在')
+    if t.is_system:
+        raise HTTPException(status_code=403, detail='系统内置模板不可编辑，请先克隆')
+    t.name = body.name
+    t.vendor = body.vendor
+    t.items = [it.model_dump() for it in body.items]
+    t.description = body.description
+    await db.commit()
+    await db.refresh(t)
+    return t
+
+
+@router.post('/templates/{tid}/clone', response_model=InspectionTemplateOut)
+async def clone_template(tid: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    src = await db.get(models.InspectionTemplate, tid)
+    if not src:
+        raise HTTPException(status_code=404, detail='模板不存在')
+    t = models.InspectionTemplate(name=src.name + ' (副本)', vendor=src.vendor, is_system=False,
+        items=list(src.items), description=src.description)
+    db.add(t)
+    await db.commit()
+    await db.refresh(t)
+    return t
+
+
+@router.delete('/templates/{tid}')
+async def delete_template(tid: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    t = await db.get(models.InspectionTemplate, tid)
+    if not t:
+        return {'ok': True}
+    if t.is_system:
+        raise HTTPException(status_code=403, detail='系统内置模板不可删除')
+    await db.delete(t)
+    await db.commit()
+    return {'ok': True}

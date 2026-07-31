@@ -67,6 +67,20 @@ class Asset(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class InspectionTemplate(Base):
+    """巡检模板：系统默认(只读) + 用户自定义(可编辑)。items 是 [{key,label,command,textfsm,unit}] 列表。"""
+    __tablename__ = "inspection_templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    vendor: Mapped[str] = mapped_column(String(32), default="")    # h3c / huawei / cisco / generic
+    is_system: Mapped[bool] = mapped_column(default=False)            # True=系统默认只读
+    items: Mapped[list] = mapped_column(JSON, default=list)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class InspectionTask(Base):
     """一次巡检任务（可对多台设备）。"""
     __tablename__ = "inspection_tasks"

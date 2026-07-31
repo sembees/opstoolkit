@@ -128,6 +128,32 @@ class InspectionTaskOut(ORMBase):
     finished_at: Optional[datetime] = None
 
 
+# ---------- 巡检模板 ----------
+class TemplateItemIn(BaseModel):
+    key: str = ""
+    label: str = ""
+    command: str = ""
+    textfsm: str = ""
+    unit: str = ""
+
+
+class InspectionTemplateIn(BaseModel):
+    name: str
+    vendor: str = ""
+    items: list[TemplateItemIn] = []
+    description: str = ""
+
+
+class InspectionTemplateOut(ORMBase):
+    id: str
+    name: str
+    vendor: str
+    is_system: bool = False
+    items: list = []
+    description: str = ""
+    created_at: Optional[datetime] = None
+
+
 # ---------- IT 网络配置生成 ----------
 class NetInterfaceIn(BaseModel):
     name: str                       # 网卡名 eth0 / ens33 / eno1
@@ -179,6 +205,7 @@ class NetConfigRequest(BaseModel):
     vlans: list[NetVlanIn] = []
     bridges: list[NetBridgeIn] = []
     format: str = "nmcli"           # nmcli / netplan(仅ubuntu)
+    netplan_renderer: str = "networkd"  # networkd(服务器推荐) / NetworkManager(无线/动态)
 
 
 class NetConfigResult(BaseModel):
