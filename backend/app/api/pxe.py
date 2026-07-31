@@ -1,4 +1,6 @@
 """PXE 装机接口。"""
+from __future__ import annotations
+
 import socket
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -182,6 +184,11 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
         deploy_mode=body.get("deploy_mode", "standalone"),
     )
     cfg.hostname = body.get("hostname", "default")
+    # 部署时自动检测的网络配置覆盖
+    if body.get("net_config"):
+        merged = dict(cfg.net_config or {})
+        merged.update(body["net_config"])
+        cfg.net_config = merged
     installs = list(body.get("installs", []))
     return generate_all(cfg, installs)
 
@@ -219,6 +226,11 @@ async def deploy_to_host(pid: str, body: dict = None, db: AsyncSession = Depends
     body = body or {}
     if not body.get("server_ip"):
         body["server_ip"] = _local_ip()
+    # 自动检测本机网络 (Linux)
+    net = pxe_server.detect_network()
+    if net:
+        body.setdefault("server_ip", net.get("server_ip") or _local_ip())
+        body["net_config"] = net
     body["http_root"] = "http://" + body["server_ip"] + ":8000/pxe/serve"
     files = await _gen_pxe_files(pid, body, db)
     return pxe_server.deploy_files(files, pid)

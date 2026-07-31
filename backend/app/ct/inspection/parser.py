@@ -1,4 +1,6 @@
 """命令输出解析：ntc-templates 优先，回退自定义 TextFSM，再回退关键指标正则，最后原文摘要。"""
+from __future__ import annotations
+
 import re
 from pathlib import Path
 

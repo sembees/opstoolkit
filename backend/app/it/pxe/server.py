@@ -51,6 +51,57 @@ def sudo_ok() -> bool:
     return rc == 0
 
 
+
+def detect_network() -> dict:
+    """检测本机主要网卡: 接口名、IP、网关、DHCP 范围。"""
+    if not is_linux():
+        return {}
+    import ipaddress
+    # 1. 默认路由 -> 网卡名 + 网关
+    rc, out, _ = _run(["ip", "route", "show", "default"])
+    iface = ""
+    gateway = ""
+    for line in out.splitlines():
+        parts = line.split()
+        for i, p in enumerate(parts):
+            if p == "via" and i + 1 < len(parts):
+                gateway = parts[i + 1]
+            elif p == "dev" and i + 1 < len(parts):
+                iface = parts[i + 1]
+        break
+    if not iface:
+        return {}
+    # 2. 该网卡的 IP/前缀
+    rc, out, _ = _run(["ip", "-o", "-f", "inet", "addr", "show", iface])
+    ip_addr = ""
+    for line in out.splitlines():
+        for tok in line.split():
+            if "/" in tok and tok[0].isdigit():
+                ip_addr = tok
+                break
+        break
+    # 3. 计算网段 + DHCP 范围 (后 1/4)
+    server_ip = ip_addr.split("/")[0] if ip_addr else ""
+    dhcp_start = ""
+    dhcp_end = ""
+    try:
+        net = ipaddress.ip_network(ip_addr, strict=False)
+        hosts = list(net.hosts())
+        if len(hosts) > 10:
+            dhcp_start = str(hosts[len(hosts) * 3 // 4])
+            dhcp_end = str(hosts[-2])
+    except Exception:
+        pass
+    return {
+        "interface": iface,
+        "gateway": gateway,
+        "server_ip": server_ip,
+        "dhcp_start": dhcp_start,
+        "dhcp_end": dhcp_end,
+        "dns_server": gateway,
+    }
+
+
 def prepare_dirs() -> list:
     """创建 TFTP / HTTP 目录并设置属主。"""
     log = []
@@ -64,6 +115,22 @@ def prepare_dirs() -> list:
         log.append("已调整目录属主")
     else:
         log.append("调整属主跳过(可能需 root): " + err.strip()[:60])
+    # SELinux: 确保 TFTP 目录有正确的安全上下文 (Rocky/RHEL)
+    _selinux_fix(log)
+    return log
+
+
+def _selinux_fix(log=None):
+    """修复 SELinux 上下文，使 dnsmasq TFTP 能访问 /srv/tftp。"""
+    log = log if log is not None else []
+    rc, out, _ = _run(["getenforce"])
+    if out.strip() != "Enforcing":
+        return log
+    # 持久 fcontext 规则 (忽略已存在的报错)
+    _run(["semanage", "fcontext", "-a", "-t", "tftpdir_t", TFTP_ROOT + "(/.*)?"], sudo=True)
+    rc2, _, _ = _run(["restorecon", "-R", TFTP_ROOT], sudo=True)
+    if rc2 == 0:
+        log.append("SELinux 上下文已修复 (tftpdir_t)")
     return log
 
 

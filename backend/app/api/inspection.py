@@ -1,4 +1,6 @@
 """CT 巡检接口：默认巡检、自定义命令、WebSocket 实时回显、任务查询。"""
+from __future__ import annotations
+
 import asyncio
 import json
 from datetime import datetime

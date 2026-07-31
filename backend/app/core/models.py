@@ -1,4 +1,6 @@
 """ORM 模型：用户、资产、凭据、巡检任务、巡检结果。"""
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
 from typing import Optional

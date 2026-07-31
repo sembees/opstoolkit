@@ -1,4 +1,6 @@
 """数据库访问函数。"""
+from __future__ import annotations
+
 from typing import Optional
 
 from sqlalchemy import select

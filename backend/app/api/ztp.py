@@ -1,4 +1,6 @@
 """CT ZTP 开局接口。"""
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

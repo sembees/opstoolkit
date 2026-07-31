@@ -4,6 +4,8 @@
 (passlib 1.7.4 仍用 bcrypt.__about__.__version__,该属性在新版已被移除)。
 bcrypt 的密码上限为 72 字节,这里统一截断。
 """
+from __future__ import annotations
+
 import bcrypt
 from datetime import datetime, timedelta, timezone
 from typing import Any

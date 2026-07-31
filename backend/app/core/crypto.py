@@ -1,4 +1,6 @@
 """凭证加解密（Fernet 对称加密）。首次启动自动生成密钥。"""
+from __future__ import annotations
+
 import os
 
 from cryptography.fernet import Fernet
