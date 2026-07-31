@@ -1,0 +1,8 @@
+Value USED_PERCENT (\d+)
+Value FREE_PERCENT (\d+)
+
+Start
+  ^.*Used:\s*\d+%,\s*Free:\s*\d+%.* -> Continue
+  ^(\d+)%.*?(\d+)% -> Record
+  ^.*Mem:\s*\d+\s+\d+\s+\d+\s+(\d+)% -> Record
+  ^. -> Continue

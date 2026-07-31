@@ -1,0 +1,8 @@
+Value FIVE_SEC (\d+)
+Value ONE_MIN (\d+)
+Value FIVE_MIN (\d+)
+
+Start
+  ^Five seconds:\s*${FIVE_SEC}%.*one minute:\s*${ONE_MIN}%.*five minutes:\s*${FIVE_MIN}% -> Record
+  ^五秒.*?(\d+).*?一分钟.*?(\d+).*?五分钟.*?(\d+) -> Continue
+  ^. -> Continue

@@ -1,0 +1,10 @@
+Value INTERFACE (\S+)
+Value LINK (\S+)
+Value SPEED (\S+)
+Value DUPLEX (\S+)
+Value TYPE (\S+)
+Value DESCRIPTION (.*)
+
+Start
+  ^\s*${INTERFACE}\s+${LINK}\s+${SPEED}\s+${DUPLEX}\s+${TYPE}\s+${DESCRIPTION} -> Record
+  ^. -> Continue

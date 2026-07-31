@@ -1,0 +1,187 @@
+"""Pydantic 请求/响应模型。"""
+from datetime import datetime
+from typing import Any, Optional
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ORMBase(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- 认证 ----------
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    display_name: str = ""
+    role: str = "admin"
+
+
+# ---------- 凭据 ----------
+class CredentialIn(BaseModel):
+    name: str
+    username: str
+    password: Optional[str] = None
+    ssh_key: Optional[str] = None
+    enable_secret: Optional[str] = None
+    device_type: str = ""
+    port: int = 22
+    remark: str = ""
+
+
+class CredentialOut(ORMBase):
+    id: str
+    name: str
+    username: str
+    device_type: str
+    port: int
+    remark: str
+    has_password: bool = False
+    has_ssh_key: bool = False
+    created_at: Optional[datetime] = None
+
+
+# ---------- 资产 ----------
+class AssetIn(BaseModel):
+    name: str
+    category: str  # ct / it
+    vendor: str = ""
+    device_role: str = ""
+    host: str
+    port: int = 22
+    device_type: str = ""
+    serial: Optional[str] = None
+    mac: Optional[str] = None
+    location: Optional[str] = None
+    tags: dict[str, Any] = {}
+    remark: str = ""
+    credential_id: Optional[str] = None
+
+
+class AssetOut(ORMBase):
+    id: str
+    name: str
+    category: str
+    vendor: str
+    device_role: str
+    host: str
+    port: int
+    device_type: str
+    serial: Optional[str] = None
+    mac: Optional[str] = None
+    location: Optional[str] = None
+    tags: dict[str, Any] = {}
+    remark: str = ""
+    credential_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+# ---------- 巡检 ----------
+class InspectionCreate(BaseModel):
+    name: str
+    kind: str = "default"        # default / custom
+    template: Optional[str] = None
+    commands: Optional[list[str]] = None
+    asset_ids: list[str] = []
+
+
+class CommandExecIn(BaseModel):
+    """自定义命令即时执行。"""
+    asset_ids: list[str]
+    commands: list[str]
+    disable_pager: bool = True
+
+
+class MetricItem(BaseModel):
+    label: str
+    value: Any
+    status: str = "ok"   # ok / warning / critical / unknown
+    raw_key: str = ""
+
+
+class InspectionResultOut(ORMBase):
+    id: str
+    asset_id: str
+    asset_name: str
+    status: str
+    error: str
+    metrics: dict[str, Any] = {}
+    raw: list[dict[str, Any]] = []
+    created_at: Optional[datetime] = None
+
+
+class InspectionTaskOut(ORMBase):
+    id: str
+    name: str
+    kind: str
+    template: Optional[str] = None
+    commands: Optional[list[str]] = None
+    asset_ids: list[str] = []
+    status: str
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+# ---------- IT 网络配置生成 ----------
+class NetInterfaceIn(BaseModel):
+    name: str                       # 网卡名 eth0 / ens33 / eno1
+    mode: str = "static"            # static / dhcp
+    ip: Optional[str] = None
+    netmask: Optional[str] = None   # 或 cidr
+    cidr: Optional[int] = None
+    gateway: Optional[str] = None
+    dns: list[str] = []
+
+
+class NetBondIn(BaseModel):
+    name: str                       # bond0
+    mode: int = 1                   # 0..6
+    interfaces: list[str]           # 从接口
+    ip: Optional[str] = None
+    netmask: Optional[str] = None
+    cidr: Optional[int] = None
+    gateway: Optional[str] = None
+    dns: list[str] = []
+    miimon: int = 100
+    primary: Optional[str] = None   # active-backup 主接口
+
+
+class NetVlanIn(BaseModel):
+    parent: str                     # 父接口
+    vlan_id: int
+    mode: str = "static"
+    ip: Optional[str] = None
+    netmask: Optional[str] = None
+    cidr: Optional[int] = None
+    gateway: Optional[str] = None
+
+
+class NetBridgeIn(BaseModel):
+    name: str                       # br0
+    interfaces: list[str]
+    ip: Optional[str] = None
+    netmask: Optional[str] = None
+    cidr: Optional[int] = None
+    gateway: Optional[str] = None
+
+
+class NetConfigRequest(BaseModel):
+    os: str                          # ubuntu / rhel
+    hostname: Optional[str] = None
+    interfaces: list[NetInterfaceIn] = []
+    bonds: list[NetBondIn] = []
+    vlans: list[NetVlanIn] = []
+    bridges: list[NetBridgeIn] = []
+    format: str = "nmcli"           # nmcli / netplan(仅ubuntu)
+
+
+class NetConfigResult(BaseModel):
+    script: str
+    format: str
+    filename: str

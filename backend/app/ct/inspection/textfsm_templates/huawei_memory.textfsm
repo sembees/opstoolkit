@@ -1,0 +1,6 @@
+Value MEMORY_USAGE (\d+)
+
+Start
+  ^.*Memory Using Percentage.*?${MEMORY_USAGE}%.* -> Record
+  ^.*Memory utilization.*?${MEMORY_USAGE}%.* -> Record
+  ^. -> Continue

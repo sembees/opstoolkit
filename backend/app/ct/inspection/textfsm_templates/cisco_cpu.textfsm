@@ -1,0 +1,8 @@
+Value FIVE_SEC (\d+)
+Value ONE_MIN (\d+)
+Value FIVE_MIN (\d+)
+
+Start
+  ^.*five seconds:\s*${FIVE_SEC}%.*one minute:\s*${ONE_MIN}%.*five minutes:\s*${FIVE_MIN}%.* -> Record
+  ^.*CPU utilization.*?five seconds:\s*${FIVE_SEC}%.*one minute:\s*${ONE_MIN}%.*five minutes:\s*${FIVE_MIN}%.* -> Record
+  ^. -> Continue

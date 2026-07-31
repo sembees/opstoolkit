@@ -1,0 +1,15 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #app { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+.terminal-output {
+  background: #1a1a2e; color: #e0e0e0; font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px; line-height: 1.6; padding: 16px; border-radius: 6px;
+  overflow-y: auto; max-height: 480px; white-space: pre-wrap; word-break: break-all;
+}
+.terminal-line-cmd { color: #4fc3f7; }
+.terminal-line-ok { color: #81c784; }
+.terminal-line-warn { color: #ffb74d; }
+.terminal-line-err { color: #ef5350; }
+.terminal-line-info { color: #90a4ae; }
+.metric-card { text-align: center; }
+.metric-value { font-size: 28px; font-weight: 700; }
+.metric-label { font-size: 13px; color: #909399; margin-top: 4px; }

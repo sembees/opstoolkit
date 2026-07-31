@@ -1,0 +1,9 @@
+Value MODEL (\S+)
+Value VERSION (\S+)
+Value SERIAL (\S+)
+
+Start
+  ^.*Cisco.*Software.*Version\s+${VERSION} -> Record
+  ^.*cisco\s+${MODEL}.* -> Continue
+  ^.*Processor board ID\s+${SERIAL} -> Continue
+  ^. -> Continue

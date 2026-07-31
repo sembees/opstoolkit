@@ -1,0 +1,6 @@
+Value VERSION (\S+)
+Value UPTIME (.*)
+
+Start
+  ^.*Comware.*Software.*Version\s+${VERSION}.* -> Record
+  ^. -> Continue

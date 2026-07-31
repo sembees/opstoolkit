@@ -1,0 +1,8 @@
+Value SLOT (\S+)
+Value SENSOR (\S+)
+Value TEMPERATURE (\d+)
+
+Start
+  ^\s*${SLOT}\s+${SENSOR}\s+${TEMPERATURE}.* -> Record
+  ^.*hotspot.* -> Continue
+  ^. -> Continue

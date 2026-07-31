@@ -1,0 +1,7 @@
+Value SLOT (\S+)
+Value TYPE (\S+)
+Value STATE (\S+)
+
+Start
+  ^\s*${SLOT}\s+${TYPE}\s+${STATE}.* -> Record
+  ^. -> Continue

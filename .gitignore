@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+frontend/dist/
+
+# 数据与运行时
+backend/data/
+*.db
+*.db-journal
+.env
+backend/.env
+
+# 系统
+.DS_Store
+Thumbs.db
+*.log

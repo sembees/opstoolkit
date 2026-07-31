@@ -1,0 +1,11 @@
+Value INTERFACE (\S+)
+Value PHASE (\S+)
+Value PROTOCOL (\S+)
+Value INUTIL (\S+)
+Value OUTUTIL (\S+)
+Value INERRORS (\S+)
+Value OUTERRORS (\S+)
+
+Start
+  ^\s*${INTERFACE}\s+${PHASE}\s+${PROTOCOL}\s+${INUTIL}\s+${OUTUTIL}\s+${INERRORS}\s+${OUTERRORS} -> Record
+  ^. -> Continue

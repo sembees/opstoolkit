@@ -1,0 +1,5 @@
+Value CPU_USAGE (\d+)
+
+Start
+  ^.*CPU.*?(\d+)%. -> Record
+  ^. -> Continue
