@@ -165,6 +165,7 @@
           <el-col :span="8"><el-form-item label="服务器IP"><el-input v-model="genForm.server_ip" /></el-form-item></el-col>
           <el-col :span="8" style="text-align:right">
             <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> 生成文件</el-button>
+          <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
           </el-col>
         </el-row>
         <el-form-item label="临时设备" v-if="genForm.devices.length">
@@ -201,7 +202,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from "vue"
-import http from "../api"
+import http, { downloadZip } from "../api"
 import { ElMessage } from "element-plus"
 
 const templates = ref([])
@@ -360,6 +361,16 @@ async function doGenerate() {
     if (keys.length) activeFile.value = keys[0]
     ElMessage.success("生成完成: " + keys.length + " 个文件")
   } finally { generating.value = false }
+}
+
+async function doDownload() {
+  const tid = sessionStorage.getItem("ztp_template_id")
+  await downloadZip("/ct/ztp/templates/" + tid + "/download", {
+    deploy_mode: genForm.deploy_mode,
+    server_ip: genForm.server_ip,
+    devices: genForm.devices,
+  })
+  ElMessage.success("下载已开始")
 }
 
 async function loadTemplates() { templates.value = await http.get("/ct/ztp/templates") }

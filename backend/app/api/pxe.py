@@ -7,6 +7,7 @@ from app.core import crypto, models
 from app.core.auth import get_current_user
 from app.core.schemas import PxeGenerateResult, PxeInstallIn, PxeInstallOut, PxeProfileIn, PxeProfileOut
 from app.database import get_db
+from app.core.ziputil import files_to_zip_response
 from app.it.pxe.generator import PxeConfig, generate_all
 
 router = APIRouter()
@@ -151,8 +152,7 @@ async def delete_install(iid: str, db: AsyncSession = Depends(get_db), _user=Dep
 
 
 # ---------- 应答文件生成 ----------
-@router.post("/profiles/{pid}/generate", response_model=PxeGenerateResult)
-async def generate_files(pid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
     """生成全部 PXE 部署文件 (autoinstall/kickstart + iPXE + dnsmasq)。"""
     p = await db.get(models.PxeProfile, pid)
     if not p:
@@ -168,10 +168,18 @@ async def generate_files(pid: str, body: dict = None, db: AsyncSession = Depends
         deploy_mode=body.get("deploy_mode", "standalone"),
     )
     cfg.hostname = body.get("hostname", "default")
+    installs = list(body.get("installs", []))
+    return generate_all(cfg, installs)
 
-    installs = []
-    for inst_name in body.get("installs", []):
-        installs.append(inst_name)
 
-    files = generate_all(cfg, installs)
+@router.post("/profiles/{pid}/generate", response_model=PxeGenerateResult)
+async def generate_files(pid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    files = await _gen_pxe_files(pid, body, db)
     return {"files": files}
+
+
+@router.post("/profiles/{pid}/download")
+async def download_files(pid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """下载全部 PXE 部署文件 (zip 压缩包)。"""
+    files = await _gen_pxe_files(pid, body, db)
+    return files_to_zip_response(files, "pxe-deploy.zip")

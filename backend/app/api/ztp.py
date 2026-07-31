@@ -13,6 +13,7 @@ from app.core.schemas import (
     ZtpTemplateOut,
 )
 from app.database import get_db
+from app.core.ziputil import files_to_zip_response
 from app.ct.ztp.generator import ZtpDevice as GenDevice
 from app.ct.ztp.generator import ZtpProfile, generate_all
 
@@ -169,21 +170,18 @@ async def delete_device(did: str, db: AsyncSession = Depends(get_db), _user=Depe
 
 
 # ---------- 生成 ----------
-@router.post("/templates/{tid}/generate", response_model=ZtpGenerateResult)
-async def generate_files(tid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def _gen_ztp_files(tid: str, body: dict, db: AsyncSession) -> dict:
     """生成 ZTP 全部部署文件 (设备配置 + dnsmasq + 中间文件 + README)。"""
     t = await db.get(models.ZtpTemplate, tid)
     if not t:
         raise HTTPException(status_code=404, detail="模板不存在")
     body = body or {}
     prof = _to_profile(t)
-    # body 里的临时覆盖
     if body.get("deploy_mode"):
         prof.deploy_mode = body["deploy_mode"]
     if body.get("server_ip"):
         prof.server_ip = body["server_ip"]
 
-    # 取该模板下的设备，合并 body 临时传入的设备
     res = await db.execute(
         select(models.ZtpDevice).where(models.ZtpDevice.template_id == tid)
     )
@@ -197,6 +195,18 @@ async def generate_files(tid: str, body: dict = None, db: AsyncSession = Depends
         for x in body.get("devices", [])
     ]
     devices = db_devices + inline_devices
-    files = generate_all(prof, devices)
+    return generate_all(prof, devices)
+
+
+@router.post("/templates/{tid}/generate", response_model=ZtpGenerateResult)
+async def generate_files(tid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    files = await _gen_ztp_files(tid, body, db)
     return {"files": files}
+
+
+@router.post("/templates/{tid}/download")
+async def download_files(tid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """下载全部 ZTP 部署文件 (zip 压缩包)。"""
+    files = await _gen_ztp_files(tid, body, db)
+    return files_to_zip_response(files, "ztp-deploy.zip")
 

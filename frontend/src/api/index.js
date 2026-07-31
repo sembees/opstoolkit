@@ -27,3 +27,28 @@ http.interceptors.response.use(
 )
 
 export default http
+
+
+// 下载后端打包的 zip（POST，返回 blob 流）
+export async function downloadZip(url, body) {
+  const token = localStorage.getItem('opstk_token')
+  const res = await fetch('/api' + url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (token || '') },
+    body: JSON.stringify(body || {}),
+  })
+  if (!res.ok) {
+    ElMessage.error('下载失败: ' + res.status)
+    return
+  }
+  const blob = await res.blob()
+  const objUrl = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = objUrl
+  const cd = res.headers.get('content-disposition')
+  a.download = cd ? (cd.match(/filename="?([^"]+)"?/) || [])[1] || 'deploy.zip' : 'deploy.zip'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(objUrl)
+}

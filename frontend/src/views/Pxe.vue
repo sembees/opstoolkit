@@ -145,6 +145,7 @@
           <el-col :span="6"><el-form-item label="initrd"><el-input v-model="genForm.initrd_path" placeholder="rhel/9/initrd.img" /></el-form-item></el-col>
         </el-row>
         <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> 生成文件</el-button>
+          <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
       </el-form>
       <el-tabs v-model="activeFile" v-if="Object.keys(genFiles).length">
         <el-tab-pane v-for="(_, name) in genFiles" :key="name" :label="name" :name="name">
@@ -157,7 +158,7 @@
 
 <script setup>
 import { ref, reactive, onMounted, computed } from "vue"
-import http from "../api"
+import http, { downloadZip } from "../api"
 import { ElMessage } from "element-plus"
 
 const profiles = ref([])
@@ -297,6 +298,21 @@ async function doGenerate() {
     if (keys.length) activeFile.value = keys[0]
     ElMessage.success("生成完成: " + keys.length + " 个文件")
   } finally { generating.value = false }
+}
+
+async function doDownload() {
+  const pid = sessionStorage.getItem("pxe_profile_id")
+  await downloadZip("/it/pxe/profiles/" + pid + "/download", {
+    hostname: genForm.hostname,
+    server_ip: genForm.server_ip,
+    http_root: genForm.http_root || ("http://" + genForm.server_ip + "/pxe"),
+    kernel_path: genForm.kernel_path,
+    initrd_path: genForm.initrd_path,
+    squashfs_path: genForm.squashfs_path,
+    deploy_mode: genForm.deploy_mode,
+    installs: installs.value.map(i => ({ mac: i.mac, hostname: i.hostname })),
+  })
+  ElMessage.success("下载已开始")
 }
 
 async function delInstall(id) {
