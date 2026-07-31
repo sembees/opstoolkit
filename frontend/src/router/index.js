@@ -13,6 +13,7 @@ const routes = [
       { path: 'credentials', name: 'credentials', component: () => import('../views/Credentials.vue'), meta: { title: '凭据管理', icon: 'Key' } },
       { path: 'inspection', name: 'inspection', component: () => import('../views/Inspection.vue'), meta: { title: 'CT 巡检', icon: 'Monitor' } },
       { path: 'netconfig', name: 'netconfig', component: () => import('../views/NetConfig.vue'), meta: { title: '网络配置生成', icon: 'Connection' } },
+      { path: 'pxe', name: 'pxe', component: () => import('../views/Pxe.vue'), meta: { title: 'PXE 装机', icon: 'Cpu' } },
     ],
   },
 ]

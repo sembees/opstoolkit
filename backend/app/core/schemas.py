@@ -154,6 +154,82 @@ class InspectionTemplateOut(ORMBase):
     created_at: Optional[datetime] = None
 
 
+# ---------- PXE 装机 ----------
+class PxeProfileIn(BaseModel):
+    name: str
+    os_type: str = "ubuntu"       # ubuntu / rhel
+    os_version: str = "22.04"
+    timezone: str = "Asia/Shanghai"
+    locale: str = "en_US.UTF-8"
+    keyboard: str = "us"
+    admin_user: str = "ops"
+    admin_password: Optional[str] = None
+    root_password: Optional[str] = None
+    ssh_keys: list[str] = []
+    disk_scheme: str = "lvm"      # lvm / direct
+    disk_config: dict[str, Any] = {}
+    net_mode: str = "dhcp"        # dhcp / static
+    net_config: dict[str, Any] = {}
+    mirror: str = ""
+    extra_packages: list[str] = []
+    post_script: str = ""
+    remark: str = ""
+    # PXE 服务端参数
+    server_ip: str = "192.168.1.100"
+    http_root: str = "http://192.168.1.100:8000/pxe"
+    kernel_path: str = ""
+    initrd_path: str = ""
+    squashfs_path: str = ""
+
+
+class PxeProfileOut(ORMBase):
+    id: str
+    name: str
+    os_type: str
+    os_version: str
+    timezone: str
+    locale: str
+    keyboard: str
+    admin_user: str
+    ssh_keys: list = []
+    disk_scheme: str
+    disk_config: dict = {}
+    net_mode: str
+    net_config: dict = {}
+    mirror: str
+    extra_packages: list = []
+    post_script: str = ""
+    remark: str = ""
+    server_ip: str = ""
+    http_root: str = ""
+    kernel_path: str = ""
+    initrd_path: str = ""
+    squashfs_path: str = ""
+    created_at: Optional[datetime] = None
+
+
+class PxeInstallIn(BaseModel):
+    profile_id: str
+    hostname: str
+    mac: str
+    ip: Optional[str] = None
+
+
+class PxeInstallOut(ORMBase):
+    id: str
+    profile_id: str
+    hostname: str
+    mac: str
+    ip: Optional[str] = None
+    status: str
+    created_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+class PxeGenerateResult(BaseModel):
+    files: dict[str, str] = {}
+
+
 # ---------- IT 网络配置生成 ----------
 class NetInterfaceIn(BaseModel):
     name: str                       # 网卡名 eth0 / ens33 / eno1

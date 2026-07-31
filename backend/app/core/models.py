@@ -67,6 +67,57 @@ class Asset(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class PxeProfile(Base):
+    """PXE 装机模板。os_type: ubuntu/rhel。"""
+    __tablename__ = "pxe_profiles"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    os_type: Mapped[str] = mapped_column(String(16))          # ubuntu / rhel
+    os_version: Mapped[str] = mapped_column(String(32), default="")  # 22.04 / 9.3
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    locale: Mapped[str] = mapped_column(String(64), default="en_US.UTF-8")
+    keyboard: Mapped[str] = mapped_column(String(32), default="us")
+
+    admin_user: Mapped[str] = mapped_column(String(64), default="ops")
+    admin_password_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ssh_keys: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+    root_password_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    disk_scheme: Mapped[str] = mapped_column(String(16), default="lvm")  # lvm / direct
+    disk_config: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+
+    net_mode: Mapped[str] = mapped_column(String(16), default="dhcp")     # dhcp / static
+    net_config: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+
+    mirror: Mapped[str] = mapped_column(String(255), default="")
+    extra_packages: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+    post_script: Mapped[str] = mapped_column(Text, default="")
+    remark: Mapped[str] = mapped_column(Text, default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    installs: Mapped[list["PxeInstall"]] = relationship(back_populates="profile", cascade="all, delete-orphan")
+
+
+class PxeInstall(Base):
+    """单台主机装机记录，通过 MAC 关联。"""
+    __tablename__ = "pxe_installs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    profile_id: Mapped[str] = mapped_column(ForeignKey("pxe_profiles.id", ondelete="CASCADE"), index=True)
+    hostname: Mapped[str] = mapped_column(String(128), default="")
+    mac: Mapped[str] = mapped_column(String(32), index=True)
+    ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/booting/installing/done/failed
+    log: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    profile: Mapped[PxeProfile] = relationship(back_populates="installs")
+
+
 class InspectionTemplate(Base):
     """巡检模板：系统默认(只读) + 用户自定义(可编辑)。items 是 [{key,label,command,textfsm,unit}] 列表。"""
     __tablename__ = "inspection_templates"
