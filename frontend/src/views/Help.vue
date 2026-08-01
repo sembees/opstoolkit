@@ -322,18 +322,40 @@ cp /opt/opstk/backend/data/ops.db /backup/</pre>
         <!-- ===== 网络配置 ===== -->
         <el-tab-pane label="网络配置生成" name="netconfig">
           <h3>服务器网络配置生成器</h3>
-          <p>面向 Ubuntu 22.04+ 和 RHEL/Rocky/Alma 8+，生成可直接执行的网络配置脚本。</p>
+          <p style="color:#666">统一表格编辑器 + 实时预览面板，支持任意数量的接口/多Bond/VLAN/Bridge自由组合。三种输出格式：netplan / nmcli / ifcfg。</p>
+
           <el-table :data="netconfigRows" border size="small" style="margin:12px 0">
             <el-table-column prop="item" label="配置项" width="140" />
             <el-table-column prop="desc" label="说明" />
           </el-table>
-          <el-alert type="success" :closable="false" title="renderer 怎么选" description="物理网卡静态 IP → networkd（服务器首选，稳定）；无线/4G/5G 动态认证 → NetworkManager。混搭策略：物理网卡交 networkd，无线交 NetworkManager。" style="margin:12px 0" />
+
+          <el-alert type="success" :closable="false" style="margin:12px 0">
+            <template #title><b>三种格式适配</b></template>
+            <p style="margin:4px 0"><b>netplan</b> — Ubuntu 22.04+，生成 99-opstk.yaml，默认 renderer=networkd</p>
+            <p style="margin:4px 0"><b>nmcli</b> — RHEL 8+，生成 apply-network.sh，需 NetworkManager</p>
+            <p style="margin:4px 0"><b>ifcfg</b> — RHEL/CentOS 7+，生成 ifcfg-files.txt，无需 NetworkManager，传统 network.service</p>
+          </el-alert>
+
+          <p style="font-weight:600;margin-top:12px">操作步骤</p>
           <ol>
-            <li>选择系统（Ubuntu / RHEL）和格式（nmcli 或 netplan）。</li>
-            <li>添加物理接口、聚合(bond)、VLAN、网桥(bridge)，填写 IP/网关/DNS。</li>
-            <li>点「生成配置」，右侧实时预览脚本。</li>
-            <li>点「下载」获取 .sh 或 .yaml 文件，拷贝到服务器执行。</li>
+            <li>选择系统（Ubuntu / RHEL）和格式（netplan / nmcli / ifcfg）</li>
+            <li>点击“物理接口”“Bond”“VLAN”“Bridge”按钮自由添加行，每行独立配置类型/名称/IP/网关/DNS</li>
+            <li>Bond 行在“从接口”列用逗号填写从接口（如 eth0,eth1），VLAN 填写父接口</li>
+            <li>右侧实时预览，确认配置无误后点“下载”</li>
+            <li>拷贝到目标服务器执行（netplan: cp + netplan apply，nmcli: bash apply-network.sh，ifcfg: 复制到 /etc/sysconfig/network-scripts/ 后 systemctl restart network）</li>
           </ol>
+
+          <p style="font-weight:600;margin-top:12px">常见场景示例</p>
+          <pre class="code-block"># 场景1: 管理口 + 业务Bond + Bond上的VLAN
+物理接口 mgmt: 10.0.0.10/24, 网关 10.0.0.1
+Bond bond0: mode=4(LACP), 从接口 eth0,eth1, IP 10.10.0.10/24
+VLAN bond0.100: 父接口 bond0, IP 172.16.100.10/24
+VLAN bond0.200: 父接口 bond0, IP 172.16.200.10/24, 网关 172.16.200.1
+
+# 场景2: KVM 虚拟化主机
+物理接口 mgmt: 10.0.0.10/24
+Bond bond0: mode=4, 从接口 eth0,eth1 (不配IP)
+Bridge br0: 从接口 bond0, IP 192.168.122.1/24</pre>
         </el-tab-pane>
 
         <!-- ===== PXE ===== -->
