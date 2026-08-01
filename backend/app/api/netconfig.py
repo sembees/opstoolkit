@@ -20,7 +20,8 @@ async def get_meta(_user=Depends(get_current_user)):
         ],
         "formats": [
             {"id": "nmcli", "name": "nmcli 脚本 (通用)"},
-            {"id": "netplan", "name": "netplan (仅 Ubuntu)"},
+            {"id": "netplan", "name": "netplan (Ubuntu)"},
+            {"id": "ifcfg", "name": "ifcfg (RHEL, 无需 NetworkManager)"},
         ],
         "netplan_renderers": [
             {"id": "networkd", "name": "networkd (服务器静态IP推荐)"},
