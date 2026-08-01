@@ -9,7 +9,110 @@
       </template>
 
       <el-tabs v-model="activeTab" tab-position="left" style="min-height:520px">
-        <!-- ===== 快速开始 ===== -->
+                <!-- ===== 小白手册 ===== -->
+        <el-tab-pane label="小白手册" name="beginner">
+          <h3>OpsToolkit 小白入门手册</h3>
+          <p style="color:#666">本手册面向零基础用户，从“这个工具是什么”开始，一直讲到“能独立完成一次巡检和一次裸机装机”。</p>
+
+          <el-collapse v-model="beginnerActive">
+
+            <el-collapse-item title="这个工具是什么？" name="b0">
+              <p>OpsToolkit 是一个网页版的运维工具箱。你打开浏览器就能用，不用安装客户端软件，不用掌握命令行。</p>
+              <p>它解决的是运维人员每天重复做的事情：</p>
+              <ul style="line-height:2;padding-left:20px">
+                <li>检查 20 台交换机的状态（以前要逐台 SSH 登录，现在点一下全部完成）</li>
+                <li>新买的服务器要装系统（以前要插 U 盘一台一台装，现在接线开机自动装）</li>
+                <li>配置服务器网卡 Bond 聚合（以前要查文档手敲，现在填表自动生成脚本）</li>
+                <li>新上架的交换机初始化（以前要控制台手配，现在上电自动拉取配置）</li>
+              </ul>
+            </el-collapse-item>
+
+            <el-collapse-item title="代码在哪？服务在哪？" name="b1">
+              <p style="font-weight:600;color:#409eff">本地（你的电脑）— 开发和修改代码的地方</p>
+              <el-table :data="localPaths" border size="small">
+                <el-table-column prop="name" label="名称" width="120" />
+                <el-table-column prop="path" label="路径" />
+              </el-table>
+              <p style="margin-top:8px;color:#999;font-size:13px">本地是 Windows，可运行 Web 界面、生成配置、下载文件，但 PXE 装机需要 Linux，本地不能直接装机。</p>
+
+              <p style="font-weight:600;color:#67c23a;margin-top:12px">远程服务器（真正跑服务的地方）</p>
+              <el-table :data="remotePaths" border size="small">
+                <el-table-column prop="name" label="名称" width="130" />
+                <el-table-column prop="path" label="位置" />
+              </el-table>
+              <p style="margin-top:8px;color:#999;font-size:13px">远程服务器 IP: <b>10.128.118.113</b>，用户: <b>yang</b>，密码: <b>yang</b>。用 SSH 连接后可管理服务。</p>
+            </el-collapse-item>
+
+            <el-collapse-item title="我要巡检设备，从头怎么操作？" name="b2">
+              <el-steps direction="vertical" :active="5">
+                <el-step title="第 1 步：登录" description="浏览器打开 http://10.128.118.113:8000，输入 admin / admin@123" />
+                <el-step title="第 2 步：录入设备" description="点「资产管理」→ 添加设备，填写 IP 地址、选择厂商（H3C/华为/思科）、设备类型（交换机/路由器/防火墙）" />
+                <el-step title="第 3 步：录入密码" description="点「凭据管理」→ 添加密码，填写 SSH 账号和密码（自动加密）。回到「资产管理」把这个凭据关联到设备上" />
+                <el-step title="第 4 步：开始巡检" description="点「CT 巡检」→ 勾选设备 → 选择巡检模板（系统默认或自定义）→ 点「开始巡检」" />
+                <el-step title="第 5 步：查看结果" description="巡检过程中可看到实时命令输出，完成后看解析后的表格化结果（CPU、内存、接口状态等）" />
+              </el-steps>
+              <el-alert type="info" :closable="false" style="margin-top:12px" title="提示" description="巡检模板可以自己定义！在「CT 巡检」页面点「模板管理」，可以查看系统默认模板的内容，也可以克隆后修改成自己的模板。" />
+            </el-collapse-item>
+
+            <el-collapse-item title="我要裸机装系统，从头怎么操作？" name="b3">
+              <el-steps direction="vertical" :active="6">
+                <el-step title="第 1 步：准备 ISO" description="下载 Ubuntu Server ISO（必须是 live-server 版本），上传到服务器 /srv/opstk/iso/ 目录。可用 scp: scp ubuntu.iso yang@10.128.118.113:/srv/opstk/iso/" />
+                <el-step title="第 2 步：提取内核" description="打开 OpsToolkit Web 界面 → 「PXE 装机」 → ISO 面板中点「提取」。系统自动挂载 ISO 并提取 vmlinuz 和 initrd" />
+                <el-step title="第 3 步：建装机模板" description="在「PXE 装机」点「新建模板」，填写系统类型、账号密码、磁盘分区等。这些就是装好后的系统配置" />
+                <el-step title="第 4 步：一键部署" description="点模板旁的「部署」按钮。系统自动检测网卡、生成配置、启动 dnsmasq。下方会显示部署日志，全部打✓就成功了" />
+                <el-step title="第 5 步：设置裸机" description="裸机接网线，开机进 BIOS/UEFI，把 Network Boot 设为 Enabled，启动顺序调到第一位。部分服务器可按 F12 直接选网络启动" />
+                <el-step title="第 6 步：等待安装完成" description="裸机重启后自动开始安装，屏幕上会看到进度。安装完成后自动重启，用模板中的账号密码登录即可" />
+              </el-steps>
+            </el-collapse-item>
+
+            <el-collapse-item title="代码改了之后怎么更新到服务器？" name="b4">
+              <pre class="code-block"># ===== 场景 1: 只改了后端 Python 代码 =====
+# 在本地 D:-cc-project 改好代码后:
+
+# 1. 打包上传 (Codex 帮你做, 或手动):
+scp -r backend/app/ yang@10.128.118.113:/opt/opstk/backend/
+
+# 2. SSH 进去重启:
+ssh yang@10.128.118.113
+sudo systemctl restart opstk
+
+# ===== 场景 2: 改了前端 =====
+# 先本地构建:
+cd frontend
+npm run build
+
+# 上传 dist:
+scp -r dist/ yang@10.128.118.113:/opt/opstk/frontend/
+
+# 刷新浏览器即可, 无需重启服务
+
+# ===== 场景 3: Docker 重建 =====
+ssh yang@10.128.118.113
+cd /opt/opstk
+docker compose up -d --build</pre>
+            </el-collapse-item>
+
+            <el-collapse-item title="常见问题" name="b5">
+              <el-collapse>
+                <el-collapse-item title="“我打不开网页”" name="faq1">
+                  <p>检查服务是否在运行：SSH 进服务器，运行 <code>systemctl status opstk</code>。如果 inactive，运行 <code>sudo systemctl restart opstk</code>。</p>
+                </el-collapse-item>
+                <el-collapse-item title="“巡检报错连接超时”" name="faq2">
+                  <p>确认设备 IP 可达、SSH 端口 (22) 未被阻止、凭据密码正确。可在资产管理中修改超时时间。</p>
+                </el-collapse-item>
+                <el-collapse-item title="“PXE 部署后裸机不引导”" name="faq3">
+                  <p>检查：1) dnsmasq 是否运行 (systemctl status dnsmasq)；2) 裸机和服务器是否同一网段；3) 网段内是否有其他 DHCP 服务。</p>
+                </el-collapse-item>
+                <el-collapse-item title="“忘记密码”" name="faq4">
+                  <p>默认 admin / admin@123。如果改过忘了，删除 /opt/opstk/backend/data/ops.db 后重启服务会重置为默认账号（但已录入的资产/凭据会丢失）。</p>
+                </el-collapse-item>
+              </el-collapse>
+            </el-collapse-item>
+
+          </el-collapse>
+        </el-tab-pane>
+
+<!-- ===== 快速开始 ===== -->
         <el-tab-pane label="工具使用手册" name="quick">
           <h3>OpsToolkit 工具使用手册</h3>
           <p>一体化运维工具平台。后端 Python/FastAPI，前端 Vue 3 + Element Plus，数据库 SQLite。支持 CT 设备巡检/ZTP 开局，IT 服务器 PXE 装机/网络配置生成。</p>
@@ -664,10 +767,37 @@ systemctl status dnsmasq -l  # 看报错详情</pre>
 <script setup>
 import { ref, reactive } from "vue"
 
-const activeTab = ref("quick")
+const activeTab = ref("beginner")
 const conceptActive = ref("c1")
 
 const deployActive = ref("d1")
+
+const beginnerActive = ref("b1")
+const localPaths = [
+  { name: "项目根目录", path: "D:\\07-cc\\01-project" },
+  { name: "后端代码", path: "D:\\07-cc\\01-project\\backend\\app\\" },
+  { name: "前端代码", path: "D:\\07-cc\\01-project\\frontend\\src\\" },
+  { name: "前端构建物", path: "D:\\07-cc\\01-project\\frontend\\dist\\" },
+  { name: "数据库", path: "D:\\07-cc\\01-project\\backend\\data\\ops.db" },
+  { name: "加密密钥", path: "D:\\07-cc\\01-project\\backend\\.env" },
+  { name: "Python", path: "C:\\Users\\11943\\miniconda3\\python.exe" },
+  { name: "访问地址", path: "http://localhost:8000" },
+]
+const remotePaths = [
+  { name: "IP 地址", path: "10.128.118.113" },
+  { name: "登录账号", path: "yang / yang (sudo 免密)" },
+  { name: "项目目录", path: "/opt/opstk/" },
+  { name: "后端代码", path: "/opt/opstk/backend/app/" },
+  { name: "前端文件", path: "/opt/opstk/frontend/dist/" },
+  { name: "数据库", path: "/opt/opstk/backend/data/ops.db" },
+  { name: "Python venv", path: "/opt/opstk/venv/" },
+  { name: "服务管理", path: "sudo systemctl restart opstk" },
+  { name: "PXE TFTP", path: "/srv/tftp/" },
+  { name: "PXE HTTP", path: "/srv/opstk/pxe-web/" },
+  { name: "ISO 存储", path: "/srv/opstk/iso/" },
+  { name: "Docker 镜像", path: "opstk-opstoolkit:latest" },
+  { name: "访问地址", path: "http://10.128.118.113:8000" },
+]
 
 const quickActive = ref("q4")
 const dailyOps = [
