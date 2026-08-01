@@ -79,10 +79,10 @@
               <span v-else style="color:#999;font-size:11px">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="Bond参数" width="120">
+          <el-table-column label="Bond/VLAN参数" width="140">
             <template #default="{ row }">
               <template v-if="row._type==='bond'">
-                <el-select v-model="row.bondMode" size="small" style="width:60px" @change="preview">
+                <el-select v-model="row.bondMode" size="small" style="width:80px" @change="preview">
                   <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.id" :value="m.id" />
                 </el-select>
                 <el-input v-model="row.miimon" size="small" style="width:50px;margin-left:4px" placeholder="100" @input="preview" />
