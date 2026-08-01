@@ -158,6 +158,8 @@ class InspectionTask(Base):
     created_by: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 巡检过程中的实时输出日志，用于任务回放
+    output_log: Mapped[Optional[list]] = mapped_column(JSON, default=list)
 
     results: Mapped[list["InspectionResult"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"

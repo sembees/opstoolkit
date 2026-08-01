@@ -127,6 +127,9 @@
           <el-option label="H3C" value="h3c" /><el-option label="华为" value="huawei" /><el-option label="思科" value="cisco" />
         </el-select>
         <el-button type="primary" size="small" @click="openTplEdit(null)"><el-icon><Plus /></el-icon> 新建模板</el-button>
+        <el-upload accept=".json" :show-file-list="false" :before-upload="importTemplate" style="display:inline-block;margin-left:6px">
+          <el-button size="small"><el-icon><Upload /></el-icon> 导入</el-button>
+        </el-upload>
       </div>
       <el-table :data="templates" size="small" stripe>
         <el-table-column prop="name" label="模板名称" min-width="120" />
@@ -144,6 +147,7 @@
         <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openTplView(row)">查看</el-button>
+            <el-button link type="success" size="small" @click="exportTemplate(row)">导出</el-button>
             <el-button link type="primary" size="small" @click="cloneTpl(row)">克隆</el-button>
             <el-button link type="warning" size="small" :disabled="row.is_system" @click="openTplEdit(row)">编辑</el-button>
             <el-popconfirm title="确定删除?" @confirm="delTpl(row.id)">
@@ -339,6 +343,34 @@ async function saveTpl() {
     tplEditVisible.value = false
     loadTemplates()
   } finally { tplSaving.value = false }
+}
+
+async function exportTemplate(row) {
+  try {
+    const data = await http.get("/ct/inspection/templates/" + row.id + "/export")
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+    const a = document.createElement("a")
+    a.href = URL.createObjectURL(blob)
+    a.download = (row.name || "template") + ".json"
+    a.click()
+    URL.revokeObjectURL(a.href)
+    ElMessage.success("已导出")
+  } catch (e) {
+    ElMessage.error("导出失败")
+  }
+}
+
+async function importTemplate(file) {
+  try {
+    const text = await file.text()
+    const data = JSON.parse(text)
+    await http.post("/ct/inspection/templates/import", data)
+    ElMessage.success("导入成功: " + (data.name || ""))
+    loadTemplates()
+  } catch (e) {
+    ElMessage.error("导入失败: " + (e.response?.data?.detail || e.message))
+  }
+  return false
 }
 
 async function cloneTpl(row) {

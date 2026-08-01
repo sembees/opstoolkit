@@ -27,6 +27,11 @@
         <el-table-column label="创建时间" width="160">
           <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
         </el-table-column>
+        <el-table-column label="操作" width="100" fixed="right">
+          <template #default="{ row }">
+            <el-button type="primary" link size="small" :disabled="row.status !== 'done' && row.status !== 'failed'" @click="replayTask(row)">回放</el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </el-card>
 
@@ -54,6 +59,22 @@
         <el-button plain @click="$router.push('/assets')"><el-icon><Coin /></el-icon> 资产管理</el-button>
       </el-space>
     </el-card>
+
+    <!-- 任务回放对话框 -->
+    <el-dialog v-model="replayVisible" :title="'任务回放: ' + replayName" width="720px">
+      <el-alert v-if="!replayLog.length" title="无回放日志" type="info" :closable="false" />
+      <div class="terminal-output" style="max-height: 500px" v-else>
+        <div v-for="(ev, i) in replayLog" :key="i" style="margin-bottom: 2px; font-size: 12px">
+          <span v-if="ev.type === 'start'" style="color: #409eff">── ── {{ ev.asset_name }} ──</span>
+          <span v-else-if="ev.type === 'cmd'" style="color: #e6a23c">> {{ ev.cmd }}</span>
+          <span v-else-if="ev.type === 'output'" style="color: #909399">{{ ev.output }}</span>
+          <span v-else-if="ev.type === 'error'" style="color: #f56c6c">[ERROR] {{ ev.error }}</span>
+          <span v-else-if="ev.type === 'done'" style="color: #67c23a">[OK] {{ ev.asset_name }}</span>
+          <span v-else>{{ ev.type }}</span>
+        </div>
+      </div>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -63,6 +84,22 @@ import http from "../api"
 
 const recentTasks = ref([])
 const recentInstalls = ref([])
+const replayVisible = ref(false)
+const replayName = ref("")
+const replayLog = ref([])
+
+async function replayTask(row) {
+  replayName.value = row.name || row.id
+  replayVisible.value = true
+  replayLog.value = []
+  try {
+    const data = await http.get("/ct/inspection/tasks/" + row.id + "/replay")
+    replayLog.value = data.log || []
+  } catch (e) {
+    ElMessage.error("回放加载失败")
+  }
+}
+
 
 const statCards = ref([
   { label: "CT 设备", value: 0, icon: "Monitor", color: "#1890ff" },

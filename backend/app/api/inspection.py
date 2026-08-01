@@ -191,9 +191,64 @@ async def clone_template(tid: str, db: AsyncSession = Depends(get_db), _user=Dep
     await db.commit()
     await db.refresh(t)
     return t
+@router.get('/templates/{tid}/export')
+async def export_template(tid: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """导出模板为 JSON，用于备份和迁移。"""
+    t = await db.get(models.InspectionTemplate, tid)
+    if not t:
+        raise HTTPException(status_code=404, detail='模板不存在')
+    return {
+        "name": t.name,
+        "vendor": t.vendor,
+        "description": t.description,
+        "items": t.items,
+    }
+
+
+@router.post('/templates/import')
+async def import_template(body: dict, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """从 JSON 导入模板。"""
+    name = (body.get("name") or "").strip()
+    vendor = (body.get("vendor") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail='模板名称不能为空')
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail='items 必须是数组')
+    t = models.InspectionTemplate(
+        name=name,
+        vendor=vendor,
+        is_system=False,
+        items=items,
+        description=body.get("description", ""),
+    )
+    db.add(t)
+    await db.commit()
+    await db.refresh(t)
+    return t
+
+
 
 
 @router.delete('/templates/{tid}')
+
+@router.get("/tasks/{task_id}/replay")
+async def replay_task(task_id: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """回放任务的实时输出日志。"""
+    t = await db.get(models.InspectionTask, task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {
+        "task_id": t.id,
+        "name": t.name,
+        "status": t.status,
+        "asset_count": len(t.asset_ids or []),
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "log": t.output_log or [],
+    }
+
+
+
 async def delete_template(tid: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     t = await db.get(models.InspectionTemplate, tid)
     if not t:

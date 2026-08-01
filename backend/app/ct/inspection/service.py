@@ -52,10 +52,22 @@ async def run_task_in_background(task_id: str) -> None:
                 return
             task.status = "running"
             task.finished_at = None
+            # 收集实时输出，用于任务回放
+            output_log = []
+            def capture_log(ev):
+                # 只保存关键事件，不存大段输出
+                entry = dict(ev)
+                if entry.get("type") == "output":
+                    entry["output"] = (entry.get("output") or "")[:500]
+                output_log.append(entry)
+
             await db.commit()
             results = await inspect_many(
-                db, task.asset_ids, task.kind, task.template, task.commands
+                db, task.asset_ids, task.kind, task.template, task.commands,
+                on_event=capture_log
             )
+            task.output_log = output_log
+            await db.commit()
             for r in results:
                 db.add(models.InspectionResult(
                     task_id=task.id,
