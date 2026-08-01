@@ -68,7 +68,40 @@ async def run_task_in_background(task_id: str) -> None:
             )
             task.output_log = output_log
             await db.commit()
+            # 告警检测：遍历规则检查指标超标
+            alert_rules = (await db.execute(
+                select(models.AlertRule).where(models.AlertRule.enabled == True)
+            )).scalars().all()
+
             for r in results:
+                # 告警检查
+                if r.get("status") == "success":
+                    metrics = r.get("metrics", {})
+                    for rule in alert_rules:
+                        mv = metrics.get(rule.metric_key, {})
+                        val = None
+                        if isinstance(mv.get("value"), (int, float)):
+                            val = mv["value"]
+                        elif isinstance(mv, dict):
+                            # 尝试从 parsed 中提取数值
+                            parsed = mv.get("value") or mv
+                            if isinstance(parsed, dict):
+                                nums = [v for v in parsed.values() if isinstance(v, (int, float))]
+                                if nums:
+                                    val = nums[0]  # 取第一个数值
+                        if val is not None:
+                            triggered = False
+                            if rule.operator == "gt" and val > rule.threshold:
+                                triggered = True
+                            elif rule.operator == "lt" and val < rule.threshold:
+                                triggered = True
+                            elif rule.operator == "gte" and val >= rule.threshold:
+                                triggered = True
+                            elif rule.operator == "lte" and val <= rule.threshold:
+                                triggered = True
+                            if triggered:
+                                r["error"] = (r.get("error", "") + f"[告警] {rule.name}: {rule.metric_key}={val} {rule.operator} {rule.threshold}").strip()
+                                r["status"] = "failed"
                 db.add(models.InspectionResult(
                     task_id=task.id,
                     asset_id=r["asset_id"],

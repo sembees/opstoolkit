@@ -185,6 +185,19 @@ class InspectionResult(Base):
     task: Mapped[InspectionTask] = relationship(back_populates="results")
 
 
+class AlertRule(Base):
+    """告警规则。metric_key: cpu/memory/temperature 等巡检指标。"""
+    __tablename__ = "alert_rules"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(128))
+    metric_key: Mapped[str] = mapped_column(String(64), index=True)  # 对应巡检指标 key
+    operator: Mapped[str] = mapped_column(String(8), default="gt")   # gt / lt / gte / lte
+    threshold: Mapped[float] = mapped_column(default=0.0)             # 告警阈值
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ZtpTemplate(Base):
     """ZTP ?????vendor: h3c / huawei / cisco?"""
     __tablename__ = "ztp_templates"

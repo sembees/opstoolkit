@@ -15,7 +15,8 @@ const routes = [
       { path: 'netconfig', name: 'netconfig', component: () => import('../views/NetConfig.vue'), meta: { title: '网络配置生成', icon: 'Connection' } },
       { path: 'pxe', name: 'pxe', component: () => import('../views/Pxe.vue'), meta: { title: 'PXE 装机', icon: 'Cpu' } },
       { path: 'ztp', name: 'ztp', component: () => import('../views/Ztp.vue'), meta: { title: 'ZTP 开局', icon: 'Connection' } },
-      { path: 'help', name: 'help', component: () => import('../views/Help.vue'), meta: { title: '使用帮助', icon: 'Reading' } },
+      { path: 'alerts', name: 'alerts', component: () => import('../views/Alerts.vue'), meta: { title: '告警管理', icon: 'Bell' },
+      path: 'help', name: 'help', component: () => import('../views/Help.vue'), meta: { title: '使用帮助', icon: 'Reading' } },
     ],
   },
 ]
