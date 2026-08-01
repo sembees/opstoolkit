@@ -238,8 +238,14 @@ def service_control(action) -> dict:
                     "msg": "active" if active else "inactive"}
         else:
             # 直接检查 dnsmasq 进程
+            # 排除僵尸进程：用 ps 检查活着的 dnsmasq
             rc, out, _ = _run(["pgrep", "-x", "dnsmasq"])
             active = rc == 0
+            if active:
+                # 确认不是僵尸进程
+                rc2, out2, _ = _run(["ps", "-p", out.strip().split()[0] if out.strip() else "", "-o", "stat="])
+                if rc2 == 0 and "Z" in (out2 or ""):
+                    active = False
             return {"ok": True, "active": active, "enabled": False,
                     "msg": "active" if active else "inactive"}
 
@@ -248,7 +254,7 @@ def service_control(action) -> dict:
         pid_file = "/var/run/dnsmasq-opstk.pid"
         if action in ("stop", "restart"):
             # 停止现有进程
-            _run(["pkill", "-x", "dnsmasq"])
+            _run(["pkill", "dnsmasq"])
             # 清理旧 PID 文件
             if os.path.exists(pid_file):
                 os.remove(pid_file)
