@@ -58,20 +58,29 @@
         <!-- ===== PXE ===== -->
         <el-tab-pane label="PXE 装机" name="pxe">
           <h3>PXE 装机</h3>
-          <p>全自动装 Ubuntu / RHEL 系统，生成 autoinstall、Kickstart、iPXE、dnsmasq 全套文件。</p>
-          <el-alert type="warning" :closable="false" title="核心问题：要不要自己做 DHCP？" description="PXE 引导需要 DHCP（分 IP + 告知去哪取文件）和 TFTP（传文件）两个角色。本工具提供三种模式让你按场景选：" style="margin:12px 0" />
-          <el-table :data="pxeModes" border size="small" style="margin:12px 0">
+          <p>全自动装 Ubuntu / RHEL 系统。OpsToolkit 本机可直接作为完整 PXE 服务器，点「部署」即可启动全链路，裸机接线即装。</p>
+
+          <el-alert type="success" :closable="false" title="本机完整 PXE 服务器模式" description="点「部署」后，本工具自动完成：检测网卡/IP/网关 → 生成 dnsmasq 配置 → 落地应答文件 → 复制 iPXE 固件 → 修复 SELinux 上下文 → 重启 dnsmasq。全部自动，无需手动编辑任何配置文件。" style="margin:12px 0" />
+
+          <el-alert type="warning" :closable="false" title="环境要求：本机部署需 Linux" description="DHCP/TFTP 是系统服务，需要 Linux 环境 (Rocky/RHEL/CentOS/Ubuntu) + sudo 免密权限。Windows 上仅支持「生成配置 + 下载 ZIP」，无法直接运行 PXE 服务。" style="margin:12px 0" />
+
+          <h4 style="margin:16px 0 8px">三种部署模式</h4>
+          <el-table :data="pxeModes" border size="small" style="margin:8px 0">
             <el-table-column prop="mode" label="模式" width="130" />
             <el-table-column prop="dhcp" label="DHCP 行为" width="220" />
             <el-table-column prop="scene" label="适用场景" />
           </el-table>
+
+          <h4 style="margin:16px 0 8px">使用步骤</h4>
           <ol>
-            <li>「PXE 装机」页面新建装机模板，填写系统、磁盘、账号、网络等。</li>
-            <li>点「生成配置」，选择部署模式，生成全套文件。</li>
-            <li>点「下载 ZIP」获取 dnsmasq.conf + user-data/ks.cfg + boot.ipxe + README。</li>
-            <li>将 dnsmasq.conf 放入 /etc，内核/initrd/squashfs 放入 TFTP/HTTP 目录，重启 dnsmasq。</li>
-            <li>裸机 BIOS/UEFI 设为 PXE 网络启动即可自动安装。</li>
+            <li>【提供内核】将 OS 安装 ISO 上传到服务器 <code>/srv/opstk/iso/</code> 目录，然后在「ISO 镜像管理」面板点「提取」。系统会自动挂载 ISO 并提取 vmlinuz、initrd、squashfs 到 HTTP 目录。</li>
+            <li>【创建模板】在「PXE 装机」页面新建装机模板，填写系统类型/版本、磁盘分区、管理账号、网络等。</li>
+            <li>【一键部署】点模板旁的「部署」按钮。系统自动检测本机网卡和网络，生成全套配置，落地文件，重启 dnsmasq。部署日志实时显示在下方。</li>
+            <li>【裸机开装】裸机接上网线（与服务器同一网段），BIOS/UEFI 设为 PXE 网络启动即可自动安装。</li>
+            <li>【独立部署】也可点「生成配置」或「下载 ZIP」，在别的 Linux 服务器上手动部署。</li>
           </ol>
+
+          <el-alert type="info" :closable="false" title="PXE 引导全链路" description="裸机 → DHCP 分配 IP → TFTP 下载 iPXE 固件 → HTTP 下载 Linux 内核(vmlinuz+initrd) → 加载 squashfs → autoinstall/Kickstart 自动安装。全程无人值守。" style="margin:12px 0" />
         </el-tab-pane>
 
         <!-- ===== ZTP ===== -->
