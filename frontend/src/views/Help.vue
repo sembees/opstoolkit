@@ -108,59 +108,148 @@
 
           <el-alert type="info" :closable="false" title="两种部署方式" description="方式一: 直接部署在 Linux 服务器上（推荐，性能最好）。方式二: 用 Docker 容器运行（方便迁移）。两种方式的 PXE 功能完全相同。" style="margin:12px 0" />
 
-          <h4 style="margin:16px 0 8px">方式一：直接部署在 Linux 服务器</h4>
-          <p style="font-weight:600;color:#409eff">适用于 Rocky/RHEL/CentOS 9+ 或 Ubuntu 22.04+</p>
-          <ol>
-            <li><b>安装依赖包</b><br/>
-              <code>RHEL系: dnf install -y dnsmasq ipxe util-linux python3 python3-pip</code><br/>
-              <code>Ubuntu: apt install -y dnsmasq ipxe util-linux python3 python3-pip</code>
-            </li>
-            <li><b>创建 Python 虚拟环境</b><br/>
-              <code>python3 -m venv /opt/opstk/venv</code><br/>
-              <code>/opt/opstk/venv/bin/pip install fastapi uvicorn sqlalchemy pydantic pydantic-settings python-jose passlib cryptography netmiko textfsm jinja2 aiosqlite bcrypt paramiko eval_type_backport</code>
-            </li>
-            <li><b>上传代码</b><br/>
-              将项目 backend/ 和 frontend/dist/ 上传到 <code>/opt/opstk/</code><br/>
-              目录结构: <code>/opt/opstk/backend/app/</code> + <code>/opt/opstk/frontend/dist/</code>
-            </li>
-            <li><b>配置 sudo 免密</b> (必要，dnsmasq 管控需要)<br/>
-              <code>echo 'yang ALL=(root) NOPASSWD: /usr/bin/systemctl * dnsmasq, /usr/bin/tee /etc/dnsmasq.d/*, /usr/bin/mount, /usr/bin/umount, /usr/sbin/restorecon, /usr/sbin/semanage' > /etc/sudoers.d/opstk && chmod 440 /etc/sudoers.d/opstk</code>
-            </li>
-            <li><b>创建目录 + 修复 SELinux</b><br/>
-              <code>mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/iso /srv/opstk/mnt</code><br/>
-              <code>chown -R yang\codexsandboxoffline /srv/tftp /srv/opstk</code><br/>
-              <code>semanage fcontext -a -t tftpdir_t '/srv/tftp(/.*)?' && restorecon -R /srv/tftp</code>
-            </li>
-            <li><b>启动服务</b><br/>
-              <code>cd /opt/opstk/backend && PYTHONPATH=/opt/opstk/backend /opt/opstk/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000</code><br/>
-              或配置 systemd 服务实现开机自启。
-            </li>
-            <li><b>访问</b>: 浏览器打开 <code>http://服务器IP:8000</code>，默认账号 admin / admin@123</li>
-          </ol>
+          <el-collapse v-model="deployActive" style="margin-top:12px">
 
-          <el-divider />
+            <el-collapse-item title="前置条件：环境要求" name="d0">
+              <el-table :data="deployReqs" border size="small">
+                <el-table-column prop="item" label="项目" width="140" />
+                <el-table-column prop="req" label="要求" />
+                <el-table-column prop="note" label="说明" width="200" />
+              </el-table>
+              <p style="margin-top:8px;color:#999;font-size:13px">注: Windows/macOS 可运行 Web 界面和生成配置、下载 ZIP，但无法直接运行 PXE 服务（DHCP/TFTP 需 Linux 内核）。</p>
+            </el-collapse-item>
 
-          <h4 style="margin:16px 0 8px">方式二：Docker 容器部署</h4>
-          <p style="font-weight:600;color:#409eff">一条命令构建镜像，方便迁移到任意主机</p>
-          <ol>
-            <li><b>构建镜像</b><br/>
-              <code>docker compose up -d --build</code><br/>
-              镜像包含: OpsToolkit + dnsmasq + iPXE 固件 + Python 环境，全部打包。
-            </li>
-            <li><b>关键配置说明</b><br/>
-              · <code>network_mode: host</code> — PXE 需要广播 DHCP 数据包，必须用宿主机网络<br/>
-              · <code>privileged: true</code> — 挂载 ISO 需要访问 loop 设备<br/>
-              · 数据卷: data(数据库) + tftp-root + pxe-web + iso-store 持久化保存
-            </li>
-            <li><b>迁移到其他主机</b><br/>
-              · 将项目目录复制到新服务器<br/>
-              · 执行 <code>docker compose up -d --build</code> 即可<br/>
-              · 数据卷中的配置/内核文件会自动持续
-            </li>
-            <li><b>访问</b>: <code>http://宿主机IP:8000</code>，同样点「部署」启动 PXE 全链路</li>
-          </ol>
+            <el-collapse-item title="方式一：直接部署在 Linux 服务器（推荐）" name="d1">
+              <p style="font-weight:600;color:#409eff;margin-bottom:8px">适用于 Rocky/RHEL/CentOS 9+ 或 Ubuntu 22.04+</p>
+              <p style="font-weight:600">第 1 步：安装依赖包</p>
+              <pre class="code-block"># RHEL / Rocky / CentOS 9
+dnf install -y dnsmasq ipxe util-linux python3 python3-pip
 
-          <el-alert type="warning" :closable="false" title="注意事项" description="容器部署时，宿主机上不能有其他 DHCP 服务占用 67 端口（standalone 模式）。如果宿主机网络里已有 DHCP，遵选 proxy 模式。" style="margin:12px 0" />
+# Ubuntu / Debian
+apt update && apt install -y dnsmasq ipxe util-linux python3 python3-pip</pre>
+              <p style="font-weight:600;margin-top:12px">第 2 步：创建 Python 虚拟环境</p>
+              <pre class="code-block">python3 -m venv /opt/opstk/venv
+/opt/opstk/venv/bin/pip install -r requirements.txt</pre>
+              <p style="margin-top:4px;color:#999;font-size:13px">或手动安装: pip install fastapi uvicorn sqlalchemy pydantic pydantic-settings python-jose passlib cryptography netmiko textfsm jinja2 aiosqlite bcrypt paramiko eval_type_backport</p>
+              <p style="font-weight:600;margin-top:12px">第 3 步：上传代码</p>
+              <pre class="code-block">将项目的 backend/ 和 frontend/dist/ 上传到 /opt/opstk/
+
+最终目录结构:
+/opt/opstk/
+  backend/
+    app/          # FastAPI 后端
+    data/         # SQLite 数据库 (自动创建)
+    requirements.txt
+  frontend/
+    dist/         # 前端构建产物</pre>
+              <p style="font-weight:600;margin-top:12px">第 4 步：配置 sudo 免密（必要）</p>
+              <pre class="code-block">\# OpsToolkit 需要管控 dnsmasq 服务和挂载 ISO
+echo 'yang ALL=(root) NOPASSWD: /usr/bin/systemctl * dnsmasq, /usr/sbin/systemctl * dnsmasq, /usr/bin/tee /etc/dnsmasq.d/*, /usr/bin/chown, /bin/chown, /usr/bin/mount, /bin/mount, /usr/bin/umount, /bin/umount, /usr/sbin/restorecon, /sbin/restorecon, /usr/sbin/semanage, /sbin/semanage, /usr/bin/true, /bin/true' > /etc/sudoers.d/opstk
+chmod 440 /etc/sudoers.d/opstk
+visudo -cf /etc/sudoers.d/opstk  # 验证语法</pre>
+              <p style="font-weight:600;margin-top:12px">第 5 步：创建目录 + 修复 SELinux</p>
+              <pre class="code-block">mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/iso /srv/opstk/mnt
+chown -R yang\codexsandboxoffline /srv/tftp /srv/opstk
+
+# RHEL/Rocky 需要修复 SELinux (Ubuntu 跳过此步)
+semanage fcontext -a -t tftpdir_t '/srv/tftp(/.*)?'
+semanage fcontext -a -t tftpdir_t '/srv/opstk/pxe-web(/.*)?'
+restorecon -R /srv/tftp /srv/opstk/pxe-web</pre>
+              <p style="font-weight:600;margin-top:12px">第 6 步：启动服务</p>
+              <pre class="code-block">cd /opt/opstk/backend
+PYTHONPATH=/opt/opstk/backend /opt/opstk/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000</pre>
+              <p style="margin-top:4px;color:#999;font-size:13px">推荐配置 systemd 实现开机自启，见下方「开机自启配置」。</p>
+              <p style="font-weight:600;margin-top:12px">开机自启配置（可选）</p>
+              <pre class="code-block">cat > /tmp/opstk.service << 'EOF'
+[Unit]
+Description=OpsToolkit Ops Platform
+After=network.target
+[Service]
+Type=simple
+User=yang
+WorkingDirectory=/opt/opstk/backend
+Environment=PYTHONPATH=/opt/opstk/backend
+ExecStart=/opt/opstk/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo cp /tmp/opstk.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now opstk</pre>
+            </el-collapse-item>
+
+            <el-collapse-item title="方式二：Docker 容器部署（方便迁移）" name="d2">
+              <p style="font-weight:600;color:#409eff;margin-bottom:8px">一条命令构建镜像，包含 OpsToolkit + dnsmasq + iPXE + Python 全套环境</p>
+              <p style="font-weight:600">构建并启动</p>
+              <pre class="code-block">cd /opt/opstk
+docker compose up -d --build</pre>
+              <p style="font-weight:600;margin-top:12px">docker-compose.yml 关键配置说明</p>
+              <el-table :data="composeConfig" border size="small">
+                <el-table-column prop="key" label="配置项" width="200" />
+                <el-table-column prop="why" label="为什么需要" />
+              </el-table>
+              <p style="font-weight:600;margin-top:12px">导出镜像文件（用于离线迁移）</p>
+              <pre class="code-block">docker save opstk-opstoolkit:latest | gzip > opstk-image.tar.gz
+# 拷到 U 盘或 scp 到新服务器</pre>
+              <p style="font-weight:600;margin-top:12px">在新主机上导入并启动</p>
+              <pre class="code-block">\# 导入镜像
+docker load < opstk-image.tar.gz
+
+\# 上传 docker-compose.yml 和项目代码，然后:
+docker compose up -d
+
+\# 或者直接带源码重建:
+docker compose up -d --build</pre>
+              <p style="font-weight:600;margin-top:12px">数据卷说明</p>
+              <el-table :data="volumeConfig" border size="small">
+                <el-table-column prop="vol" label="卷名称" width="130" />
+                <el-table-column prop="path" label="容器内路径" width="200" />
+                <el-table-column prop="desc" label="内容" />
+              </el-table>
+            </el-collapse-item>
+
+            <el-collapse-item title="首次使用流程：从部署到裸机装机" name="d3">
+              <ol>
+                <li><b>登录</b> — 浏览器打开 http://服务器IP:8000，账号 admin / admin@123</li>
+                <li><b>上传 ISO</b> — 将 OS 安装镜像 (.iso) 放到服务器 /srv/opstk/iso/ 目录</li>
+                <li><b>提取内核</b> — PXE 页面 ISO 面板，选择 OS 类型和版本，点「提取」，自动挂载 ISO 并提取 vmlinuz/initrd/squashfs</li>
+                <li><b>创建模板</b> — 填写系统类型、磁盘分区、管理账号、密码、网络等</li>
+                <li><b>一键部署</b> — 点「部署」按钮，系统自动完成全部配置</li>
+                <li><b>裸机装机</b> — 裸机接线，BIOS/UEFI 设 PXE 启动，全自动安装</li>
+              </ol>
+              <el-alert type="success" :closable="false" title="PXE 引导全链路" description="裸机 → DHCP 分配 IP → TFTP 下载 iPXE 固件 → HTTP 下载内核(vmlinuz+initrd) → 加载 squashfs → autoinstall/Kickstart 自动安装。全程无人值守。" style="margin-top:12px" />
+            </el-collapse-item>
+
+            <el-collapse-item title="排错指南：常见问题" name="d4">
+              <el-collapse v-model="troubleActive">
+                <el-collapse-item title="dnsmasq 启动失败：Permission denied / SELinux" name="t1">
+                  <p>RHEL/Rocky 上 SELinux 会阻止 dnsmasq 访问 TFTP 目录。运行：</p>
+                  <pre class="code-block">semanage fcontext -a -t tftpdir_t '/srv/tftp(/.*)?'
+restorecon -R /srv/tftp</pre>
+                  <p>部署时系统会自动执行此操作，手动部署时需手动执行。</p>
+                </el-collapse-item>
+                <el-collapse-item title="dnsmasq 启动失败：not configured to listen" name="t2">
+                  <p>检查网卡名是否正确。部署后查看 /etc/dnsmasq.d/opstk-pxe.conf 中 interface= 是否匹配实际网卡：</p>
+                  <pre class="code-block">ip route show default  # 看 dev 后面是什么
+systemctl status dnsmasq -l  # 看报错详情</pre>
+                </el-collapse-item>
+                <el-collapse-item title="sudo: a password is required" name="t3">
+                  <p>sudo 免密未配置成功。重新配置 /etc/sudoers.d/opstk，确保路径正确（systemctl 在 /usr/sbin/ 而非 /usr/bin/）。</p>
+                  <pre class="code-block">sudo -n true  # 测试免密是否生效</pre>
+                </el-collapse-item>
+                <el-collapse-item title="裸机 PXE 引导卡住，无法下载内核" name="t4">
+                  <p>检查内核文件是否存在：在 PXE 页面查看 HTTP 文件列表是否包含 ubuntu/22.04/ 目录。如果没有，说明未提取 ISO。</p>
+                </el-collapse-item>
+                <el-collapse-item title="容器部署: port 67 already in use" name="t5">
+                  <p>宿主机上有其他 DHCP 服务。停掉宿主机的 DHCP，或者在 OpsToolkit 中改用 proxy 模式。</p>
+                  <pre class="code-block">systemctl stop dnsmasq dhcpd 2>/dev/null  # 停掉宿主机 DHCP</pre>
+                </el-collapse-item>
+              </el-collapse>
+            </el-collapse-item>
+
+          </el-collapse>
         </el-tab-pane>
 
         <el-tab-pane label="常见概念" name="concept">
@@ -194,6 +283,28 @@ import { ref, reactive } from "vue"
 const activeTab = ref("quick")
 const conceptActive = ref("c1")
 
+const deployActive = ref("d1")
+const troubleActive = ref("t1")
+const deployReqs = [
+  { item: "操作系统", req: "Linux (Rocky/RHEL/Ubuntu)", note: "Windows 仅 Web 界面" },
+  { item: "Python", req: "3.9+", note: "3.12 最佳" },
+  { item: "dnsmasq", req: "已安装", note: "DHCP+TFTP 服务" },
+  { item: "iPXE 固件", req: "ipxe 包或已部署", note: "UEFI/BIOS 引导" },
+  { item: "sudo 权限", req: "免密 sudo", note: "管控 dnsmasq" },
+  { item: "端口", req: "8000 (Web) + 67 (DHCP) + 69 (TFTP)", note: "确保未被占用" },
+]
+const composeConfig = [
+  { key: "network_mode: host", why: "PXE 需要广播 DHCP 数据包，必须用宿主机网络，不肽用 bridge" },
+  { key: "privileged: true", why: "挂载 ISO 需要访问 /dev/loop 设备" },
+  { key: "restart: unless-stopped", why: "服务崩溃或重启后自动恢复" },
+]
+const volumeConfig = [
+  { vol: "data", path: "/app/backend/data", desc: "SQLite 数据库 (资产/凭据/模板)" },
+  { vol: "tftp-root", path: "/srv/tftp", desc: "iPXE 固件 (ipxe.efi/undionly.kpxe)" },
+  { vol: "pxe-web", path: "/srv/opstk/pxe-web", desc: "应答文件 + 内核 (vmlinuz/initrd)" },
+  { vol: "iso-store", path: "/srv/opstk/iso", desc: "ISO 镜像文件" },
+]
+
 const netconfigRows = [
   { item: "物理接口", desc: "单口静态/DHCP配置" },
   { item: "链路聚合 Bond", desc: "mode 0-6，含 active-backup、LACP 等，支持指定从接口和主接口" },
@@ -219,4 +330,16 @@ const ztpOptions = [
 .help-page p { line-height: 1.8; color: #555; }
 .help-page ol { line-height: 2; padding-left: 20px; }
 .help-page li { margin-bottom: 4px; }
+
+.help-page pre.code-block {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+}
 </style>
