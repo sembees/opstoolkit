@@ -440,5 +440,19 @@ async function delInstall(id) {
 async function loadProfiles() { profiles.value = await http.get("/it/pxe/profiles") }
 async function loadInstalls() { installs.value = await http.get("/it/pxe/installs") }
 
-onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos() })
+// 自动轮询装机状态（有活跃装机时每10s刷新）
+let installTimer = null
+function startInstallPolling() {
+  clearTimeout(installTimer)
+  installTimer = setTimeout(async () => {
+    await loadInstalls()
+    const hasActive = installs.value.some(i =>
+      ["pending", "booting", "installing"].includes(i.status)
+    )
+    if (hasActive) startInstallPolling()
+  }, 10000)
+}
+
+onBeforeUnmount(() => clearTimeout(installTimer))
+onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); startInstallPolling() })
 </script>

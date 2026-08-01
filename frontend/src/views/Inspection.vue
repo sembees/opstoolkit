@@ -108,6 +108,9 @@
           </el-table>
         </el-collapse-item>
       </el-collapse>
+      <div style="margin-top: 12px">
+        <el-button size="small" @click="openCompare">巡检结果对比</el-button>
+      </div>
     </el-card>
 
     <!-- 原文详情弹窗 -->
@@ -192,6 +195,46 @@
         <el-button type="primary" :loading="tplSaving" @click="saveTpl">保存模板</el-button>
       </template>
     </el-dialog>
+
+    <!-- 巡检结果对比对话框 -->
+    <el-dialog v-model="compareDialogVisible" title="巡检结果对比" width="700px">
+      <el-form label-width="80px" size="small">
+        <el-form-item label="资产 ID">
+          <el-select v-model="compareAssetId" filterable placeholder="选择资产">
+            <el-option v-for="a in ctAssets" :key="a.id" :label="a.name" :value="a.id" />
+          </el-select>
+          <el-button type="primary" size="small" style="margin-left: 12px" @click="doCompare" :loading="compareLoading">查询对比</el-button>
+        </el-form-item>
+      </el-form>
+      <div v-if="compareData.delta && Object.keys(compareData.delta).length">
+        <el-alert v-if="compareData.note" :title="compareData.note" type="info" :closable="false" style="margin-bottom: 12px" />
+        <el-table :data="compareRows" size="small" border>
+          <el-table-column prop="key" label="指标" width="100" />
+          <el-table-column prop="prev" label="上次" width="140" />
+          <el-table-column prop="latest" label="本次" width="140" />
+          <el-table-column label="变化" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.trend === 'up' ? 'danger' : row.trend === 'down' ? 'success' : 'info'" size="small">{{ row.change }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="趋势" width="80">
+            <template #default="{ row }">
+              <el-icon v-if="row.trend === 'up'" color="#f56c6c"><Top /></el-icon>
+              <el-icon v-else-if="row.trend === 'down'" color="#67c23a"><Bottom /></el-icon>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="时间" min-width="160">
+            <template #default="{ row }">
+              <div style="font-size: 12px; color: #999">{{ row.prev_time }}</div>
+              <div style="font-size: 12px; color: #333">{{ row.latest_time }}</div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <div v-else-if="compareCalled" style="color: #999; text-align: center; padding: 40px">暂无对比数据</div>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -357,6 +400,46 @@ async function startInspection() {
 
   ws.onerror = () => { pushLine('[WebSocket 连接失败]', 'err'); running.value = false }
   ws.onclose = () => { running.value = false }
+}
+
+// 巡检结果对比
+const compareDialogVisible = ref(false)
+const compareAssetId = ref("")
+const compareLoading = ref(false)
+const compareCalled = ref(false)
+const compareData = ref({})
+const compareRows = ref([])
+
+function openCompare() {
+  compareAssetId.value = ctAssets.value.length > 0 ? ctAssets.value[0].id : ""
+  compareDialogVisible.value = true
+  compareCalled.value = false
+  compareData.value = {}
+  compareRows.value = []
+}
+
+async function doCompare() {
+  if (!compareAssetId.value) return
+  compareLoading.value = true
+  try {
+    compareData.value = await http.get("/ct/inspection/results/compare?asset_id=" + compareAssetId.value + "&limit=2")
+    compareCalled.value = true
+    const d = compareData.value.delta || {}
+    const snaps = compareData.value.snapshots || []
+    compareRows.value = Object.entries(d).map(([key, val]) => ({
+      key,
+      prev: val.prev ?? val.prev_summary ?? "-",
+      latest: val.latest ?? val.latest_summary ?? "-",
+      change: val.change ?? val.trend,
+      trend: val.trend,
+      prev_time: snaps.length > 1 ? (snaps[1].time || "-") : "-",
+      latest_time: snaps.length > 0 ? (snaps[0].time || "-") : "-",
+    }))
+  } catch (e) {
+    ElMessage.error("对比查询失败")
+  } finally {
+    compareLoading.value = false
+  }
 }
 
 onMounted(async () => {
