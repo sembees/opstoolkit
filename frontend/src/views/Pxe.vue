@@ -226,7 +226,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from "vue"
+import { ref, reactive, onMounted, onBeforeUnmount, computed } from "vue"
 import http, { downloadZip } from "../api"
 import { ElMessage } from "element-plus"
 
