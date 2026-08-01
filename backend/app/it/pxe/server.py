@@ -79,7 +79,21 @@ def detect_network() -> dict:
                 iface = parts[i + 1]
         break
     if not iface:
-        return {}
+        # 没有默认路由时，取第一个有 IP 的非 loopback 接口作为回退
+        rc, out, _ = _run(["ip", "-o", "-f", "inet", "addr", "show"])
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 4:
+                iface2 = parts[1]
+                if iface2 != "lo":
+                    iface = iface2
+                    for tok in parts[2:]:
+                        if "/" in tok and tok[0].isdigit():
+                            ip_addr = tok
+                            break
+                    break
+        if not iface:
+            return {}
     # 2. 该网卡的 IP/前缀
     rc, out, _ = _run(["ip", "-o", "-f", "inet", "addr", "show", iface])
     ip_addr = ""
@@ -207,16 +221,59 @@ def deploy_files(files, pid="") -> dict:
 
 
 def service_control(action) -> dict:
-    """start/stop/restart/reload/status。"""
+    """start/stop/restart/reload/status。支持 systemd 和直接进程管理。"""
     if not is_linux():
         return {"ok": False, "msg": "非 Linux"}
     action = (action or "status").lower()
+
+    # 检测是否有 systemd（容器内通常没有）
+    has_systemd = os.path.isfile("/run/systemd/system")
+
     if action == "status":
-        rc, out, _ = _run(["systemctl", "is-active", "dnsmasq"])
-        active = out.strip() == "active"
-        rc2, out2, _ = _run(["systemctl", "is-enabled", "dnsmasq"])
-        return {"ok": True, "active": active, "enabled": out2.strip() == "enabled",
-                "msg": "active" if active else "inactive"}
+        if has_systemd:
+            rc, out, _ = _run(["systemctl", "is-active", "dnsmasq"])
+            active = out.strip() == "active"
+            rc2, out2, _ = _run(["systemctl", "is-enabled", "dnsmasq"])
+            return {"ok": True, "active": active, "enabled": out2.strip() == "enabled",
+                    "msg": "active" if active else "inactive"}
+        else:
+            # 直接检查 dnsmasq 进程
+            rc, out, _ = _run(["pgrep", "-x", "dnsmasq"])
+            active = rc == 0
+            return {"ok": True, "active": active, "enabled": False,
+                    "msg": "active" if active else "inactive"}
+
+    # 容器环境：直接管理 dnsmasq 进程
+    if not has_systemd:
+        pid_file = "/var/run/dnsmasq-opstk.pid"
+        if action in ("stop", "restart"):
+            # 停止现有进程
+            _run(["pkill", "-x", "dnsmasq"])
+            # 清理旧 PID 文件
+            if os.path.exists(pid_file):
+                os.remove(pid_file)
+        if action in ("start", "restart"):
+            if os.path.exists(DNSMASQ_CONF):
+                rc, out, err = _run(
+                    ["dnsmasq", "--conf-file=" + DNSMASQ_CONF, "--pid-file=" + pid_file,
+                     "--keep-in-foreground"], timeout=5
+                )
+                # dnsmasq with --keep-in-foreground will block, run it in background via shell
+                import subprocess as _sp
+                try:
+                    _sp.Popen(
+                        ["dnsmasq", "--conf-file=" + DNSMASQ_CONF, "--pid-file=" + pid_file],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                        start_new_session=True, close_fds=True
+                    )
+                    return {"ok": True, "msg": "dnsmasq 已启动"}
+                except Exception as e:
+                    return {"ok": False, "msg": "启动失败: " + str(e)[:80]}
+            else:
+                return {"ok": False, "msg": "配置文件不存在: " + DNSMASQ_CONF}
+        return {"ok": True, "msg": action + " OK"}
+
+    # systemd 环境
     rc, out, err = _run(["systemctl", action, "dnsmasq"], sudo=True)
     ok = rc == 0
     return {"ok": ok, "msg": (out.strip() or err.strip() or ("ok" if ok else "fail"))[:120]}

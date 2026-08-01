@@ -236,15 +236,19 @@ def _dnsmasq(c, installs=None):
         "# dnsmasq PXE 配置 (OpsToolkit 生成)",
         "# 部署模式: " + _mode_label(mode),
         "port=0",
-        "interface=" + iface,
         "bind-interfaces",
         "",
     ]
+    if iface:
+        L.insert(3, "interface=" + iface)  # 在 port=0 后插入接口绑定
 
     if mode == "relay":
         # 中继模式：不开 DHCP，只做 TFTP + HTTP 文件服务
         L.append("# 仅 TFTP，DHCP 由网络中继转发，确保交换机 IP Helper 指向本机")
-        L.append("no-dhcp-interface=")
+        if iface:
+            L.append("no-dhcp-interface=" + iface)
+        else:
+            L.append("no-dhcp-interface=")
         L.append("")
         L.append("enable-tftp")
         L.append("tftp-root=/srv/tftp")
