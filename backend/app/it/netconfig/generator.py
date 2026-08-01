@@ -123,6 +123,12 @@ def _build_nmcli(req):
     cmds.append(f"# 目标系统: {req.os}  后端: NetworkManager (nmcli)")
     cmds.append("set -e")
     cmds.append("")
+    cmds.append("# 检查 nmcli 是否可用")
+    cmds.append("if ! command -v nmcli >/dev/null 2>&1; then")
+    cmds.append('  echo "错误: 未找到 nmcli，请先安装 NetworkManager: dnf install NetworkManager"')
+    cmds.append("  exit 1")
+    cmds.append("fi")
+    cmds.append("")
     if req.hostname:
         cmds.append(f"hostnamectl set-hostname {req.hostname}")
         cmds.append("")
@@ -228,8 +234,101 @@ def _build_netplan(req):
     return "\n".join(out) + "\n"
 
 
+# RHEL/CentOS 7+ 传统 ifcfg 文件格式（无需 NetworkManager）
+def _build_ifcfg(req):
+    """生成 /etc/sysconfig/network-scripts/ifcfg-* 文件。"""
+    files = {}
+    bond_slaves = set()
+    for b in req.bonds:
+        bond_slaves.update(b.interfaces)
+    bridge_ports = set()
+    for br in req.bridges:
+        bridge_ports.update(br.interfaces)
+
+    def _ip_lines(obj):
+        lines = []
+        if obj.get("mode") == "dhcp" or not obj.get("ip"):
+            lines.append("BOOTPROTO=dhcp")
+        else:
+            lines.append("BOOTPROTO=static")
+            lines.append("IPADDR=" + str(obj["ip"]))
+            lines.append("PREFIX=" + str(_prefix(obj)))
+            gw = obj.get("gateway")
+            if gw:
+                lines.append("GATEWAY=" + str(gw))
+            dns = obj.get("dns") or []
+            for i, d in enumerate(dns, 1):
+                lines.append("DNS" + str(i) + "=" + str(d))
+        lines.append("ONBOOT=yes")
+        return lines
+
+    # Interfaces
+    for o in req.interfaces:
+        name = o.name
+        lines = ["DEVICE=" + name, "TYPE=Ethernet"]
+        if name in bond_slaves:
+            master = next((b.name for b in req.bonds if name in b.interfaces), "")
+            lines += ["MASTER=" + master, "SLAVE=yes", "ONBOOT=yes"]
+        elif name in bridge_ports:
+            master = next((br.name for br in req.bridges if name in br.interfaces), "")
+            lines += ["BRIDGE=" + master, "ONBOOT=yes"]
+        else:
+            lines += _ip_lines(o.model_dump())
+        files["ifcfg-" + name] = "\n".join(lines) + "\n"
+
+    # ? bond/bridge ??? interfaces ????????????
+    all_ifaces = {o.name for o in req.interfaces}
+    for b in req.bonds:
+        for ifname in b.interfaces:
+            if ifname not in all_ifaces:
+                files["ifcfg-" + ifname] = "DEVICE=" + ifname + "\nTYPE=Ethernet\nMASTER=" + b.name + "\nSLAVE=yes\nONBOOT=yes\n"
+    for br in req.bridges:
+        for ifname in br.interfaces:
+            if ifname not in all_ifaces:
+                files["ifcfg-" + ifname] = "DEVICE=" + ifname + "\nTYPE=Ethernet\nBRIDGE=" + br.name + "\nONBOOT=yes\n"
+
+    # Bonds
+    for o in req.bonds:
+        name = o.name
+        mode = int(o.mode or 1)
+        mode_str = BOND_MODES.get(mode, "active-backup")
+        opts = "mode=" + mode_str + " miimon=" + str(o.miimon or 100)
+        if o.primary:
+            opts += " primary=" + o.primary
+        lines = ["DEVICE=" + name, "TYPE=Bond", "BONDING_MASTER=yes", "BONDING_OPTS=\"" + opts + "\""]
+        lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "dns": o.dns, "netmask": o.netmask})
+        files["ifcfg-" + name] = "\n".join(lines) + "\n"
+
+    # VLANs
+    for o in req.vlans:
+        name = o.parent + "." + str(o.vlan_id)
+        lines = ["DEVICE=" + name, "TYPE=Vlan", "VLAN=yes", "PHYSDEV=" + o.parent]
+        lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "netmask": o.netmask})
+        files["ifcfg-" + name] = "\n".join(lines) + "\n"
+
+    # Bridges
+    for o in req.bridges:
+        name = o.name
+        lines = ["DEVICE=" + name, "TYPE=Bridge"]
+        lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "netmask": o.netmask})
+        files["ifcfg-" + name] = "\n".join(lines) + "\n"
+
+    # Combine output
+    result = ["# ===== 网络配置文件 (ifcfg格式) ====="]
+    result.append("# 存放位置: /etc/sysconfig/network-scripts/")
+    result.append("# 生成后执行: systemctl restart network")
+    result.append("")
+    for fname in sorted(files.keys()):
+        result.append("# ===== " + fname + " =====")
+        result.append(files[fname])
+        result.append("")
+    return "\n".join(result)
+
+
 def generate_netconfig(req):
-    """根据请求参数分发到 netplan 或 nmcli 生成器。"""
+    """根据请求参数分发到 netplan、nmcli 或 ifcfg 生成器。"""
     if req.format == "netplan" and req.os == "ubuntu":
         return _build_netplan(req), "99-opstk.yaml"
+    if req.format == "ifcfg":
+        return _build_ifcfg(req), "ifcfg-files.txt"
     return _build_nmcli(req), "apply-network.sh"
