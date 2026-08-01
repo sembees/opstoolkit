@@ -39,6 +39,22 @@ class PxeGeneratorTest(unittest.TestCase):
         self.assertIn("url --url=", files["ks.cfg"])
         self.assertIn("reboot", files["ks.cfg"])
 
+    def test_ubuntu_direct_uefi(self):
+        cfg = PxeConfig(
+            os_type="ubuntu",
+            os_version="22.04",
+            hostname="uefi-01",
+            admin_password="Test@123",
+            server_ip="10.10.10.10",
+            disk_scheme="direct",
+        )
+        files = generate_all(cfg)
+        data = files["user-data"]
+        self.assertIn('"ptable": "gpt"', data)
+        self.assertIn('"grub_device": true', data)
+        self.assertIn('"/boot/efi"', data)
+        self.assertIn('"fstype": "fat32"', data)
+
 
 if __name__ == "__main__":
     unittest.main()

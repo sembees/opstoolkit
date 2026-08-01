@@ -24,16 +24,10 @@ FIRMWARE = {
 }
 
 # 需要落地到 HTTP 目录的应答文件
-WEB_FILES = ("user-data", "meta-data", "ks.cfg", "boot.ipxe")
 
 
 def is_linux() -> bool:
     return platform.system() == "Linux"
-
-
-def _has_systemd() -> bool:
-    """??????? systemd ??? (???? vs ??)?"""
-    return os.path.isfile("/run/systemd/system")
 
 
 def _is_root() -> bool:

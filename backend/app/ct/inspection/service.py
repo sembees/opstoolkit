@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
-from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,16 +13,12 @@ from app.core import crud, models
 from app.ct.drivers import get_driver, infer_netmiko_device_type
 from app.ct.drivers.base import MetricCommand
 from app.ct.inspection.parser import parse_output
+from app.core.timeutil import utcnow
 from app.database import async_session
 
 ProgressCb = Callable[[dict], None]
 
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
-
-
-def utcnow() -> datetime:
-    """返回无时区的 UTC 时间，与 SQLite 的 naive datetime 保持一致。"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def schedule_background(coro) -> asyncio.Task:

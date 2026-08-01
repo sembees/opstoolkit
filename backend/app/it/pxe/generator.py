@@ -54,8 +54,13 @@ def _ubuntu_user_data(c):
 
     if c.disk_scheme == "direct":
         storage = json.dumps([
-            {"type": "format", "fstype": "ext4", "volume": "/dev/" + disk},
-            {"type": "mount", "path": "/", "device": "/dev/" + disk},
+            {"type": "disk", "id": "disk0", "device": "/dev/" + disk, "wipe": "superblock", "ptable": "gpt"},
+            {"type": "partition", "id": "partition-0", "device": "disk0", "size": "512M", "flag": "boot", "grub_device": True},
+            {"type": "partition", "id": "partition-1", "device": "disk0", "size": -1},
+            {"type": "format", "fstype": "fat32", "volume": "partition-0"},
+            {"type": "format", "fstype": "ext4", "volume": "partition-1"},
+            {"type": "mount", "path": "/boot/efi", "device": "partition-0"},
+            {"type": "mount", "path": "/", "device": "partition-1"},
         ])
     else:
         storage = json.dumps([
