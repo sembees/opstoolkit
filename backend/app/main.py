@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -63,12 +64,21 @@ except Exception:  # noqa: BLE001
     pass
 
 # 部署时把前端构建产物挂到根路径（可选）
-# 前端 SPA 静态页（若已构建）
+# 前端 SPA 静态页（若已构建），使用 SPA fallback 路由
 try:
     from pathlib import Path
 
     _dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
     if _dist.exists():
-        app.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
+        # 挂载 assets 为静态文件（JS/CSS/图片）
+        app.mount("/assets", StaticFiles(directory=str(_dist / "assets")), name="frontend-assets")
+
+        # SPA fallback：所有非 API 路由返回 index.html（Vue Router history mode）
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            index = _dist / "index.html"
+            if index.exists():
+                return FileResponse(index)
+            return {"detail": "Not Found"}
 except Exception:  # noqa: BLE001
     pass
