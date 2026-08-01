@@ -126,7 +126,17 @@ def _build_nmcli(req):
     if req.hostname:
         cmds.append(f"hostnamectl set-hostname {req.hostname}")
         cmds.append("")
+    # 收集 bond/bridge 从接口，跳过独立配置
+    nm_bond_slaves = set()
+    for b in req.bonds:
+        nm_bond_slaves.update(b.interfaces)
+    nm_bridge_slaves = set()
+    for br in req.bridges:
+        nm_bridge_slaves.update(br.interfaces)
+
     for o in req.interfaces:
+        if o.name in nm_bond_slaves or o.name in nm_bridge_slaves:
+            continue
         _iface(cmds, o.model_dump())
     for o in req.bonds:
         _bond(cmds, o.model_dump())
@@ -168,9 +178,22 @@ def _build_netplan(req):
     renderer = getattr(req, "netplan_renderer", "networkd") or "networkd"
     out.append(f"  renderer: {renderer}")
     ind = "    "
+    # 收集被 bond/bridge 引用的从接口，避免重复配置 IP
+    bond_slaves = set()
+    for b in req.bonds:
+        bond_slaves.update(b.interfaces)
+    bridge_slaves = set()
+    for br in req.bridges:
+        bridge_slaves.update(br.interfaces)
+
     if req.interfaces:
         out.append("  ethernets:")
         for o in req.interfaces:
+            # 如果该接口被 bond 或 bridge 引用，仅设为禁用状态
+            if o.name in bond_slaves or o.name in bridge_slaves:
+                out.append(f"{ind}{o.name}:")
+                out.append(f"{ind}  dhcp4: false")
+                continue
             out.append(f"{ind}{o.name}:")
             _netplan_addr_block(out, ind + "  ", o.model_dump(), dhcp_default=True)
     # 网卡聚合 (bond)：支持 active-backup/802.3ad 等模式
@@ -183,6 +206,8 @@ def _build_netplan(req):
             out.append(f"{ind}  parameters:")
             out.append(f"{ind}    mode: {ms}")
             out.append(f"{ind}    miimon: {o.miimon}")
+            if o.primary:
+                out.append(f"{ind}    primary: {o.primary}")
             _netplan_addr_block(out, ind + "  ", o.model_dump())
     # VLAN 子接口：从父接口创建 tagged sub-interface
     if req.vlans:
