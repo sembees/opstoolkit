@@ -6,6 +6,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.config import settings
 
+# 异步 SQLAlchemy 引擎，默认 SQLite (aiosqlite)
 engine = create_async_engine(settings.database_url, echo=settings.debug, future=True)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -20,7 +21,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """建表并写入默认管理员。在应用启动时调用。"""
+    """应用启动时自动调用。
+
+    1. 创建所有表（若不存在）
+    2. 写入各厂商默认巡检模板
+    3. 创建默认管理员账号（若不存在）
+    """
     from app.core import models  # noqa: F401
 
     async with engine.begin() as conn:

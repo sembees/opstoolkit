@@ -25,6 +25,7 @@ ALGORITHM = "HS256"
 
 
 def _truncate(pw: str) -> bytes:
+    """截断密码至 72 字节。bcrypt 只处理前 72 字节，超出部分被忽略。"""
     return pw.encode("utf-8")[:72]
 
 
@@ -40,6 +41,7 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 def create_access_token(subject: str, extra: dict[str, Any] | None = None) -> str:
+    """生成 JWT 令牌，设置过期时间并附带可选的额外字段。"""
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
     payload: dict[str, Any] = {"sub": subject, "exp": expire}
     if extra:
@@ -55,6 +57,7 @@ def decode_access_token(token: str) -> dict:
     return payload
 
 
+# 解析 Authorization: Bearer <token> 并验证用户存在性
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),

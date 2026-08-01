@@ -23,6 +23,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan, debug=settings.debug)
 
+# 允许前端跨域访问
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
@@ -42,6 +43,7 @@ async def health() -> dict:
 
 
 # PXE/ZTP HTTP 文件服务 (本机部署后生效，必须在根路径前注册)
+# 如果本机已部署 PXE/ZTP ，挂载静态文件服务
 try:
     from pathlib import Path
 
@@ -61,6 +63,7 @@ except Exception:  # noqa: BLE001
     pass
 
 # 部署时把前端构建产物挂到根路径（可选）
+# 前端 SPA 静态页（若已构建）
 try:
     from pathlib import Path
 

@@ -125,6 +125,7 @@ def deploy_files(files: dict, tid: str = "") -> dict:
     for name, content in files.items():
         if name == "dnsmasq.conf":
             continue
+        # 同时落地到 TFTP 和 HTTP 目录，保证多种引导方式均可用
         for root in (TFTP_ROOT, WEB_ROOT):
             dst = _safe_dst(root, name)
             if dst is None:

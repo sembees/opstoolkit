@@ -20,6 +20,7 @@ router = APIRouter()
 
 
 @router.get("/templates")
+# GET /api/ct/inspection/templates — 巡检模板列表
 async def list_templates(_user=Depends(get_current_user)):
     """列出各厂商可用的默认巡检模板与指标项。"""
     out = {}
@@ -37,6 +38,7 @@ async def list_templates(_user=Depends(get_current_user)):
 
 
 @router.post("/run")
+# POST /api/ct/inspection/run — 发起巡检任务（后台执行）
 async def run_inspection(
     body: InspectionCreate,
     db: AsyncSession = Depends(get_db),

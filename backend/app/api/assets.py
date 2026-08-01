@@ -93,6 +93,7 @@ def _asset_out(a: models.Asset) -> AssetOut:
 
 
 @router.get("", response_model=list[AssetOut])
+# GET /api/assets — 资产列表，可按 category 筛选
 async def list_assets(category: str | None = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     stmt = select(models.Asset).order_by(models.Asset.created_at.desc())
     if category:
@@ -102,6 +103,7 @@ async def list_assets(category: str | None = None, db: AsyncSession = Depends(ge
 
 
 @router.post("", response_model=AssetOut)
+# POST /api/assets — 新建资产，自动关联凭据
 async def create_asset(body: AssetIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     device_type = body.device_type or infer_netmiko_device_type(body.vendor, body.device_role)
     a = models.Asset(
@@ -118,6 +120,7 @@ async def create_asset(body: AssetIn, db: AsyncSession = Depends(get_db), _user=
 
 
 @router.put("/{aid}", response_model=AssetOut)
+# PUT /api/assets/{aid} — 更新资产信息
 async def update_asset(aid: str, body: AssetIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     a = await db.get(models.Asset, aid)
     if not a:

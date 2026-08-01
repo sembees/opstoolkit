@@ -226,14 +226,14 @@ async def server_status(_user=Depends(get_current_user)):
 
 @router.post("/server/service")
 async def service_control(body: dict = None, _user=Depends(get_current_user)):
-    """控制 dnsmasq 服务: start/stop/restart/reload/status。"""
+    """POST /api/it/pxe/server/service — 控制 dnsmasq: start/stop/restart/reload/status。"""
     action = (body or {}).get("action", "status")
     return pxe_server.service_control(action)
 
 
 @router.post("/profiles/{pid}/deploy")
 async def deploy_to_host(pid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
-    """一键部署到本机: 生成配置 -> 落地文件 -> 重启 dnsmasq。"""
+    """POST /api/it/pxe/profiles/{pid}/deploy — 一键部署到本机：生成配置→落地文件→重启 dnsmasq。"""
     body = body or {}
     if not body.get("server_ip"):
         body["server_ip"] = _local_ip()
@@ -250,7 +250,7 @@ async def deploy_to_host(pid: str, body: dict = None, db: AsyncSession = Depends
 # ---------- ISO ?? ----------
 @router.get("/iso/list")
 async def list_isos(_user=Depends(get_current_user)):
-    """列出已上传的 ISO 文件。"""
+    """GET /api/it/pxe/iso/list — 列出 /srv/opstk/iso 中的 ISO 文件。"""
     return pxe_server.list_isos()
 
 

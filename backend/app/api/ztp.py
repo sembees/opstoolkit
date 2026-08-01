@@ -68,12 +68,14 @@ def _to_profile(p: models.ZtpTemplate) -> ZtpProfile:
 
 # ---------- 模板 CRUD ----------
 @router.get("/templates", response_model=list[ZtpTemplateOut])
+# GET /api/ct/ztp/templates — ZTP 开局模板列表
 async def list_templates(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     res = await db.execute(select(models.ZtpTemplate).order_by(models.ZtpTemplate.created_at.desc()))
     return [_template_out(t) for t in res.scalars().all()]
 
 
 @router.post("/templates", response_model=ZtpTemplateOut)
+# POST /api/ct/ztp/templates — 新建 ZTP 模板
 async def create_template(body: ZtpTemplateIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     t = models.ZtpTemplate(
         name=body.name, vendor=(body.vendor or "h3c").strip().lower(),

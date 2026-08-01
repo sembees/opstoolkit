@@ -116,6 +116,7 @@ def _bridge(cmds, obj):
     cmds.append("")
 
 
+# RHEL 8+ 使用 NetworkManager (nmcli) 生成配置脚本
 def _build_nmcli(req):
     cmds = []
     cmds.append("#!/bin/bash")
@@ -159,6 +160,7 @@ def _netplan_addr_block(out, indent, obj, dhcp_default=False):
         out.append(f"{indent}  addresses: [{', '.join(obj['dns'])}]")
 
 
+# Ubuntu 22.04+ 使用 netplan 生成 YAML 配置 ，默认 renderer=networkd
 def _build_netplan(req):
     out = []
     out.append("# /etc/netplan/99-opstk.yaml")
@@ -172,6 +174,7 @@ def _build_netplan(req):
         for o in req.interfaces:
             out.append(f"{ind}{o.name}:")
             _netplan_addr_block(out, ind + "  ", o.model_dump(), dhcp_default=True)
+    # 网卡聚合 (bond)：支持 active-backup/802.3ad 等模式
     if req.bonds:
         out.append("  bonds:")
         for o in req.bonds:
@@ -182,6 +185,7 @@ def _build_netplan(req):
             out.append(f"{ind}    mode: {ms}")
             out.append(f"{ind}    miimon: {o.miimon}")
             _netplan_addr_block(out, ind + "  ", o.model_dump())
+    # VLAN 子接口：从父接口创建 tagged sub-interface
     if req.vlans:
         out.append("  vlans:")
         for o in req.vlans:
@@ -190,6 +194,7 @@ def _build_netplan(req):
             out.append(f"{ind}  id: {o.vlan_id}")
             out.append(f"{ind}  link: {o.parent}")
             _netplan_addr_block(out, ind + "  ", o.model_dump())
+    # 网桥 (bridge)：将多个接口归入同一二层广播域
     if req.bridges:
         out.append("  bridges:")
         for o in req.bridges:
@@ -200,6 +205,7 @@ def _build_netplan(req):
 
 
 def generate_netconfig(req):
+    """根据请求参数分发到 netplan 或 nmcli 生成器。"""
     if req.format == "netplan" and req.os == "ubuntu":
         return _build_netplan(req), "99-opstk.yaml"
     return _build_nmcli(req), "apply-network.sh"

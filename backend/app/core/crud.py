@@ -59,6 +59,7 @@ async def get_credential_for_asset(db: AsyncSession, asset: models.Asset) -> Opt
     return None
 
 
+# 解密凭据为明文字典，供 netmiko/paramiko 使用
 async def decrypt_credential(cred: models.Credential) -> dict:
     """把凭据解密成明文字典，供 netmiko 使用。"""
     return {

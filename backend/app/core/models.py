@@ -17,13 +17,14 @@ def _uuid() -> str:
 
 
 class User(Base):
+    """系统用户，支持 admin 和 operator 角色。"""
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(64), default="")
-    role: Mapped[str] = mapped_column(String(16), default="admin")
+    role: Mapped[str] = mapped_column(String(16), default="admin")  # admin / operator
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -32,11 +33,11 @@ class Credential(Base):
     __tablename__ = "credentials"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(String(128), index=True)
-    username: Mapped[str] = mapped_column(String(128))
-    encrypted_password: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    ssh_key_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    enable_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)      # 凭据显示名称
+    username: Mapped[str] = mapped_column(String(128))                 # 登录用户名
+    encrypted_password: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 加密存储的密码
+    ssh_key_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)      # 加密的 SSH 私钥
+    enable_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)   # 加密的 enable 密码
     device_type: Mapped[str] = mapped_column(String(64), default="")
     port: Mapped[int] = mapped_column(Integer, default=22)
     remark: Mapped[str] = mapped_column(Text, default="")
@@ -46,12 +47,16 @@ class Credential(Base):
 
 
 class Asset(Base):
-    """资产。category: ct(网络/安全设备) / it(服务器)。"""
+    """资产。
+
+    category: ct(网络/安全设备) / it(服务器)。
+    vendor: h3c / huawei / cisco / dell / hp / generic
+    """
     __tablename__ = "assets"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(128), index=True)
-    category: Mapped[str] = mapped_column(String(8), index=True)
+    category: Mapped[str] = mapped_column(String(8), index=True)    # ct / it
     vendor: Mapped[str] = mapped_column(String(32), default="")
     device_role: Mapped[str] = mapped_column(String(32), default="")
     host: Mapped[str] = mapped_column(String(255))
@@ -122,7 +127,11 @@ class PxeInstall(Base):
 
 
 class InspectionTemplate(Base):
-    """巡检模板：系统默认(只读) + 用户自定义(可编辑)。items 是 [{key,label,command,textfsm,unit}] 列表。"""
+    """巡检模板。
+
+    is_system=True 时不可编辑/删除，但可克隆后自定义。
+    items 每项包含: {key, label, command, textfsm, unit}。
+    """
     __tablename__ = "inspection_templates"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
@@ -203,7 +212,7 @@ class ZtpTemplate(Base):
     server_ip: Mapped[str] = mapped_column(String(64), default="10.0.0.250")
     tftp_root: Mapped[str] = mapped_column(String(255), default="/srv/tftp")
     http_root: Mapped[str] = mapped_column(String(255), default="http://10.0.0.250:8000/ztp")
-    deploy_mode: Mapped[str] = mapped_column(String(16), default="standalone")
+    deploy_mode: Mapped[str] = mapped_column(String(16), default="standalone")  # standalone / proxy / relay，与 PXE 一致
     dhcp_iface: Mapped[str] = mapped_column(String(32), default="eth0")
     dhcp_start: Mapped[str] = mapped_column(String(64), default="10.0.0.100")
     dhcp_end: Mapped[str] = mapped_column(String(64), default="10.0.0.200")
@@ -222,6 +231,6 @@ class ZtpDevice(Base):
     hostname: Mapped[str] = mapped_column(String(128), default="")
     mac: Mapped[str] = mapped_column(String(32), index=True)
     serial: Mapped[str] = mapped_column(String(128), default="")
-    mgmt_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    mgmt_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # ZTP 完成后回填的管理 IP
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
