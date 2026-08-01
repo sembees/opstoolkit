@@ -16,8 +16,8 @@ services:
       # PXE 文件 (内核 + 固件 + 应答文件)
       - tftp-root:/srv/tftp
       - pxe-web:/srv/opstk/pxe-web
-      - iso-store:/srv/opstk/iso
-      - mnt-tmp:/srv/opstk/mnt
+      - /srv/opstk/iso:/srv/opstk/iso
+      - /srv/opstk/mnt:/srv/opstk/mnt
     restart: unless-stopped
 
 volumes:
