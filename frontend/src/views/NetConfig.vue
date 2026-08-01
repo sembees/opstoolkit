@@ -87,6 +87,10 @@
                 </el-select>
                 <el-input v-model="row.miimon" size="small" style="width:50px;margin-left:4px" placeholder="100" @input="preview" />
               </template>
+              <template v-else-if="row._type==='vlan'">
+                <span style="font-size:11px;color:#909399;margin-right:2px">ID</span>
+                <el-input-number v-model="row.vlanId" size="small" :min="1" :max="4094" style="width:75px" @change="onVlanIdChange(row)" controls-position="right" />
+              </template>
               <span v-else style="color:#999;font-size:11px">-</span>
             </template>
           </el-table-column>
@@ -141,13 +145,18 @@ const availableParents = computed(() => {
   return names.length ? names : ["eth0"]
 })
 
+function onVlanIdChange(row) {
+  row.name = (row.parent || "eth0") + "." + (row.vlanId || 100)
+  preview()
+}
+
 function onVlanParentChange(row) {
   row.name = (row.parent || "eth0") + "." + (row.vlanId || 100)
   preview()
 }
 
 function addItem(typ) {
-  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100 }
+  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100 }
   if (typ === "iface") { base.name = "eth" + items.value.filter(i => i._type === "iface").length; base.mode = "dhcp" }
   else if (typ === "bond") { base.name = "bond" + items.value.filter(i => i._type === "bond").length; base.slavesStr = "eth0,eth1"; onSlavesChange(base) }
   else if (typ === "vlan") { base.vlanId = 100; base.parent = items.value.find(i => i._type === "iface")?.name || availableParents.value[0] || "eth0"; base.name = base.parent + "." + base.vlanId }
