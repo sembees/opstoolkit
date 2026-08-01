@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+*.pyo
+node_modules
+.git
+*.tar.gz
+data/
+*.db
+.env
+.vscode

@@ -26,4 +26,4 @@ if [ -f /etc/dnsmasq.d/opstk-pxe.conf ]; then
 fi
 
 echo "=== 启动 OpsToolkit Web 服务 (端口 8000) ==="
-exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+exec python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000

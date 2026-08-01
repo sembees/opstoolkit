@@ -12,9 +12,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # 安装: dnsmasq (DHCP+TFTP) + ipxe (固件) + mount 工具 + Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    dnsmasq ipxe ipxe-qemu util-linux mount \
-    python3 python3-pip python3-venv \
-    openssh-client policycoreutils semanage-utils selinux-utils \
+    dnsmasq ipxe ipxe-qemu util-linux \
+    python3 python3-pip python3-venv python-is-python3 \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/backend
