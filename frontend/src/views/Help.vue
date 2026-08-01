@@ -739,6 +739,52 @@ systemctl status dnsmasq -l  # 看报错详情</pre>
           </el-collapse>
         </el-tab-pane>
 
+        
+<!-- ===== 网络配置生成器使用指南 ===== -->
+        <el-tab-pane label="网络配置生成" name="netconfig">
+          <h3>网络配置生成器使用指南</h3>
+          <p style="color:#666">生成 Ubuntu netplan 或 RHEL nmcli 配置脚本，支持网卡、Bond、VLAN、Bridge。</p>
+
+          <el-collapse v-model="netconfigActive" style="margin-top:12px">
+
+            <el-collapse-item title="操作步骤" name="nc1">
+              <el-steps direction="vertical" :active="4">
+                <el-step title="第1步：选择系统" description="在页面顶部切换 OS：Ubuntu 生成 .yaml (netplan)，RHEL 生成 .sh 脚本 (nmcli)。对于静态 IP 服务器，推荐 renderer=networkd。" />
+                <el-step title="第2步：添加接口" description="可添加多个品种：物理网卡、网卡聚合(Bond)、VLAN子接口、网桥(Bridge)。每个接口独立配置 IP。" />
+                <el-step title="第3步：配置参数" description="每个接口可选 dhcp 或手动填写 IP/网关/DNS。Bond 支持 mode 0-6，可指定主/从接口。" />
+                <el-step title="第4步：下载使用" description="点击“下载”按钮。得到的文件直接在目标机器上执行（RHEL: bash apply-network.sh，Ubuntu: sudo cp 99-opstk.yaml /etc/netplan/ → sudo netplan apply）。" />
+              </el-steps>
+            </el-collapse-item>
+
+            <el-collapse-item title="配置类型说明" name="nc2">
+              <el-table :data="netconfigRows" border size="small">
+                <el-table-column prop="item" label="类型" width="150" />
+                <el-table-column prop="desc" label="说明" />
+              </el-table>
+            </el-collapse-item>
+
+            <el-collapse-item title="下载后怎么用" name="nc3">
+              <p style="font-weight:600;color:#409eff">Ubuntu 22.04+ (netplan)</p>
+              <pre class="code-block"># 1. 复制配置文件
+sudo cp 99-opstk.yaml /etc/netplan/
+# 2. 应用配置
+sudo netplan apply
+# 3. 验证
+ip addr show</pre>
+
+              <p style="font-weight:600;color:#67c23a;margin-top:12px">RHEL 8+ (nmcli)</p>
+              <pre class="code-block"># 1. 加可执行权限
+chmod +x apply-network.sh
+# 2. 执行配置脚本
+sudo bash apply-network.sh
+# 3. 验证
+nmcli device status</pre>
+            </el-collapse-item>
+
+          </el-collapse>
+        </el-tab-pane>
+
+
         <el-tab-pane label="常见概念" name="concept">
           <h3>常见概念解释</h3>
           <el-collapse v-model="conceptActive">
@@ -821,6 +867,7 @@ const dataPaths = [
   { path: "/srv/opstk/iso/", content: "ISO 镜像文件", backup: "可重新下载" },
 ]
 
+const netconfigActive = ref("nc1")
 const pxeActive = ref("p3")
 const ztpActive = ref("z3")
 const pxeFields = [

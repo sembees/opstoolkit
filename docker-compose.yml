@@ -11,6 +11,7 @@ services:
       # 持久化数据
       - ./data:/app/backend/data
       - ./dnsmasq-conf:/etc/dnsmasq.d
+      - ./frontend/dist:/app/frontend/dist
       # PXE 文件 (内核 + 固件 + 应答文件)
       - tftp-root:/srv/tftp
       - pxe-web:/srv/opstk/pxe-web
