@@ -1,7 +1,7 @@
 """API 路由聚合。"""
 from fastapi import APIRouter
 
-from app.api import assets, auth, inspection, netconfig, pxe, ztp
+from app.api import assets, auth, dashboard, inspection, netconfig, pxe, ztp
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["认证"])
@@ -11,3 +11,5 @@ api_router.include_router(netconfig.router, prefix="/it/netconfig", tags=["IT �
 api_router.include_router(pxe.router, prefix="/it/pxe", tags=["IT PXE 装机"])
 
 api_router.include_router(ztp.router, prefix="/ct/ztp", tags=["CT ZTP 开局"])
+
+api_router.include_router(dashboard.router, tags=["仪表盘"])

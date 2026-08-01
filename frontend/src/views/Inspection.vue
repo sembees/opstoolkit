@@ -64,6 +64,20 @@
       </div>
     </el-card>
 
+    <!-- 巡检进度 -->
+    <el-card shadow="never" v-if="running && progressTotal > 0" style="margin-bottom: 16px">
+      <div style="margin-bottom: 6px; font-size: 13px; color: #606266">
+        巡检进度: {{ progressDone }} / {{ progressTotal }} 台已完成
+        <span v-if="progressFailed" style="color: #f56c6c; margin-left: 8px">{{ progressFailed }} 台失败</span>
+      </div>
+      <el-progress
+        :percentage="Math.round((progressDone + progressFailed) * 100 / progressTotal)"
+        :status="progressFailed ? 'exception' : undefined"
+        :stroke-width="18"
+        :text-inside="true"
+      />
+    </el-card>
+
     <!-- 巡检结果 -->
     <el-card shadow="never" v-if="results.length">
       <template #header><span style="font-weight: 600"><el-icon><DataAnalysis /></el-icon> 巡检结果</span></template>
@@ -196,6 +210,9 @@ const completed = ref(false)
 const outputLines = ref([])
 const results = ref([])
 const activeResults = ref([])
+const progressDone = ref(0)
+const progressTotal = ref(0)
+const progressFailed = ref(0)
 const terminalRef = ref()
 const rawDialogVisible = ref(false)
 const rawDetail = ref(null)
@@ -296,6 +313,9 @@ async function delTpl(id) {
 async function startInspection() {
   clearOutput()
   running.value = true
+  progressDone.value = 0
+  progressFailed.value = 0
+  progressTotal.value = selectedAssets.value.length
   const commands = mode.value === 'custom' ? customCommands.value.split('\n').map(c => c.trim()).filter(Boolean) : null
   const tmpl = currentTemplate.value
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -319,6 +339,11 @@ async function startInspection() {
     else if (msg.type === 'output') msg.output.split('\n').forEach(l => { if (l.trim()) pushLine(l, 'info') })
     else if (msg.type === 'error') pushLine('[ERROR] ' + msg.error, 'err')
     else if (msg.type === 'done') pushLine('[完成] ' + msg.asset_name, 'ok')
+    else if (msg.type === 'progress') {
+      progressDone.value = msg.done || 0
+      progressFailed.value = msg.failed || 0
+      progressTotal.value = msg.total || 0
+    }
     else if (msg.type === 'complete') {
       results.value = msg.results || []
       activeResults.value = results.value.map(r => r.asset_id)

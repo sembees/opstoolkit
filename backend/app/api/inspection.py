@@ -76,11 +76,30 @@ async def inspection_ws(websocket: WebSocket):
                 await websocket.close(code=4401, reason="未授权")
                 return
 
+            # 进度统计：每台设备完成/失败时推送 progress 事件
+            total = len(asset_ids)
+            counters = {"done": 0, "failed": 0}
+
             async def on_event(ev: dict):
                 try:
                     await websocket.send_json(ev)
                 except Exception:  # noqa: BLE001
                     pass
+                # 跟踪进度
+                if ev.get("type") == "done":
+                    counters["done"] += 1
+                elif ev.get("type") == "error":
+                    counters["failed"] += 1
+                if ev.get("type") in ("done", "error"):
+                    try:
+                        await websocket.send_json({
+                            "type": "progress",
+                            "done": counters["done"],
+                            "failed": counters["failed"],
+                            "total": total,
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
 
             results = await inspect_many(db, asset_ids, kind, template, commands, on_event)
             await websocket.send_json({"type": "complete", "results": results})
