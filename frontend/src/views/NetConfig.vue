@@ -43,7 +43,8 @@
           </el-table-column>
           <el-table-column label="接口名" width="120">
             <template #default="{ row }">
-              <el-input v-model="row.name" size="small" placeholder="eth0 / bond0 / eth0.100 / br0" @input="preview" />
+              <span v-if="row._type==='vlan'" style="font-size:12px;color:#409eff">{{ row.parent }}.{{ row.vlanId }}</span>
+              <el-input v-else v-model="row.name" size="small" placeholder="eth0 / bond0 / br0" @input="preview" />
             </template>
           </el-table-column>
           <el-table-column label="模式" width="75">
@@ -72,7 +73,9 @@
           <el-table-column label="从接口/父接口" min-width="130">
             <template #default="{ row }">
               <el-input v-if="row._type==='bond' || row._type==='bridge'" v-model="row.slavesStr" size="small" :placeholder="row._type==='bond'?'eth0,eth1':'网口名'" @input="onSlavesChange(row)" />
-              <el-input v-else-if="row._type==='vlan'" v-model="row.parent" size="small" placeholder="父接口(bond0/eth0)" @input="preview" />
+              <el-select v-else-if="row._type==='vlan'" v-model="row.parent" size="small" @change="onVlanParentChange(row)" style="width:120px">
+                <el-option v-for="iface in availableParents" :key="iface" :label="iface" :value="iface" />
+              </el-select>
               <span v-else style="color:#999;font-size:11px">-</span>
             </template>
           </el-table-column>
@@ -109,7 +112,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from "vue"
+import { ref, reactive, computed, onMounted } from "vue"
 import http, { downloadZip } from "../api"
 
 const meta = reactive({ os_options: [], formats: [], bond_modes: [], netplan_renderers: [] })
@@ -128,11 +131,26 @@ function preview() {
 function onDnsChange(row) { row.dns = (row.dnsStr || "").split(",").map(s => s.trim()).filter(Boolean); preview() }
 function onSlavesChange(row) { row.slaves = (row.slavesStr || "").split(",").map(s => s.trim()).filter(Boolean); preview() }
 
+const availableParents = computed(() => {
+  const names = []
+  for (const row of items.value) {
+    if (row._type === "iface" || row._type === "bond") {
+      if (row.name) names.push(row.name)
+    }
+  }
+  return names.length ? names : ["eth0"]
+})
+
+function onVlanParentChange(row) {
+  row.name = (row.parent || "eth0") + "." + (row.vlanId || 100)
+  preview()
+}
+
 function addItem(typ) {
   const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100 }
   if (typ === "iface") { base.name = "eth" + items.value.filter(i => i._type === "iface").length; base.mode = "dhcp" }
   else if (typ === "bond") { base.name = "bond" + items.value.filter(i => i._type === "bond").length; base.slavesStr = "eth0,eth1"; onSlavesChange(base) }
-  else if (typ === "vlan") { base.name = (items.value.find(i => i._type === "iface")?.name || "eth0") + ".100"; base.parent = items.value.find(i => i._type === "iface")?.name || "eth0" }
+  else if (typ === "vlan") { base.vlanId = 100; base.parent = items.value.find(i => i._type === "iface")?.name || availableParents.value[0] || "eth0"; base.name = base.parent + "." + base.vlanId }
   else if (typ === "bridge") { base.name = "br" + items.value.filter(i => i._type === "bridge").length; base.slavesStr = "eth0"; onSlavesChange(base) }
   items.value.push(base)
   preview()
@@ -152,7 +170,7 @@ function buildPayload() {
     } else if (row._type === "bond") {
       payload.bonds.push({ name: row.name, mode: row.bondMode || 1, interfaces: row.slaves || [], ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "", gateway: row.gateway, dns: row.dns || [], miimon: row.miimon || 100 })
     } else if (row._type === "vlan") {
-      payload.vlans.push({ parent: row.parent, vlan_id: parseInt(row.name.split(".").pop()) || 100, mode: row.mode, ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr || "", gateway: row.gateway })
+      payload.vlans.push({ parent: row.parent, vlan_id: parseInt(row.vlanId) || parseInt(row.name.split(".").pop()) || 100, mode: row.mode, ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr || "", gateway: row.gateway })
     } else if (row._type === "bridge") {
       payload.bridges.push({ name: row.name, interfaces: row.slaves || [], ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "", gateway: row.gateway })
     }
