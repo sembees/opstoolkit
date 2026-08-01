@@ -237,7 +237,7 @@ def server_status() -> dict:
 # ---------- ISO ?? ----------
 
 ISO_DIR = "/srv/opstk/iso"
-MOUNT_BASE = "/mnt/opstk-iso"
+MOUNT_BASE = "/srv/opstk/mnt"
 
 
 def list_isos() -> dict:
