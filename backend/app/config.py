@@ -6,16 +6,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _APP_DIR = Path(__file__).resolve().parent.parent
 _DEFAULT_DB = (_APP_DIR / "data" / "ops.db").as_posix()
+_ENV_FILE = _APP_DIR / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(_ENV_FILE), env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "OpsToolkit 运维工具合集"
-    debug: bool = True
+    debug: bool = False
     api_prefix: str = "/api"
 
-    secret_key: str = "change-me-in-production-please-use-a-long-random-string"
+    secret_key: str = ""
     access_token_expire_minutes: int = 1440
     credential_key: str = ""
 

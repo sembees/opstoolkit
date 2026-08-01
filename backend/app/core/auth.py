@@ -47,6 +47,14 @@ def create_access_token(subject: str, extra: dict[str, Any] | None = None) -> st
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
 
 
+def decode_access_token(token: str) -> dict:
+    """解析并验证 JWT，返回 payload；失败抛出 JWTError。"""
+    payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+    if payload.get("sub") is None:
+        raise JWTError("missing sub")
+    return payload
+
+
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
@@ -57,10 +65,8 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        payload = decode_access_token(token)
         username: str | None = payload.get("sub")
-        if username is None:
-            raise cred_exc
     except JWTError:
         raise cred_exc
     user = await get_user_by_username(db, username)

@@ -11,6 +11,9 @@ from app.database import init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core.crypto import ensure_secret_key
+
+    ensure_secret_key()
     await init_db()
     yield
 

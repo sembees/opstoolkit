@@ -37,6 +37,19 @@ def _write_env(key: str, value: str) -> None:
     settings.credential_key = value
 
 
+def ensure_secret_key() -> str:
+    """确保 JWT secret 已配置；为空时生成随机值并持久化到 .env。"""
+    key = (settings.secret_key or "").strip()
+    if key:
+        return key
+    import secrets
+
+    new_key = secrets.token_urlsafe(48)
+    _write_env("secret_key", new_key)
+    settings.secret_key = new_key
+    return new_key
+
+
 def _fernet_obj() -> Fernet:
     global _fernet
     if _fernet is None:

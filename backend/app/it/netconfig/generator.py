@@ -138,6 +138,27 @@ def _build_nmcli(req):
     return "\n".join(cmds) + "\n"
 
 
+def _netplan_addr_block(out, indent, obj, dhcp_default=False):
+    """输出 netplan 地址/routes/nameservers 块。indent 为属性缩进 (6 空格)。"""
+    if obj.get("mode") == "dhcp":
+        out.append(f"{indent}dhcp4: true")
+        return
+    if not obj.get("ip"):
+        if dhcp_default:
+            out.append(f"{indent}dhcp4: true")
+        return
+    p = _prefix(obj)
+    out.append(f"{indent}dhcp4: false")
+    out.append(f"{indent}addresses: [{obj['ip']}/{p}]")
+    if obj.get("gateway"):
+        out.append(f"{indent}routes:")
+        out.append(f"{indent}  - to: default")
+        out.append(f"{indent}    via: {obj['gateway']}")
+    if obj.get("dns"):
+        out.append(f"{indent}nameservers:")
+        out.append(f"{indent}  addresses: [{', '.join(obj['dns'])}]")
+
+
 def _build_netplan(req):
     out = []
     out.append("# /etc/netplan/99-opstk.yaml")
@@ -145,23 +166,12 @@ def _build_netplan(req):
     out.append("  version: 2")
     renderer = getattr(req, "netplan_renderer", "networkd") or "networkd"
     out.append(f"  renderer: {renderer}")
-    out.append("  ethernets:")
     ind = "    "
-    for o in req.interfaces:
-        out.append(f"{ind}{o.name}:")
-        if o.mode == "dhcp":
-            out.append(f"{ind}  dhcp4: true")
-        else:
-            p = _prefix(o.model_dump())
-            out.append(f"{ind}  dhcp4: false")
-            out.append(f"{ind}  addresses: [{o.ip}/{p}]")
-            if o.gateway:
-                out.append(f"{ind}  routes:")
-                out.append(f"{ind}    - to: default")
-                out.append(f"{ind}      via: {o.gateway}")
-        if o.dns:
-            out.append(f"{ind}  nameservers:")
-            out.append(f"{ind}    addresses: [{', '.join(o.dns)}]")
+    if req.interfaces:
+        out.append("  ethernets:")
+        for o in req.interfaces:
+            out.append(f"{ind}{o.name}:")
+            _netplan_addr_block(out, ind + "  ", o.model_dump(), dhcp_default=True)
     if req.bonds:
         out.append("  bonds:")
         for o in req.bonds:
@@ -171,13 +181,21 @@ def _build_netplan(req):
             out.append(f"{ind}  parameters:")
             out.append(f"{ind}    mode: {ms}")
             out.append(f"{ind}    miimon: {o.miimon}")
-            if o.ip:
-                p = _prefix(o.model_dump())
-                out.append(f"{ind}  addresses: [{o.ip}/{p}]")
-                if o.gateway:
-                    out.append(f"{ind}  routes:")
-                    out.append(f"{ind}    - to: default")
-                    out.append(f"{ind}      via: {o.gateway}")
+            _netplan_addr_block(out, ind + "  ", o.model_dump())
+    if req.vlans:
+        out.append("  vlans:")
+        for o in req.vlans:
+            vname = f"{o.parent}.{o.vlan_id}"
+            out.append(f"{ind}{vname}:")
+            out.append(f"{ind}  id: {o.vlan_id}")
+            out.append(f"{ind}  link: {o.parent}")
+            _netplan_addr_block(out, ind + "  ", o.model_dump())
+    if req.bridges:
+        out.append("  bridges:")
+        for o in req.bridges:
+            out.append(f"{ind}{o.name}:")
+            out.append(f"{ind}  interfaces: [{', '.join(o.interfaces)}]")
+            _netplan_addr_block(out, ind + "  ", o.model_dump())
     return "\n".join(out) + "\n"
 
 

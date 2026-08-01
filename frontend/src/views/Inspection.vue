@@ -299,7 +299,8 @@ async function startInspection() {
   const commands = mode.value === 'custom' ? customCommands.value.split('\n').map(c => c.trim()).filter(Boolean) : null
   const tmpl = currentTemplate.value
   const wsProto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const ws = new WebSocket(wsProto + '://' + location.host + '/api/ct/inspection/ws')
+  const token = localStorage.getItem('opstk_token') || ''
+  const ws = new WebSocket(wsProto + '://' + location.host + '/api/ct/inspection/ws?token=' + encodeURIComponent(token))
 
   ws.onopen = () => {
     pushLine('[连接已建立] 开始巡检 ' + selectedAssets.value.length + ' 台设备...', 'info')

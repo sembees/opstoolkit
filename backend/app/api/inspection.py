@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crud, models
-from app.core.auth import get_current_user
+from app.core.auth import decode_access_token, get_current_user
 from app.core.schemas import InspectionCreate, InspectionResultOut, InspectionTaskOut, InspectionTemplateIn, InspectionTemplateOut
 from app.ct.drivers import DRIVERS, get_driver
 from app.ct.drivers.base import MetricCommand
@@ -54,6 +54,13 @@ async def run_inspection(
 async def inspection_ws(websocket: WebSocket):
     """WebSocket 实时巡检：客户端发送配置，服务端流式返回每条命令输出。"""
     await websocket.accept()
+    token = websocket.query_params.get("token", "")
+    try:
+        payload = decode_access_token(token)
+        username = payload.get("sub")
+    except Exception:  # noqa: BLE001
+        await websocket.close(code=4401, reason="未授权")
+        return
     try:
         raw = await websocket.receive_text()
         cfg = json.loads(raw)
@@ -63,6 +70,10 @@ async def inspection_ws(websocket: WebSocket):
         commands = cfg.get("commands")
 
         async with async_session() as db:
+            user = await crud.get_user_by_username(db, username) if username else None
+            if user is None:
+                await websocket.close(code=4401, reason="未授权")
+                return
 
             async def on_event(ev: dict):
                 try:
@@ -79,6 +90,7 @@ async def inspection_ws(websocket: WebSocket):
             await websocket.send_json({"type": "fatal", "error": str(e)})
         except Exception:  # noqa: BLE001
             pass
+
 
 
 @router.post("/tasks", response_model=InspectionTaskOut)

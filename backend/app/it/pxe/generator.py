@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from passlib.hash import sha512_crypt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass
@@ -111,7 +111,7 @@ def _ubuntu_user_data(c):
         escaped = c.post_script.replace(chr(39), chr(92) + chr(39))
         lines.append("    - curtin in-target --target=/target -- bash -c '" + escaped + "'")
     lines.append("    - curtin in-target --target=/target -- systemctl enable ssh")
-    lines.append("    - poweroff")
+    lines.append("    - reboot")
     return "\n".join(lines) + "\n"
 
 
@@ -195,17 +195,18 @@ def _rhel_ks(c):
 
 
 # ===== iPXE 菜单 =====
-def _ipxe_menu(c, mac=""):
+def _ipxe_menu(c, mac="", answer_url=""):
     kernel = c.http_root + "/" + c.kernel_path
     initrd = c.http_root + "/" + c.initrd_path
     if c.os_type == "ubuntu":
-        cmdline = ("autoinstall ds=nocloud-net;s=" + c.http_root + "/ "
+        seed = answer_url or (c.http_root + "/")
+        cmdline = ("autoinstall ds=nocloud-net;s=" + seed + " "
                    "ip=dhcp --- " + c.squashfs_path)
         L = ["#!ipxe", "# boot: " + c.hostname + " (MAC " + (mac or "auto") + ")",
              "kernel " + kernel + " root=/dev/ram0 " + cmdline,
              "initrd " + initrd, "boot"]
     else:
-        answer = c.http_root + "/ks.cfg"
+        answer = answer_url or (c.http_root + "/ks.cfg")
         repo = c.mirror or (c.http_root + "/os")
         L = ["#!ipxe", "# boot: " + c.hostname + " (MAC " + (mac or "auto") + ")",
              "kernel " + kernel + " inst.ks=" + answer + " inst.repo=" + repo + " ip=dhcp",
@@ -277,11 +278,14 @@ def _dnsmasq(c, installs=None):
         L.append("dhcp-boot=tag:!efi-x86_64,undionly.kpxe")
 
     L.append("")
-    L.append("# 按 MAC 指定 iPXE 菜单")
+    L.append("# 按 MAC 指定 iPXE 菜单 (tag 方式, 避免 URL 被当作 hostname)")
     for inst in installs:
-        if inst.get("mac"):
-            menu = c.http_root + "/boot/" + inst["mac"].lower().replace(":", "-") + ".ipxe"
-            L.append("dhcp-host=" + inst["mac"] + "," + menu)
+        mac = (inst.get("mac") or "").strip()
+        if mac:
+            tag = mac.lower().replace(":", "-")
+            menu = c.http_root + "/boot/" + tag + ".ipxe"
+            L.append("dhcp-host=" + mac + ",set:pxe_" + tag)
+            L.append("dhcp-boot=tag:pxe_" + tag + "," + menu)
     L.append("")
     return "\n".join(L) + "\n"
 
@@ -327,4 +331,21 @@ def generate_all(c, installs=None):
     files["boot.ipxe"] = _ipxe_menu(c)
     files["dnsmasq.conf"] = _dnsmasq(c, installs)
     files["README.txt"] = _readme(c)
+    # 每台装机记录生成独立菜单与应答文件，使 hostname 生效
+    for inst in installs or []:
+        mac = (inst.get("mac") or "").strip()
+        if not mac:
+            continue
+        tag = mac.lower().replace(":", "-")
+        hostname = (inst.get("hostname") or "").strip() or c.hostname
+        ic = replace(c, hostname=hostname)
+        if c.os_type == "ubuntu":
+            seed = c.http_root + "/user-data/" + tag + "/"
+            files["user-data/" + tag + "/user-data"] = _ubuntu_user_data(ic)
+            files["user-data/" + tag + "/meta-data"] = "local-hostname: " + hostname + "\n"
+            answer = seed
+        else:
+            answer = c.http_root + "/ks/" + tag + "/ks.cfg"
+            files["ks/" + tag + "/ks.cfg"] = _rhel_ks(ic)
+        files["boot/" + tag + ".ipxe"] = _ipxe_menu(ic, mac=mac, answer_url=answer)
     return files

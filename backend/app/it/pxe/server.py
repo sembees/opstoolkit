@@ -186,12 +186,25 @@ def deploy_files(files, pid="") -> dict:
     else:
         log.append("写 dnsmasq 配置失败: " + err.strip()[:80])
 
-    # 2. 应答文件 -> HTTP 目录
-    for name in WEB_FILES:
-        if name in files:
-            with open(os.path.join(WEB_ROOT, name), "w", encoding="utf-8") as f:
-                f.write(files[name])
-            log.append("落地 " + name)
+    # 2. 应答文件 -> HTTP 目录 (支持嵌套目录, 如 boot/<mac>.ipxe)
+    web_root_abs = os.path.abspath(WEB_ROOT)
+    for name, content in files.items():
+        if name == "dnsmasq.conf":
+            continue
+        rel = os.path.normpath(name.lstrip("/"))
+        if rel == "." or rel.startswith(".."):
+            log.append("跳过非法路径 " + name)
+            continue
+        dst = os.path.abspath(os.path.join(web_root_abs, rel))
+        if os.path.commonpath([dst, web_root_abs]) != web_root_abs:
+            log.append("跳过越界路径 " + name)
+            continue
+        parent = os.path.dirname(dst)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(content)
+        log.append("落地 " + rel)
 
     # 3. 重启 dnsmasq
     svc = service_control("restart")
@@ -255,6 +268,21 @@ ISO_DIR = "/srv/opstk/iso"
 MOUNT_BASE = "/srv/opstk/mnt"
 
 
+def _iso_path(iso_name) -> str | None:
+    """规范化并校验 ISO 文件名，防止路径穿越。"""
+    raw = (iso_name or "").strip()
+    if "/" in raw or "\\" in raw:
+        return None
+    name = os.path.basename(raw)
+    if not name.lower().endswith(".iso"):
+        return None
+    iso_abs = os.path.abspath(ISO_DIR)
+    path = os.path.abspath(os.path.join(ISO_DIR, name))
+    if os.path.commonpath([path, iso_abs]) != iso_abs:
+        return None
+    return path
+
+
 def list_isos() -> dict:
     """列出已上传的 ISO 文件。"""
     if not is_linux():
@@ -280,11 +308,13 @@ def extract_from_iso(iso_name, os_type="ubuntu", os_version="22.04") -> dict:
     """
     if not is_linux():
         return {"ok": False, "log": ["仅支持 Linux 环境"]}
-    iso_path = os.path.join(ISO_DIR, iso_name)
+    iso_path = _iso_path(iso_name)
+    if iso_path is None:
+        return {"ok": False, "log": ["非法的 ISO 文件名: " + str(iso_name)]}
     if not os.path.isfile(iso_path):
         return {"ok": False, "log": ["ISO 不存在: " + iso_name]}
     log = ["开始处理 " + iso_name]
-    mountpoint = os.path.join(MOUNT_BASE, iso_name.replace(".iso", ""))
+    mountpoint = os.path.join(MOUNT_BASE, os.path.basename(iso_path).replace(".iso", ""))
     # 确保 mountpoint 存在
     if not os.path.isdir(mountpoint):
         os.makedirs(mountpoint, exist_ok=True)
@@ -359,7 +389,9 @@ def delete_iso(iso_name) -> dict:
     """删除 ISO 文件。"""
     if not is_linux():
         return {"ok": False, "log": ["仅 Linux"]}
-    iso_path = os.path.join(ISO_DIR, iso_name)
+    iso_path = _iso_path(iso_name)
+    if iso_path is None:
+        return {"ok": False, "log": ["非法文件名"]}
     if not os.path.isfile(iso_path):
         return {"ok": False, "log": ["文件不存在"]}
     os.remove(iso_path)
