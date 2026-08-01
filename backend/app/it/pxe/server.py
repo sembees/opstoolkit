@@ -282,19 +282,15 @@ def extract_from_iso(iso_name, os_type="ubuntu", os_version="22.04") -> dict:
         log.append("挂载失败: " + err.strip()[:80])
         return {"ok": False, "log": log}
     log.append("已挂载 -> " + mountpoint)
-    # 插入清理钩子
+    # 插入清理钩子 (防止异常后残留挂载)
     import atexit
     atexit.register(lambda: _run(["umount", "-l", mountpoint], sudo=True))
     # 目标目录
     dest = os.path.join(WEB_ROOT, os_type, os_version)
     os.makedirs(dest, exist_ok=True)
-    # 插入 SELinux 修复 (Web 目录)
+    # SELinux 修复 (Web 目录供 dnsmasq 访问)
     _run(["semanage", "fcontext", "-a", "-t", "tftpdir_t", WEB_ROOT + "(/.*)?"], sudo=True)
     _run(["restorecon", "-R", WEB_ROOT], sudo=True)
-    # 插入结束后卸载
-    def _cleanup():
-        _run(["umount", "-l", mountpoint], sudo=True)
-    import atexit
     # 提取文件
     extracted = []
     ost = os_type.strip().lower()
