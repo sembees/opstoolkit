@@ -1,7 +1,6 @@
 """服务器网络配置脚本生成器。统一用 nmcli，RHEL 8+ 与 Ubuntu 22.04+ 通用。"""
 from __future__ import annotations
 
-from app.core.schemas import NetConfigRequest
 
 BOND_MODES = {
     0: "balance-rr",

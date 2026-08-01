@@ -4,7 +4,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.core.auth import get_current_user
 from app.core.schemas import NetConfigRequest
-from app.it.netconfig.generator import BOND_MODES, BOND_MODE_NAMES, generate_netconfig
+from app.it.netconfig.generator import BOND_MODE_NAMES, generate_netconfig
 
 router = APIRouter()
 

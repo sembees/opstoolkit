@@ -1,7 +1,6 @@
 """CT 巡检接口：默认巡检、自定义命令、WebSocket 实时回显、任务查询。"""
 from __future__ import annotations
 
-import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -11,9 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import crud, models
 from app.core.auth import decode_access_token, get_current_user
 from app.core.schemas import InspectionCreate, InspectionResultOut, InspectionTaskOut, InspectionTemplateIn, InspectionTemplateOut
-from app.ct.drivers import DRIVERS, get_driver
-from app.ct.drivers.base import MetricCommand
-from app.ct.inspection.service import inspect_many, inspect_one, run_task_in_background, schedule_background
+from app.ct.drivers import DRIVERS
+from app.ct.inspection.service import inspect_many, run_task_in_background, schedule_background
 from app.database import async_session, get_db
 
 router = APIRouter()
