@@ -232,3 +232,124 @@ def server_status() -> dict:
         "ports": ports,
         "sudo_ok": sudo_ok(),
     }
+
+
+# ---------- ISO ?? ----------
+
+ISO_DIR = "/srv/opstk/iso"
+MOUNT_BASE = "/mnt/opstk-iso"
+
+
+def list_isos() -> dict:
+    """列出已上传的 ISO 文件。"""
+    if not is_linux():
+        return {"supported": False, "isos": []}
+    isos = []
+    if os.path.isdir(ISO_DIR):
+        for f in sorted(os.listdir(ISO_DIR)):
+            if f.lower().endswith(".iso"):
+                fp = os.path.join(ISO_DIR, f)
+                st = os.stat(fp)
+                isos.append({
+                    "name": f,
+                    "size": st.st_size,
+                    "size_mb": round(st.st_size / 1048576, 1),
+                })
+    return {"supported": True, "isos": isos}
+
+
+def extract_from_iso(iso_name, os_type="ubuntu", os_version="22.04") -> dict:
+    """挂载 ISO 并提取 PXE 引导文件 (vmlinuz/initrd/squashfs)。
+    Ubuntu: casper/ 目录下的 vmlinuz, initrd, *.squashfs
+    RHEL:   images/pxeboot/ 目录下的 vmlinuz, initrd.img
+    """
+    if not is_linux():
+        return {"ok": False, "log": ["仅支持 Linux 环境"]}
+    iso_path = os.path.join(ISO_DIR, iso_name)
+    if not os.path.isfile(iso_path):
+        return {"ok": False, "log": ["ISO 不存在: " + iso_name]}
+    log = ["开始处理 " + iso_name]
+    mountpoint = os.path.join(MOUNT_BASE, iso_name.replace(".iso", ""))
+    # 确保 mountpoint 存在
+    if not os.path.isdir(mountpoint):
+        os.makedirs(mountpoint, exist_ok=True)
+        log.append("创建挂载点 " + mountpoint)
+    # 先卸载 (防止残留)
+    _run(["umount", "-l", mountpoint], sudo=True)
+    # 挂载 ISO
+    rc, _, err = _run(["mount", "-o", "loop,ro", iso_path, mountpoint], sudo=True)
+    if rc != 0:
+        log.append("挂载失败: " + err.strip()[:80])
+        return {"ok": False, "log": log}
+    log.append("已挂载 -> " + mountpoint)
+    # 插入清理钩子
+    import atexit
+    atexit.register(lambda: _run(["umount", "-l", mountpoint], sudo=True))
+    # 目标目录
+    dest = os.path.join(WEB_ROOT, os_type, os_version)
+    os.makedirs(dest, exist_ok=True)
+    # 插入 SELinux 修复 (Web 目录)
+    _run(["semanage", "fcontext", "-a", "-t", "tftpdir_t", WEB_ROOT + "(/.*)?"], sudo=True)
+    _run(["restorecon", "-R", WEB_ROOT], sudo=True)
+    # 插入结束后卸载
+    def _cleanup():
+        _run(["umount", "-l", mountpoint], sudo=True)
+    import atexit
+    # 提取文件
+    extracted = []
+    ost = os_type.strip().lower()
+    if ost in ("ubuntu", "debian"):
+        # Ubuntu live-server: casper/ 下
+        src_dir = os.path.join(mountpoint, "casper")
+        if not os.path.isdir(src_dir):
+            src_dir = os.path.join(mountpoint, "install")
+        for fname, targets in [
+            ("vmlinuz", ["vmlinuz"]),
+            ("initrd", ["initrd"]),
+        ]:
+            for t in targets:
+                src = os.path.join(src_dir, t)
+                if os.path.isfile(src):
+                    import shutil
+                    shutil.copy2(src, os.path.join(dest, fname))
+                    extracted.append(fname)
+                    break
+        # squashfs: 找最大的那个
+        sq_files = [f for f in os.listdir(src_dir) if f.endswith(".squashfs")] if os.path.isdir(src_dir) else []
+        if sq_files:
+            sq_files.sort(key=lambda f: os.path.getsize(os.path.join(src_dir, f)), reverse=True)
+            import shutil
+            shutil.copy2(os.path.join(src_dir, sq_files[0]), os.path.join(dest, "installer.squashfs"))
+            extracted.append("installer.squashfs (" + sq_files[0] + ")")
+    elif ost in ("rhel", "centos", "rocky", "alma", "almalinux"):
+        # RHEL 系: images/pxeboot/
+        src_dir = os.path.join(mountpoint, "images", "pxeboot")
+        for fname, tname in [("vmlinuz", "vmlinuz"), ("initrd.img", "initrd.img")]:
+            src = os.path.join(src_dir, tname)
+            if os.path.isfile(src):
+                import shutil
+                shutil.copy2(src, os.path.join(dest, fname))
+                extracted.append(fname)
+    # 卸载
+    _run(["umount", "-l", mountpoint], sudo=True)
+    log.append("已提取: " + ", ".join(extracted) if extracted else "未找到引导文件 (检查 ISO 结构)")
+    log.append("目标目录: " + dest)
+    # 列出提取后的文件
+    final = []
+    if os.path.isdir(dest):
+        for f in os.listdir(dest):
+            sz = os.path.getsize(os.path.join(dest, f))
+            final.append(f + " (" + str(round(sz / 1048576, 1)) + "MB)")
+    log.append("当前文件: " + "; ".join(final) if final else "无")
+    return {"ok": True, "log": log, "dest": dest, "extracted": extracted}
+
+
+def delete_iso(iso_name) -> dict:
+    """删除 ISO 文件。"""
+    if not is_linux():
+        return {"ok": False, "log": ["仅 Linux"]}
+    iso_path = os.path.join(ISO_DIR, iso_name)
+    if not os.path.isfile(iso_path):
+        return {"ok": False, "log": ["文件不存在"]}
+    os.remove(iso_path)
+    return {"ok": True, "log": ["已删除 " + iso_name]}

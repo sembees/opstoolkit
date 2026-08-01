@@ -245,3 +245,27 @@ async def deploy_to_host(pid: str, body: dict = None, db: AsyncSession = Depends
     body["http_root"] = "http://" + body["server_ip"] + ":8000/pxe/serve"
     files = await _gen_pxe_files(pid, body, db)
     return pxe_server.deploy_files(files, pid)
+
+
+# ---------- ISO ?? ----------
+@router.get("/iso/list")
+async def list_isos(_user=Depends(get_current_user)):
+    """列出已上传的 ISO 文件。"""
+    return pxe_server.list_isos()
+
+
+@router.post("/iso/{iso_name}/extract")
+async def extract_iso(iso_name: str, body: dict = None, _user=Depends(get_current_user)):
+    """从 ISO 提取 PXE 引导文件 (vmlinuz/initrd/squashfs)。"""
+    body = body or {}
+    return pxe_server.extract_from_iso(
+        iso_name,
+        os_type=body.get("os_type", "ubuntu"),
+        os_version=body.get("os_version", "22.04"),
+    )
+
+
+@router.delete("/iso/{iso_name}")
+async def delete_iso(iso_name: str, _user=Depends(get_current_user)):
+    """删除 ISO 文件。"""
+    return pxe_server.delete_iso(iso_name)

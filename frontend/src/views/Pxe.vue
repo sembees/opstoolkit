@@ -39,6 +39,35 @@
       </div>
       <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" style="margin-top: 8px">本机部署需 Linux 环境（当前：{{ serverStatus.platform }}），可用「下载 ZIP」手动部署</el-alert>
     </el-card>
+        <!-- ISO 管理 -->
+        <el-card shadow="never" style="margin-bottom: 16px">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
+            <span style="font-weight: 600"><el-icon><Files /></el-icon> ISO 镜像管理</span>
+            <el-button size="small" @click="loadIsos"><el-icon><Refresh /></el-icon> 刷新</el-button>
+          </div>
+          <el-alert v-if="isoList.supported === false" type="warning" :closable="false" style="margin-bottom: 8px">需 Linux 环境</el-alert>
+          <el-table v-else :data="isoList.isos || []" size="small" empty-text="尚无 ISO 文件，请将 ISO 上传到服务器 /srv/opstk/iso/ 目录">
+            <el-table-column prop="name" label="ISO 文件" min-width="280" />
+            <el-table-column prop="size_mb" label="大小 (MB)" width="110" />
+            <el-table-column label="操作" width="280" fixed="right">
+              <template #default="{ row }">
+                <el-select v-model="row._osType" size="small" style="width: 90px; margin-right: 6px">
+                  <el-option label="Ubuntu" value="ubuntu" />
+                  <el-option label="RHEL" value="rhel" />
+                </el-select>
+                <el-input v-model="row._osVer" size="small" style="width: 80px; margin-right: 6px" placeholder="22.04" />
+                <el-button type="success" link size="small" @click="extractIso(row)" :loading="row._extracting">提取</el-button>
+                <el-popconfirm title="确定删除?" @confirm="delIso(row.name)">
+                  <template #reference><el-button type="danger" link size="small">删除</el-button></template>
+                </el-popconfirm>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div v-if="extractLog.length" style="margin-top: 8px">
+            <div style="font-size: 12px; color: #999; margin-bottom: 4px">提取日志</div>
+            <div class="terminal-output" style="white-space: pre; max-height: 200px">{{ extractLog.join('\n') }}</div>
+          </div>
+        </el-card>
         <!-- 模板列表 -->
     <el-card shadow="never" style="margin-bottom: 16px">
       <div style="display: flex; justify-content: space-between; margin-bottom: 12px">
@@ -213,6 +242,8 @@ const activeFile = ref("")
 const serverStatus = ref({ supported: false })
 const deployLog = ref([])
 const deploying = ref(false)
+const isoList = ref({ supported: false, isos: [] })
+const extractLog = ref([])
 
 async function loadServerStatus() {
   try { serverStatus.value = await http.get("/it/pxe/server/status") } catch(e) {}
@@ -230,6 +261,29 @@ async function deployProfile(row) {
     else ElMessage.warning("部署未完全成功，查看日志")
     loadServerStatus()
   } finally { deploying.value = false }
+}
+
+async function loadIsos() {
+  try { isoList.value = await http.get("/it/pxe/iso/list") } catch(e) {}
+}
+async function extractIso(row) {
+  row._extracting = true
+  extractLog.value = []
+  try {
+    const r = await http.post("/it/pxe/iso/" + encodeURIComponent(row.name) + "/extract", {
+      os_type: row._osType || "ubuntu", os_version: row._osVer || "22.04"
+    })
+    extractLog.value = r.log || []
+    if (r.ok) { ElMessage.success("提取完成"); loadServerStatus() }
+    else ElMessage.warning("提取未完全成功，查看日志")
+  } finally { row._extracting = false }
+}
+async function delIso(name) {
+  try {
+    await http.delete("/it/pxe/iso/" + encodeURIComponent(name))
+    ElMessage.success("已删除")
+    loadIsos()
+  } catch(e) {}
 }
 
 
@@ -386,5 +440,5 @@ async function delInstall(id) {
 async function loadProfiles() { profiles.value = await http.get("/it/pxe/profiles") }
 async function loadInstalls() { installs.value = await http.get("/it/pxe/installs") }
 
-onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus() })
+onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos() })
 </script>
