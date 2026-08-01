@@ -1,187 +1,268 @@
 <template>
-  <el-row :gutter="16">
-    <el-col :span="13">
-      <el-card shadow="never">
-        <template #header><span style="font-weight: 600"><el-icon><Connection /></el-icon> 网络配置生成器</span></template>
-        <el-form label-width="80px" size="default">
-          <el-row :gutter="12">
-            <el-col :span="8">
-              <el-form-item label="系统">
-                <el-select v-model="config.os" @change="onOsChange">
-                  <el-option v-for="o in meta.os_options" :key="o.id" :label="o.name" :value="o.id" />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :span="8">
-              <el-form-item label="格式">
-                <el-select v-model="config.format">
-                  <el-option v-for="f in meta.formats" :key="f.id" :label="f.name" :value="f.id" :disabled="f.id === 'netplan' && config.os !== 'ubuntu'" />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :span="8" v-if="config.os === 'ubuntu' && config.format === 'netplan'">
-              <el-form-item label="后端引擎">
-                <el-select v-model="config.netplan_renderer">
-                  <el-option v-for="r in meta.netplan_renderers" :key="r.id" :label="r.name" :value="r.id" />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :span="8">
-              <el-form-item label="主机名"><el-input v-model="config.hostname" placeholder="web01" /></el-form-item>
-            </el-col>
-          </el-row>
+  <div style="display:flex;gap:16px;height:calc(100vh - 120px)">
+    <!-- 左侧: 网络组件编辑表 -->
+    <div style="flex:1;overflow-y:auto">
+      <el-card shadow="never" size="small">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+          <div>
+            <el-select v-model="config.os" size="small" style="width:110px" @change="onOsChange">
+              <el-option v-for="o in meta.os_options" :key="o.id" :label="o.name" :value="o.id" />
+            </el-select>
+            <el-select v-model="config.format" size="small" style="width:110px;margin-left:6px" @change="preview">
+              <el-option v-for="f in meta.formats" :key="f.id" :label="f.name" :value="f.id" />
+            </el-select>
+            <el-input v-model="config.hostname" size="small" placeholder="主机名" style="width:130px;margin-left:6px" @input="preview" />
+            <el-select v-if="config.format==='netplan'" v-model="config.netplan_renderer" size="small" style="width:130px;margin-left:6px" @change="preview">
+              <el-option v-for="r in meta.netplan_renderers" :key="r.id" :label="r.name" :value="r.id" />
+            </el-select>
+          </div>
+          <div>
+            <el-button size="small" @click="addItem('iface')"><el-icon><Plus /></el-icon> 物理接口</el-button>
+            <el-button size="small" @click="addItem('bond')"><el-icon><Plus /></el-icon> Bond</el-button>
+            <el-button size="small" @click="addItem('vlan')"><el-icon><Plus /></el-icon> VLAN</el-button>
+            <el-button size="small" @click="addItem('bridge')"><el-icon><Plus /></el-icon> Bridge</el-button>
+            <el-button size="small" type="danger" plain @click="clearAll">清空</el-button>
+          </div>
+        </div>
 
-          <el-divider content-position="left">物理接口</el-divider>
-          <div v-for="(iface, i) in config.interfaces" :key="'if'+i" style="margin-bottom: 10px">
-            <el-row :gutter="8" align="middle">
-              <el-col :span="3"><el-input v-model="iface.name" placeholder="eth0" size="small" /></el-col>
-              <el-col :span="4">
-                <el-select v-model="iface.mode" size="small">
-                  <el-option label="静态" value="static" /><el-option label="DHCP" value="dhcp" />
+        <el-table :data="items" size="small" stripe border>
+          <el-table-column label="#" width="36">
+            <template #default="{ $index }">{{ $index + 1 }}</template>
+          </el-table-column>
+          <el-table-column label="类型" width="80">
+            <template #default="{ row }">
+              <el-select v-model="row._type" size="small" @change="onTypeChange(row)" style="width:72px">
+                <el-option label="物理" value="iface" />
+                <el-option label="Bond" value="bond" />
+                <el-option label="VLAN" value="vlan" />
+                <el-option label="Bridge" value="bridge" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="接口名" width="130">
+            <template #default="{ row }">
+              <el-input v-model="row.name" size="small" placeholder="eth0" @input="preview" />
+            </template>
+          </el-table-column>
+          <el-table-column label="模式" width="80">
+            <template #default="{ row }">
+              <el-select v-model="row.mode" size="small" @change="preview" v-if="row._type !== 'bond'">
+                <el-option label="static" value="static" /><el-option label="dhcp" value="dhcp" />
+              </el-select>
+              <span v-else style="color:#999;font-size:12px">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="IP / 掩码" width="150">
+            <template #default="{ row }">
+              <el-input v-if="row._type !== 'bond'" v-model="row.ip" size="small" placeholder="10.0.0.1/24" @input="preview" :disabled="row.mode==='dhcp'" />
+              <el-input v-else v-model="row.ip" size="small" placeholder="10.0.0.1/24" @input="preview" />
+            </template>
+          </el-table-column>
+          <el-table-column label="网关" width="110">
+            <template #default="{ row }">
+              <el-input v-model="row.gateway" size="small" placeholder="网关" @input="preview" :disabled="row.mode==='dhcp'" />
+            </template>
+          </el-table-column>
+          <el-table-column label="DNS" width="130">
+            <template #default="{ row }">
+              <el-input v-model="row.dnsStr" size="small" placeholder="8.8.8.8,逗号分隔" @input="onDnsChange(row)" :disabled="row.mode==='dhcp'" />
+            </template>
+          </el-table-column>
+          <el-table-column label="Bond/从接口" min-width="130">
+            <template #default="{ row }">
+              <el-input v-if="row._type==='bond'" v-model="row.slavesStr" size="small" placeholder="eth0,eth1" @input="onSlavesChange(row)" />
+              <el-input v-else-if="row._type==='vlan'" v-model="row.parent" size="small" placeholder="父接口(bond0/eth0)" @input="preview" />
+              <el-input v-else-if="row._type==='bridge'" v-model="row.slavesStr" size="small" placeholder="从接口" @input="onSlavesChange(row)" />
+              <span v-else style="color:#999;font-size:12px">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Bond参数" width="120">
+            <template #default="{ row }">
+              <template v-if="row._type==='bond'">
+                <el-select v-model="row.bondMode" size="small" style="width:65px" @change="preview">
+                  <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.id" :value="m.id" />
                 </el-select>
-              </el-col>
-              <template v-if="iface.mode === 'static'">
-                <el-col :span="5"><el-input v-model="iface.ip" placeholder="IP" size="small" /></el-col>
-                <el-col :span="3"><el-input-number v-model="iface.cidr" :min="1" :max="32" placeholder="CIDR" size="small" controls-position="right" style="width:100%" /></el-col>
-                <el-col :span="4"><el-input v-model="iface.gateway" placeholder="网关" size="small" /></el-col>
-                <el-col :span="3"><el-input v-model="iface.dnsText" placeholder="DNS(逗号)" size="small" /></el-col>
+                <el-input v-model="row.miimon" size="small" style="width:50px;margin-left:4px" placeholder="100" @input="preview" />
               </template>
-              <el-col :span="2"><el-button type="danger" link size="small" @click="config.interfaces.splice(i,1)"><el-icon><Delete /></el-icon></el-button></el-col>
-            </el-row>
-          </div>
-          <el-button plain size="small" @click="addIface"><el-icon><Plus /></el-icon> 添加接口</el-button>
+              <span v-else style="color:#999;font-size:12px">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="80" fixed="right">
+            <template #default="{ $index }">
+              <el-button link type="primary" size="small" @click="dupItem($index)">复制</el-button>
+              <el-button link type="danger" size="small" @click="delItem($index)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
 
-          <el-divider content-position="left">链路聚合 (Bond)</el-divider>
-          <div v-for="(bond, i) in config.bonds" :key="'bd'+i" style="margin-bottom: 12px; border: 1px solid #ebeef5; border-radius: 4px; padding: 10px">
-            <el-row :gutter="8" align="middle">
-              <el-col :span="4"><el-input v-model="bond.name" placeholder="bond0" size="small" /></el-col>
-              <el-col :span="7">
-                <el-select v-model="bond.mode" size="small">
-                  <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.name" :value="m.id" />
-                </el-select>
-              </el-col>
-              <el-col :span="8"><el-input v-model="bond.ifaceText" placeholder="从接口(逗号分隔): eth1,eth2" size="small" /></el-col>
-              <el-col :span="3"><el-input-number v-model="bond.miimon" :min="0" size="small" controls-position="right" style="width:100%" /></el-col>
-              <el-col :span="2"><el-button type="danger" link size="small" @click="config.bonds.splice(i,1)"><el-icon><Delete /></el-icon></el-button></el-col>
-            </el-row>
-            <el-row :gutter="8" align="middle" style="margin-top: 6px">
-              <el-col :span="6"><el-input v-model="bond.ip" placeholder="IP" size="small" /></el-col>
-              <el-col :span="3"><el-input-number v-model="bond.cidr" :min="1" :max="32" size="small" controls-position="right" style="width:100%" /></el-col>
-              <el-col :span="5"><el-input v-model="bond.gateway" placeholder="网关" size="small" /></el-col>
-              <el-col :span="5"><el-input v-model="bond.primary" placeholder="主接口(active-backup)" size="small" /></el-col>
-              <el-col :span="5"><el-input v-model="bond.dnsText" placeholder="DNS(逗号)" size="small" /></el-col>
-            </el-row>
-          </div>
-          <el-button plain size="small" @click="addBond"><el-icon><Plus /></el-icon> 添加聚合</el-button>
-
-          <el-divider content-position="left">VLAN</el-divider>
-          <div v-for="(vlan, i) in config.vlans" :key="'vl'+i" style="margin-bottom: 10px">
-            <el-row :gutter="8" align="middle">
-              <el-col :span="5"><el-input v-model="vlan.parent" placeholder="父接口 bond0" size="small" /></el-col>
-              <el-col :span="3"><el-input-number v-model="vlan.vlan_id" :min="1" :max="4094" size="small" controls-position="right" style="width:100%" /></el-col>
-              <el-col :span="6"><el-input v-model="vlan.ip" placeholder="IP" size="small" /></el-col>
-              <el-col :span="3"><el-input-number v-model="vlan.cidr" :min="1" :max="32" size="small" controls-position="right" style="width:100%" /></el-col>
-              <el-col :span="5"><el-input v-model="vlan.gateway" placeholder="网关(可选)" size="small" /></el-col>
-              <el-col :span="2"><el-button type="danger" link size="small" @click="config.vlans.splice(i,1)"><el-icon><Delete /></el-icon></el-button></el-col>
-            </el-row>
-          </div>
-          <el-button plain size="small" @click="addVlan"><el-icon><Plus /></el-icon> 添加 VLAN</el-button>
-
-          <el-divider content-position="left">网桥 (Bridge)</el-divider>
-          <div v-for="(br, i) in config.bridges" :key="'br'+i" style="margin-bottom: 10px">
-            <el-row :gutter="8" align="middle">
-              <el-col :span="4"><el-input v-model="br.name" placeholder="br0" size="small" /></el-col>
-              <el-col :span="9"><el-input v-model="br.ifaceText" placeholder="成员接口(逗号): eth0,eth1" size="small" /></el-col>
-              <el-col :span="5"><el-input v-model="br.ip" placeholder="IP" size="small" /></el-col>
-              <el-col :span="3"><el-input-number v-model="br.cidr" :min="1" :max="32" size="small" controls-position="right" style="width:100%" /></el-col>
-              <el-col :span="3"><el-button type="danger" link size="small" @click="config.bridges.splice(i,1)"><el-icon><Delete /></el-icon></el-button></el-col>
-            </el-row>
-          </div>
-          <el-button plain size="small" @click="addBridge"><el-icon><Plus /></el-icon> 添加网桥</el-button>
-
-          <el-divider />
-          <el-button type="primary" @click="generate" :loading="loading"><el-icon><Check /></el-icon> 生成配置</el-button>
-        </el-form>
+        <div style="margin-top:12px;display:flex;justify-content:space-between">
+          <el-button type="primary" @click="doGenerate" :loading="generating">生成配置</el-button>
+          <el-button @click="doDownload" :disabled="!previewScript">下载 ({{ previewFilename }})</el-button>
+        </div>
       </el-card>
-    </el-col>
+    </div>
 
-    <el-col :span="11">
-      <el-card shadow="never">
-        <template #header>
-          <div style="display: flex; justify-content: space-between; align-items: center">
-            <span style="font-weight: 600"><el-icon><Document /></el-icon> 生成结果</span>
-            <el-button v-if="script" type="success" plain size="small" @click="download"><el-icon><Download /></el-icon> 下载</el-button>
-          </div>
-        </template>
-        <div v-if="script" class="terminal-output" style="white-space: pre; max-height: 600px">{{ script }}</div>
-        <el-empty v-else description="填写配置后点击「生成配置」" />
+    <!-- 右侧: 实时预览 -->
+    <div style="flex:1;overflow-y:auto">
+      <el-card shadow="never" size="small">
+        <template #header><span style="font-weight:600">实时预览</span></template>
+        <pre class="preview-block" v-if="previewScript">{{ previewScript }}</pre>
+        <div v-else style="color:#ccc;text-align:center;padding:60px 0">添加接口后自动预览</div>
       </el-card>
-    </el-col>
-  </el-row>
+    </div>
+  </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import http from '../api'
-import { ElMessage } from 'element-plus'
+import { ref, reactive, onMounted, watch } from "vue"
+import http, { downloadZip } from "../api"
 
 const meta = reactive({ os_options: [], formats: [], bond_modes: [], netplan_renderers: [] })
-const loading = ref(false)
-const script = ref('')
-const filename = ref('')
+const config = reactive({ os: "rhel", format: "nmcli", hostname: "", netplan_renderer: "networkd" })
+const items = ref([])
+const previewScript = ref("")
+const previewFilename = ref("")
+const generating = ref(false)
 
-const config = reactive({
-  os: 'rhel', format: 'nmcli', hostname: '', netplan_renderer: 'networkd',
-  interfaces: [], bonds: [], vlans: [], bridges: [],
-})
-
-function addIface() { config.interfaces.push({ name: '', mode: 'static', ip: '', cidr: 24, gateway: '', dnsText: '' }) }
-function addBond() { config.bonds.push({ name: '', mode: 1, ifaceText: '', ip: '', cidr: 24, gateway: '', miimon: 100, primary: '', dnsText: '' }) }
-function addVlan() { config.vlans.push({ parent: '', vlan_id: 100, ip: '', cidr: 24, gateway: '' }) }
-function addBridge() { config.bridges.push({ name: '', ifaceText: '', ip: '', cidr: 24 }) }
-
-function onOsChange() { if (config.os !== 'ubuntu') config.format = 'nmcli' }
-
-function buildPayload() {
-  const parseDns = (t) => (t || '').split(',').map(s => s.trim()).filter(Boolean)
-  return {
-    os: config.os, hostname: config.hostname || null, format: config.format, netplan_renderer: config.netplan_renderer,
-    interfaces: config.interfaces.map(i => ({ name: i.name, mode: i.mode, ip: i.ip || null, cidr: i.cidr, gateway: i.gateway || null, dns: parseDns(i.dnsText) })),
-    bonds: config.bonds.map(b => ({ name: b.name, mode: b.mode, interfaces: (b.ifaceText || '').split(',').map(s => s.trim()).filter(Boolean), ip: b.ip || null, cidr: b.cidr, gateway: b.gateway || null, miimon: b.miimon, primary: b.primary || null, dns: parseDns(b.dnsText) })),
-    vlans: config.vlans.map(v => ({ parent: v.parent, vlan_id: v.vlan_id, mode: 'static', ip: v.ip || null, cidr: v.cidr, gateway: v.gateway || null })),
-    bridges: config.bridges.map(br => ({ name: br.name, interfaces: (br.ifaceText || '').split(',').map(s => s.trim()).filter(Boolean), ip: br.ip || null, cidr: br.cidr })),
-  }
+let previewTimer = null
+function preview() {
+  clearTimeout(previewTimer)
+  previewTimer = setTimeout(doGenerate, 400)
 }
 
-async function generate() {
-  if (!config.interfaces.length && !config.bonds.length && !config.bridges.length) {
-    ElMessage.warning('请至少添加一个接口/聚合/网桥')
-    return
+function onOsChange() { preview() }
+function onDnsChange(row) { row.dns = (row.dnsStr || "").split(",").map(s => s.trim()).filter(Boolean); preview() }
+function onSlavesChange(row) { row.slaves = (row.slavesStr || "").split(",").map(s => s.trim()).filter(Boolean); preview() }
+function onTypeChange(row) {
+  if (row._type === "vlan") { row.mode = "static"; row.parent = row.parent || "eth0" }
+  if (row._type === "bond") { row.bondMode = row.bondMode || 1; row.miimon = row.miimon || 100 }
+  preview()
+}
+
+function addItem(typ) {
+  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100 }
+  if (typ === "iface") { base.name = "eth" + items.value.length; base.mode = "dhcp" }
+  else if (typ === "bond") { base.name = "bond" + items.value.filter(i => i._type === "bond").length; base.slavesStr = "eth0,eth1"; onSlavesChange(base) }
+  else if (typ === "vlan") { base.name = (items.value.find(i => i._type === "iface")?.name || "eth0") + ".100"; base.parent = items.value.find(i => i._type === "iface")?.name || "eth0" }
+  else if (typ === "bridge") { base.name = "br" + items.value.filter(i => i._type === "bridge").length; base.slavesStr = "eth0"; onSlavesChange(base) }
+  items.value.push(base)
+  preview()
+}
+
+function dupItem(idx) {
+  const orig = items.value[idx]
+  const copy = JSON.parse(JSON.stringify(orig))
+  copy.name = copy.name ? copy.name + "-copy" : ""
+  items.value.splice(idx + 1, 0, copy)
+  preview()
+}
+
+function delItem(idx) { items.value.splice(idx, 1); preview() }
+function clearAll() { items.value = []; previewScript.value = "" }
+
+async function doGenerate() {
+  const payload = { os: config.os, format: config.format, hostname: config.hostname, interfaces: [], bonds: [], vlans: [], bridges: [] }
+  if (config.format === "netplan") payload.netplan_renderer = config.netplan_renderer
+
+  for (const row of items.value) {
+    if (row._type === "iface") {
+      const ipCidr = parseIpCidr(row.ip)
+      payload.interfaces.push({
+        name: row.name, mode: row.mode,
+        ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr,
+        gateway: row.gateway, dns: row.dns || []
+      })
+    } else if (row._type === "bond") {
+      const ipCidr = parseIpCidr(row.ip)
+      payload.bonds.push({
+        name: row.name, mode: row.bondMode || 1, interfaces: row.slaves || [],
+        ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "",
+        gateway: row.gateway, dns: row.dns || [], miimon: row.miimon || 100
+      })
+    } else if (row._type === "vlan") {
+      const ipCidr = parseIpCidr(row.ip)
+      payload.vlans.push({
+        parent: row.parent, vlan_id: parseInt(row.name.split(".").pop()) || 100,
+        mode: row.mode,
+        ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr || "",
+        gateway: row.gateway
+      })
+    } else if (row._type === "bridge") {
+      const ipCidr = parseIpCidr(row.ip)
+      payload.bridges.push({
+        name: row.name, interfaces: row.slaves || [],
+        ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "",
+        gateway: row.gateway
+      })
+    }
   }
-  loading.value = true
+
   try {
-    const res = await http.post('/it/netconfig/generate', buildPayload())
-    script.value = res.script
-    filename.value = res.filename
-    ElMessage.success('配置已生成')
-  } finally { loading.value = false }
+    const resp = await http.post("/it/netconfig/generate", payload)
+    previewScript.value = resp.script
+    previewFilename.value = resp.filename
+  } catch (e) {
+    // keep previous preview
+  }
 }
 
-function download() {
-  const blob = new Blob([script.value], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename.value || 'apply-network.sh'
-  a.click()
-  URL.revokeObjectURL(url)
+function parseIpCidr(val) {
+  if (!val) return null
+  const m = val.match(/^(.+?)(?:\/(\d+))?$/)
+  return m ? { ip: m[1], cidr: parseInt(m[2]) || undefined } : { ip: val }
+}
+
+async function doDownload() {
+  generating.value = true
+  try {
+    await downloadZip("/it/netconfig/download", itemsToPayload())
+  } finally { generating.value = false }
+}
+
+function itemsToPayload() {
+  const payload = { os: config.os, format: config.format, hostname: config.hostname, interfaces: [], bonds: [], vlans: [], bridges: [] }
+  for (const row of items.value) {
+    if (row._type === "iface") {
+      const ipCidr = parseIpCidr(row.ip)
+      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr, gateway: row.gateway, dns: row.dns || [] })
+    } else if (row._type === "bond") {
+      const ipCidr = parseIpCidr(row.ip)
+      payload.bonds.push({ name: row.name, mode: row.bondMode || 1, interfaces: row.slaves || [], ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "", gateway: row.gateway, dns: row.dns || [], miimon: row.miimon || 100 })
+    } else if (row._type === "vlan") {
+      const ipCidr = parseIpCidr(row.ip)
+      payload.vlans.push({ parent: row.parent, vlan_id: parseInt(row.name.split(".").pop()) || 100, mode: row.mode, ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr || "", gateway: row.gateway })
+    } else if (row._type === "bridge") {
+      const ipCidr = parseIpCidr(row.ip)
+      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "", gateway: row.gateway })
+    }
+  }
+  return payload
 }
 
 onMounted(async () => {
   try {
-    const data = await http.get('/it/netconfig/meta')
+    const data = await http.get("/it/netconfig/meta")
     Object.assign(meta, data)
-  } catch (e) { /* handled */ }
-  addIface()
+  } catch (e) { /* defaults */ }
+  // initial demo
+  addItem("iface")
+  addItem("bond")
 })
 </script>
+
+<style scoped>
+.preview-block {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  font-family: monospace;
+  min-height: 200px;
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+}
+</style>
