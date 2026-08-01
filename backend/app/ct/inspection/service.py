@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,8 +14,78 @@ from app.core import crud, models
 from app.ct.drivers import get_driver, infer_netmiko_device_type
 from app.ct.drivers.base import MetricCommand
 from app.ct.inspection.parser import parse_output
+from app.database import async_session
 
 ProgressCb = Callable[[dict], None]
+
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def utcnow() -> datetime:
+    """返回无时区的 UTC 时间，与 SQLite 的 naive datetime 保持一致。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def schedule_background(coro) -> asyncio.Task:
+    """调度后台任务并保持引用，避免被 asyncio GC。"""
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
+async def recover_interrupted_tasks() -> int:
+    """服务重启后把遗留的 running 任务标记为 failed，避免永远卡住。"""
+    from sqlalchemy import update
+
+    async with async_session() as db:
+        res = await db.execute(
+            update(models.InspectionTask)
+            .where(models.InspectionTask.status == "running")
+            .values(status="failed", finished_at=utcnow())
+        )
+        await db.commit()
+        return int(res.rowcount or 0)
+
+
+async def run_task_in_background(task_id: str) -> None:
+    """后台执行巡检任务并写入结果；异常时标记 failed。"""
+    try:
+        async with async_session() as db:
+            task = await db.get(models.InspectionTask, task_id)
+            if task is None:
+                return
+            task.status = "running"
+            task.finished_at = None
+            await db.commit()
+            results = await inspect_many(
+                db, task.asset_ids, task.kind, task.template, task.commands
+            )
+            for r in results:
+                db.add(models.InspectionResult(
+                    task_id=task.id,
+                    asset_id=r["asset_id"],
+                    asset_name=r["asset_name"],
+                    status=r["status"],
+                    error=r.get("error", ""),
+                    metrics=r.get("metrics", {}),
+                    raw=r.get("raw", []),
+                ))
+            task.status = "done"
+            task.finished_at = utcnow()
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        try:
+            async with async_session() as db:
+                task = await db.get(models.InspectionTask, task_id)
+                if task is not None:
+                    task.status = "failed"
+                    task.finished_at = utcnow()
+                    await db.commit()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 
 
 def get_pager_cmds(device_type: str) -> list:
@@ -87,11 +158,11 @@ def _connect_and_run(params, key_text, metric_cmds, custom_cmds, disable_pager, 
 
 async def _resolve_template_cmds(db, asset, template_name):
     """按模板名+厂商从数据库解析巡检命令列表；DB 无则回落驱动内置默认。"""
-    from sqlalchemy import select
+    from sqlalchemy import func, select
     from app.core.models import InspectionTemplate
 
-    vendor = asset.vendor or "generic"
-    stmt = select(InspectionTemplate).where(InspectionTemplate.vendor == vendor)
+    vendor = (asset.vendor or "generic").strip().lower() or "generic"
+    stmt = select(InspectionTemplate).where(func.lower(InspectionTemplate.vendor) == vendor)
     if template_name:
         stmt = stmt.where(InspectionTemplate.name == template_name)
     else:

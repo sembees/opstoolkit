@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     inspection_concurrency: int = 10
     enable_pager_disable: bool = True
 
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000"
+
     admin_username: str = "admin"
     admin_password: str = "admin@123"
 

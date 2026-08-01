@@ -166,6 +166,7 @@
           <el-col :span="8" style="text-align:right">
             <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> 生成文件</el-button>
           <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
+          <el-button type="warning" size="small" @click="doDeploy" :loading="deploying" :disabled="!Object.keys(genFiles).length"><el-icon><Promotion /></el-icon> 部署到本机</el-button>
           </el-col>
         </el-row>
         <el-form-item label="临时设备" v-if="genForm.devices.length">
@@ -182,6 +183,9 @@
           <div class="terminal-output" style="white-space: pre; max-height: 440px">{{ genFiles[name] }}</div>
         </el-tab-pane>
       </el-tabs>
+      <el-alert v-if="deployResult.length" :type="deployOk ? 'success' : 'error'" :closable="false" style="margin-top: 12px">
+        <div v-for="(ln, i) in deployResult" :key="i" style="font-family: monospace; font-size: 12px; white-space: pre-wrap">{{ ln }}</div>
+      </el-alert>
     </el-dialog>
 
     <!-- 临时设备添加 -->
@@ -215,6 +219,9 @@ const genDialog = ref(false)
 const generating = ref(false)
 const genFiles = ref({})
 const activeFile = ref("")
+const deploying = ref(false)
+const deployResult = ref([])
+const deployOk = ref(true)
 const inlineDevDialog = ref(false)
 
 const emptyForm = () => ({
@@ -371,6 +378,30 @@ async function doDownload() {
     devices: genForm.devices,
   })
   ElMessage.success("下载已开始")
+}
+
+async function doDeploy() {
+  deploying.value = true
+  deployResult.value = []
+  deployOk.value = true
+  try {
+    const tid = sessionStorage.getItem("ztp_template_id")
+    const res = await http.post("/ct/ztp/templates/" + tid + "/deploy", {
+      deploy_mode: genForm.deploy_mode,
+      server_ip: genForm.server_ip,
+      devices: genForm.devices,
+    })
+    deployResult.value = res.log || []
+    deployOk.value = !!res.ok
+    if (res.ok) ElMessage.success("部署成功")
+    else ElMessage.error("部署失败，请查看日志")
+  } catch (e) {
+    deployOk.value = false
+    deployResult.value = [e.message || "部署请求失败"]
+    ElMessage.error("部署请求失败")
+  } finally {
+    deploying.value = false
+  }
 }
 
 async function loadTemplates() { templates.value = await http.get("/ct/ztp/templates") }

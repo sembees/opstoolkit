@@ -16,6 +16,7 @@ from app.core.schemas import (
 )
 from app.database import get_db
 from app.core.ziputil import files_to_zip_response
+from app.ct.ztp import server as ztp_server
 from app.ct.ztp.generator import ZtpDevice as GenDevice
 from app.ct.ztp.generator import ZtpProfile, generate_all
 
@@ -48,7 +49,7 @@ def _template_out(p: models.ZtpTemplate) -> ZtpTemplateOut:
 
 def _to_profile(p: models.ZtpTemplate) -> ZtpProfile:
     return ZtpProfile(
-        vendor=p.vendor, mgmt_vlan=p.mgmt_vlan,
+        vendor=(p.vendor or "h3c").strip().lower(), mgmt_vlan=p.mgmt_vlan,
         mgmt_interface=p.mgmt_interface, mgmt_netmask=p.mgmt_netmask,
         mgmt_gateway=p.mgmt_gateway, dns_servers=p.dns_servers or [],
         ntp_server=p.ntp_server, snmp_community=p.snmp_community,
@@ -75,7 +76,7 @@ async def list_templates(db: AsyncSession = Depends(get_db), _user=Depends(get_c
 @router.post("/templates", response_model=ZtpTemplateOut)
 async def create_template(body: ZtpTemplateIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     t = models.ZtpTemplate(
-        name=body.name, vendor=body.vendor,
+        name=body.name, vendor=(body.vendor or "h3c").strip().lower(),
         mgmt_vlan=body.mgmt_vlan, mgmt_interface=body.mgmt_interface,
         mgmt_netmask=body.mgmt_netmask, mgmt_gateway=body.mgmt_gateway,
         dns_servers=body.dns_servers, ntp_server=body.ntp_server,
@@ -102,7 +103,7 @@ async def update_template(tid: str, body: ZtpTemplateIn, db: AsyncSession = Depe
     if not t:
         raise HTTPException(status_code=404, detail="模板不存在")
     t.name = body.name
-    t.vendor = body.vendor
+    t.vendor = (body.vendor or "h3c").strip().lower()
     t.mgmt_vlan = body.mgmt_vlan
     t.mgmt_interface = body.mgmt_interface
     t.mgmt_netmask = body.mgmt_netmask
@@ -183,6 +184,8 @@ async def _gen_ztp_files(tid: str, body: dict, db: AsyncSession) -> dict:
         prof.deploy_mode = body["deploy_mode"]
     if body.get("server_ip"):
         prof.server_ip = body["server_ip"]
+    if body.get("http_root"):
+        prof.http_root = body["http_root"]
 
     res = await db.execute(
         select(models.ZtpDevice).where(models.ZtpDevice.template_id == tid)
@@ -212,3 +215,30 @@ async def download_files(tid: str, body: dict = None, db: AsyncSession = Depends
     files = await _gen_ztp_files(tid, body, db)
     return files_to_zip_response(files, "ztp-deploy.zip")
 
+
+# ---------- 本机部署与服务管控 ----------
+@router.get("/server/status")
+async def server_status(_user=Depends(get_current_user)):
+    """查看本机 ZTP 服务状态 (TFTP/HTTP 目录 + dnsmasq)。"""
+    return ztp_server.server_status()
+
+
+@router.post("/server/service")
+async def service_control(body: dict = None, _user=Depends(get_current_user)):
+    """控制 dnsmasq 服务: start/stop/restart/reload/status。"""
+    action = (body or {}).get("action", "status")
+    return ztp_server.service_control(action)
+
+
+@router.post("/templates/{tid}/deploy")
+async def deploy_to_host(tid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """一键部署到本机: 生成配置 -> 落地 TFTP/HTTP -> 重启 dnsmasq。"""
+    body = body or {}
+    srv = body.get("server_ip", "")
+    if not srv:
+        t = await db.get(models.ZtpTemplate, tid)
+        srv = t.server_ip if t else ""
+    body.setdefault("server_ip", srv)
+    body.setdefault("http_root", ("http://" + srv + ":8000/ztp") if srv else "")
+    files = await _gen_ztp_files(tid, body, db)
+    return ztp_server.deploy_files(files, tid)

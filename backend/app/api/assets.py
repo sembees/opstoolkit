@@ -70,6 +70,12 @@ async def update_credential(cid: str, body: CredentialIn, db: AsyncSession = Dep
 async def delete_credential(cid: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     c = await db.get(models.Credential, cid)
     if c:
+        used = (await db.execute(
+            select(models.Asset.id, models.Asset.name).where(models.Asset.credential_id == cid)
+        )).all()
+        if used:
+            names = "、".join(name for _, name in used)
+            raise HTTPException(status_code=409, detail="凭据正被资产 [" + names + "]，请先解除关联")
         await db.delete(c)
         await db.commit()
     return {"ok": True}
@@ -99,7 +105,7 @@ async def list_assets(category: str | None = None, db: AsyncSession = Depends(ge
 async def create_asset(body: AssetIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     device_type = body.device_type or infer_netmiko_device_type(body.vendor, body.device_role)
     a = models.Asset(
-        name=body.name, category=body.category, vendor=body.vendor,
+        name=body.name, category=body.category, vendor=(body.vendor or "").strip().lower(),
         device_role=body.device_role, host=body.host, port=body.port,
         device_type=device_type, serial=body.serial, mac=body.mac,
         location=body.location, tags=body.tags, remark=body.remark,
@@ -118,7 +124,7 @@ async def update_asset(aid: str, body: AssetIn, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=404, detail="资产不存在")
     a.name = body.name
     a.category = body.category
-    a.vendor = body.vendor
+    a.vendor = (body.vendor or "").strip().lower()
     a.device_role = body.device_role
     a.host = body.host
     a.port = body.port

@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crud, models
@@ -14,7 +13,7 @@ from app.core.auth import decode_access_token, get_current_user
 from app.core.schemas import InspectionCreate, InspectionResultOut, InspectionTaskOut, InspectionTemplateIn, InspectionTemplateOut
 from app.ct.drivers import DRIVERS, get_driver
 from app.ct.drivers.base import MetricCommand
-from app.ct.inspection.service import inspect_many, inspect_one
+from app.ct.inspection.service import inspect_many, inspect_one, run_task_in_background, schedule_background
 from app.database import async_session, get_db
 
 router = APIRouter()
@@ -99,7 +98,7 @@ async def create_task(
     db: AsyncSession = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    """创建巡检任务记录并立即执行，结果入库。"""
+    """创建巡检任务，立即返回；后台异步执行并写入结果。"""
     task = models.InspectionTask(
         name=body.name, kind=body.kind, template=body.template,
         commands=body.commands, asset_ids=body.asset_ids,
@@ -108,18 +107,7 @@ async def create_task(
     db.add(task)
     await db.commit()
     await db.refresh(task)
-
-    results = await inspect_many(db, body.asset_ids, body.kind, body.template, body.commands)
-    for r in results:
-        db.add(models.InspectionResult(
-            task_id=task.id, asset_id=r["asset_id"], asset_name=r["asset_name"],
-            status=r["status"], error=r.get("error", ""),
-            metrics=r.get("metrics", {}), raw=r.get("raw", []),
-        ))
-    task.status = "done"
-    task.finished_at = datetime.utcnow()
-    await db.commit()
-    await db.refresh(task)
+    schedule_background(run_task_in_background(task.id))
     return task
 
 
@@ -140,7 +128,7 @@ async def get_task_results(task_id: str, db: AsyncSession = Depends(get_db), _us
 async def list_templates_db(vendor: str = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     stmt = select(models.InspectionTemplate).order_by(models.InspectionTemplate.vendor, models.InspectionTemplate.created_at)
     if vendor:
-        stmt = stmt.where(models.InspectionTemplate.vendor == vendor)
+        stmt = stmt.where(func.lower(models.InspectionTemplate.vendor) == vendor.strip().lower())
     res = await db.execute(stmt)
     return list(res.scalars().all())
 

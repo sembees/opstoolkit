@@ -278,8 +278,14 @@ VENDOR_CONFIG = {
 }
 
 
+def _norm_vendor(vendor) -> str:
+    """将厂商统一为小写，未知厂商回落 H3C。"""
+    v = (vendor or "").strip().lower()
+    return v if v in ("h3c", "huawei", "cisco") else "h3c"
+
+
 def _ext(vendor) -> str:
-    return {"h3c": "cfg", "huawei": "cfg", "cisco": "cfg"}.get(vendor, "cfg")
+    return {"h3c": "cfg", "huawei": "cfg", "cisco": "cfg"}.get(_norm_vendor(vendor), "cfg")
 
 
 # ============ dnsmasq 投递配置 ============
@@ -297,7 +303,7 @@ def dnsmasq(p, devices) -> str:
     H3C/华为: option 66 = TFTP server, option 67 = 配置文件名
     思科:     option 150 = TFTP server, option 67 = 配置文件名
     """
-    vendor = p.vendor or "h3c"
+    vendor = _norm_vendor(p.vendor)
     srv = p.server_ip or "10.0.0.250"
     L = [
         "# dnsmasq ZTP 投递配置 (OpsToolkit 生成)",
@@ -309,7 +315,7 @@ def dnsmasq(p, devices) -> str:
     ]
     if p.deploy_mode == "relay":
         L.append("# 中继模式: 不开 DHCP, 仅 TFTP; 交换机 ip-helper 指向本机")
-        L.append("no-dhcp-interface=")
+        L.append(f"no-dhcp-interface={p.dhcp_iface}")
     elif p.deploy_mode == "proxy":
         L.append("# ProxyDHCP: 不分配 IP, 仅下发 PXE/ZTP 引导, 与现有 DHCP 并存")
         L.append(f"dhcp-range={srv},proxy")
@@ -393,7 +399,7 @@ def _h3c_script(p, devices) -> str:
 
 
 def intermediate(p, devices):
-    v = p.vendor or "h3c"
+    v = _norm_vendor(p.vendor)
     if v == "huawei":
         return _huawei_midfile(p, devices), "ztp_intermediate.txt"
     if v == "cisco":
@@ -402,7 +408,7 @@ def intermediate(p, devices):
 
 
 def _readme(p, devices) -> str:
-    v = p.vendor or "h3c"
+    v = _norm_vendor(p.vendor)
     return (
         "OpsToolkit ZTP 开局部署说明\n"
         "==========================\n\n"
@@ -414,7 +420,7 @@ def _readme(p, devices) -> str:
         f"   systemctl restart dnsmasq\n\n"
         "2. 建立 TFTP 目录结构:\n"
         f"   {p.tftp_root}/ztp/  放入各设备 .cfg 与 default.cfg\n\n"
-        "3. (可选) HTTP 服务器镜像 {p.http_root} 提供大文件下载\n\n"
+        f"3. (可选) HTTP 服务器镜像 {p.http_root} 提供大文件下载\n\n"
         "4. 新设备空配置上电, 接入开局网络, 自动获取配置\n\n"
         "厂商要点:\n"
         "  H3C   : auto-config, DHCP option 66(TFTP) + 67(文件名)\n"
@@ -427,10 +433,11 @@ def _readme(p, devices) -> str:
 def generate_all(p, devices=None):
     devices = devices or []
     files = {}
-    gen = VENDOR_CONFIG.get(p.vendor, h3c_config)
+    vendor = _norm_vendor(p.vendor)
+    gen = VENDOR_CONFIG.get(vendor, h3c_config)
     for d in devices:
         stem = _file_stem(d)
-        files[f"ztp/{stem}.{_ext(p.vendor)}"] = gen(d, p)
+        files[f"ztp/{stem}.{_ext(vendor)}"] = gen(d, p)
     # 未登记设备的兜底配置
     if devices:
         files["ztp/default.cfg"] = gen(ZtpDevice(hostname="default", mgmt_ip=p.dhcp_start), p)
