@@ -303,7 +303,7 @@ def _build_ifcfg(req):
     for o in req.vlans:
         name = o.parent + "." + str(o.vlan_id)
         lines = ["DEVICE=" + name, "TYPE=Vlan", "VLAN=yes", "PHYSDEV=" + o.parent]
-        lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "netmask": o.netmask})
+        lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "netmask": o.netmask})
         files["ifcfg-" + name] = "\n".join(lines) + "\n"
 
     # Bridges
