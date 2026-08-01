@@ -57,48 +57,254 @@
 
         <!-- ===== PXE ===== -->
         <el-tab-pane label="PXE 装机" name="pxe">
-          <h3>PXE 装机</h3>
-          <p>全自动装 Ubuntu / RHEL 系统。OpsToolkit 本机可直接作为完整 PXE 服务器，点「部署」即可启动全链路，裸机接线即装。</p>
+          <h3>PXE 装机手册</h3>
+          <p>全自动网络安装 Ubuntu / RHEL 系统。裸机接上网线，开机即可自动安装操作系统，全程无人值守。OpsToolkit 本机可直接作为完整 PXE 服务器。</p>
 
-          <el-alert type="success" :closable="false" title="本机完整 PXE 服务器模式" description="点「部署」后，本工具自动完成：检测网卡/IP/网关 → 生成 dnsmasq 配置 → 落地应答文件 → 复制 iPXE 固件 → 修复 SELinux 上下文 → 重启 dnsmasq。全部自动，无需手动编辑任何配置文件。" style="margin:12px 0" />
+          <el-collapse v-model="pxeActive" style="margin-top:12px">
 
-          <el-alert type="warning" :closable="false" title="环境要求：本机部署需 Linux" description="DHCP/TFTP 是系统服务，需要 Linux 环境 (Rocky/RHEL/CentOS/Ubuntu) + sudo 免密权限。Windows 上仅支持「生成配置 + 下载 ZIP」，无法直接运行 PXE 服务。" style="margin:12px 0" />
+            <el-collapse-item title="工作原理：PXE 引导全链路" name="p1">
+              <p>一台裸机从接电到装好系统，经过以下环节：</p>
+              <pre class="code-block">裸机上电 → BIOS/UEFI 设为 PXE 启动
+  ↓
+(1) DHCP 请求  —  裸机广播请求 IP
+  ↓                OpsToolkit 的 dnsmasq 响应:
+                     · 分配一个临时 IP
+                     · 告诉它去哪里取引导文件 (next-server + filename)
+  ↓
+(2) TFTP 下载   —  裸机去 TFTP 服务器下载 iPXE 固件
+                     · UEFI 机器 → ipxe.efi
+                     · BIOS 机器 → undionly.kpxe
+  ↓
+(3) iPXE 启动   —  iPXE 固件运行，去 HTTP 下载引导脚本 boot.ipxe
+  ↓
+(4) 加载内核   —  按 boot.ipxe 指引，从 HTTP 下载:
+                     · vmlinuz (Linux 内核)
+                     · initrd (初始内存盘)
+                     · squashfs (完整文件系统)
+  ↓
+(5) 自动安装   —  Ubuntu: autoinstall (cloud-init)
+                     RHEL:  Kickstart (应答文件 ks.cfg)
+                     按模板配置: 磁盘分区、账号密码、网络、软件包
+  ↓
+安装完成，重启进入新系统✔</pre>
+              <p style="margin-top:8px;color:#999;font-size:13px">其中 (1)(2) 由 dnsmasq 完成，(3)(4)(5) 由 OpsToolkit 的 HTTP 文件服务提供支持。整个过程不需要人工干预。</p>
+            </el-collapse-item>
 
-          <h4 style="margin:16px 0 8px">三种部署模式</h4>
-          <el-table :data="pxeModes" border size="small" style="margin:8px 0">
-            <el-table-column prop="mode" label="模式" width="130" />
-            <el-table-column prop="dhcp" label="DHCP 行为" width="220" />
-            <el-table-column prop="scene" label="适用场景" />
-          </el-table>
+            <el-collapse-item title="三种部署模式怎么选" name="p2">
+              <el-table :data="pxeModes" border size="small" style="margin:8px 0">
+                <el-table-column prop="mode" label="模式" width="130" />
+                <el-table-column prop="dhcp" label="DHCP 行为" width="220" />
+                <el-table-column prop="scene" label="适用场景" />
+              </el-table>
+              <el-alert type="success" :closable="false" style="margin:8px 0">
+                <template #title><b>选择建议</b></template>
+                <p style="margin:4px 0">· <b>专用装机网段</b>（如装机 VLAN、维护机柜）→ 选 <b>standalone</b></p>
+                <p style="margin:4px 0">· <b>办公网/生产网里临时装机</b>，不想改现有 DHCP → 选 <b>proxy</b></p>
+                <p style="margin:4px 0">· <b>大规模集中式部署</b>，交换机做中继 → 选 <b>relay</b></p>
+              </el-alert>
+              <p style="font-weight:600;margin-top:8px">standalone（独立 DHCP）</p>
+              <p>本工具自己就是 DHCP 服务器，裸机插上线就装。前提是这段网络里不能有其他 DHCP，否则会冲突抢答。</p>
+              <p style="font-weight:600;margin-top:8px">proxy（ProxyDHCP 代理）</p>
+              <p>不动 IP 分配（现有 DHCP 照常工作），只额外广播一条 PXE 引导信息。机器同时收到两份回应：从原 DHCP 拿到 IP，从本工具拿到引导地址。适合接入现有网络即装，不破坏现有 DHCP。</p>
+              <p style="font-weight:600;margin-top:8px">relay（中继模式）</p>
+              <p>本工具完全不跑 DHCP，只提供 TFTP + HTTP 文件服务，靠交换机的 ip helper-address 把 DHCP 请求中继过来。适合大规模、集中式 PXE。</p>
+            </el-collapse-item>
 
-          <h4 style="margin:16px 0 8px">使用步骤</h4>
-          <ol>
-            <li>【提供内核】将 OS 安装 ISO 上传到服务器 <code>/srv/opstk/iso/</code> 目录，然后在「ISO 镜像管理」面板点「提取」。系统会自动挂载 ISO 并提取 vmlinuz、initrd、squashfs 到 HTTP 目录。</li>
-            <li>【创建模板】在「PXE 装机」页面新建装机模板，填写系统类型/版本、磁盘分区、管理账号、网络等。</li>
-            <li>【一键部署】点模板旁的「部署」按钮。系统自动检测本机网卡和网络，生成全套配置，落地文件，重启 dnsmasq。部署日志实时显示在下方。</li>
-            <li>【裸机开装】裸机接上网线（与服务器同一网段），BIOS/UEFI 设为 PXE 网络启动即可自动安装。</li>
-            <li>【独立部署】也可点「生成配置」或「下载 ZIP」，在别的 Linux 服务器上手动部署。</li>
-          </ol>
+            <el-collapse-item title="操作步骤：从 ISO 到裸机装好" name="p3">
+              <p style="font-weight:600">第 1 步：获取并放置 ISO 镜像</p>
+              <p>下载官方安装镜像（不是 minimal，必须是 live-server），上传到服务器：</p>
+              <pre class="code-block"># Ubuntu 22.04 (推荐 USTC 镜像)
+wget http://mirrors.ustc.edu.cn/ubuntu-releases/22.04/\
+  ubuntu-22.04.5-live-server-amd64.iso -P /srv/opstk/iso/
 
-          <el-alert type="info" :closable="false" title="PXE 引导全链路" description="裸机 → DHCP 分配 IP → TFTP 下载 iPXE 固件 → HTTP 下载 Linux 内核(vmlinuz+initrd) → 加载 squashfs → autoinstall/Kickstart 自动安装。全程无人值守。" style="margin:12px 0" />
+# RHEL/Rocky 9
+wget http://mirror.rockylinux.org/pub/rocky/9.5/isos/x86_64/\
+  Rocky-9.5-x86_64-minimal.iso -P /srv/opstk/iso/
+
+# 或用 scp 从本地上传:
+scp ubuntu-22.04.iso yang@服务器IP:/srv/opstk/iso/</pre>
+
+              <p style="font-weight:600;margin-top:12px">第 2 步：提取内核文件</p>
+              <p>进入「PXE 装机」页面，找到「ISO 镜像管理」面板：</p>
+              <ol style="margin:4px 0 4px 20px">
+                <li>列表中会显示已放置的 ISO 文件名称和大小</li>
+                <li>选择对应的 OS 类型（Ubuntu / RHEL）和版本号</li>
+                <li>点「提取」按钮，系统自动挂载 ISO 并提取引导文件</li>
+                <li>期待结果：vmlinuz (~12MB) + initrd (~108MB) + squashfs (~499MB)</li>
+              </ol>
+              <p style="margin-top:4px;color:#999;font-size:13px">提取后的文件会放到 /srv/opstk/pxe-web/ubuntu/22.04/ 目录，前端可在 PXE 服务器面板的 HTTP 文件列表中看到。</p>
+
+              <p style="font-weight:600;margin-top:12px">第 3 步：创建装机模板</p>
+              <p>点「新建模板」，填写以下信息（字段详解见下方「模板字段说明」）：</p>
+              <pre class="code-block">名称:     ubuntu-web-prod    (自定义，方便区分)
+系统:     Ubuntu 22.04
+管理账号: ops
+管理密码: Ops@2024
+时区:     Asia/Shanghai
+磁盘:     lvm (推荐) / direct
+网络:     dhcp / static
+镜像源:  http://mirrors.aliyun.com/ubuntu (加速安装)</pre>
+
+              <p style="font-weight:600;margin-top:12px">第 4 步：一键部署</p>
+              <p>点模板旁的「部署」按钮，系统会自动完成：</p>
+              <pre class="code-block">✓ 检测本机网卡名和 IP        (如 ens18, 10.128.118.113)
+✓ 计算 DHCP 分配范围            (网段后 1/4)
+✓ 生成 dnsmasq 配置               (写入 /etc/dnsmasq.d/opstk-pxe.conf)
+✓ 落地应答文件                 (user-data, meta-data, boot.ipxe)
+✓ 复制 iPXE 固件                  (ipxe.efi, undionly.kpxe)
+✓ 修复 SELinux 上下文              (RHEL/Rocky)
+✓ 重启 dnsmasq                  (服务生效)</pre>
+              <p style="margin-top:4px">部署日志实时显示在下方「部署日志」区域，全部显示✓即成功。</p>
+
+              <p style="font-weight:600;margin-top:12px">第 5 步：裸机 BIOS/UEFI 设置</p>
+              <p>将裸机接上与服务器同一网段的网线，开机进入 BIOS/UEFI 设置：</p>
+              <pre class="code-block"># UEFI 机器 (现代服务器多为此模式)
+Boot → Network Boot/PXE Boot → Enabled
+Boot Order → 将 Network 排在第一位
+保存重启 → 自动进入 PXE 引导
+
+# BIOS 机器 (老款服务器)
+Advanced → PXE Option ROMs → Enabled
+Boot → 选择 PXE 网卡启动</pre>
+              <p style="margin-top:8px;color:#999;font-size:13px">部分服务器可按 F12 临时选择网络启动，无需改 BIOS。</p>
+
+              <p style="font-weight:600;margin-top:12px">第 6 步：验证装机</p>
+              <p>裸机重启后应自动开始安装，可通过以下方式确认：</p>
+              <ol style="margin:4px 0 4px 20px">
+                <li>裸机屏幕出现 iPXE 引导画面 → 正在下载内核</li>
+                <li>出现 Ubuntu/RHEL 安装画面 → 正在格式化磁盘</li>
+                <li>安装完成后自动重启 → 进入登录界面</li>
+                <li>用模板中配置的账号密码登录验证</li>
+              </ol>
+            </el-collapse-item>
+
+            <el-collapse-item title="模板字段说明" name="p4">
+              <el-table :data="pxeFields" border size="small">
+                <el-table-column prop="field" label="字段" width="130" />
+                <el-table-column prop="required" label="必填" width="60" />
+                <el-table-column prop="desc" label="说明" />
+                <el-table-column prop="example" label="示例" width="160" />
+              </el-table>
+            </el-collapse-item>
+
+            <el-collapse-item title="生成的配置文件说明" name="p5">
+              <el-table :data="pxeFiles" border size="small">
+                <el-table-column prop="file" label="文件" width="160" />
+                <el-table-column prop="role" label="作用" width="120" />
+                <el-table-column prop="desc" label="说明" />
+              </el-table>
+            </el-collapse-item>
+
+          </el-collapse>
         </el-tab-pane>
 
         <!-- ===== ZTP ===== -->
         <el-tab-pane label="ZTP 开局" name="ztp">
-          <h3>ZTP 配置开局</h3>
-          <p>为网络/安全设备（H3C、华为、思科）生成开局配置，设备首次上电空配置时自动拉取。</p>
-          <el-table :data="ztpOptions" border size="small" style="margin:12px 0">
-            <el-table-column prop="vendor" label="厂商" width="90" />
-            <el-table-column prop="opt" label="DHCP Option" width="180" />
-            <el-table-column prop="mech" label="工作机制" />
-          </el-table>
-          <ol>
-            <li>「ZTP 开局」页面新建模板，选择厂商，填写管理 VLAN、网关、账号、端口等。</li>
-            <li>添加设备清单（MAC + 主机名），每台设备会生成单独的 .cfg。</li>
-            <li>点「生成配置」，选择投递模式（同样支持 standalone/proxy/relay）。</li>
-            <li>点「下载 ZIP」，把 .cfg 放入 TFTP 的 ztp/ 目录，部署 dnsmasq。</li>
-            <li>设备上电后空配置启动，自动向 DHCP 请求并下载配置文件。</li>
-          </ol>
+          <h3>ZTP 配置开局手册</h3>
+          <p>网络/安全设备（H3C、华为、思科）首次上电时空配置启动，会自动通过 DHCP 获取 TFTP 地址并下载配置文件。OpsToolkit 可生成全套开局配置并通过 dnsmasq 投递。</p>
+
+          <el-collapse v-model="ztpActive" style="margin-top:12px">
+
+            <el-collapse-item title="ZTP 工作原理" name="z1">
+              <pre class="code-block">设备首次上电 (空配置)
+  ↓
+(1) 发起 DHCP 请求  —  设备以自己的 MAC 地址发起请求
+  ↓                   dnsmasq 响应:
+                        · 分配临时 IP
+                        · 通过 DHCP Option 告诉设备去哪里取配置
+  ↓
+(2) 下载配置     —  设备去 TFTP 下载开局文件
+                        · H3C:   直接下载 .cfg 配置文件
+                        · 华为:   下载中间文件，再按其指引下载 .cfg
+                        · 思科:   下载 Python 脚本，脚本拉取 .cfg
+  ↓
+(3) 加载配置       —  设备自动加载并生效配置
+                        · 管理 IP/VLAN/SNMP/SSH 等
+  ↓
+开局完成，设备可远程管理✔</pre>
+            </el-collapse-item>
+
+            <el-collapse-item title="三厂商差异" name="z2">
+              <el-table :data="ztpOptions" border size="small" style="margin:8px 0">
+                <el-table-column prop="vendor" label="厂商" width="90" />
+                <el-table-column prop="opt" label="DHCP Option" width="180" />
+                <el-table-column prop="mech" label="工作机制" />
+              </el-table>
+              <p style="font-weight:600;margin-top:12px">H3C（推荐）</p>
+              <p>使用 auto-config 机制。DHCP 通过 Option 66 告诉 TFTP 服务器地址，Option 67 告诉配置文件名。设备直接下载 .cfg 文件并加载。最简单直接。</p>
+              <p style="font-weight:600;margin-top:8px">华为（推荐）</p>
+              <p>使用 ZTP 机制。DHCP 通过 Option 66 告诉 TFTP 地址，Option 67 告诉中间文件名。设备先下载中间文件（描述需要下载哪些文件），再按指引下载实际配置。</p>
+              <p style="font-weight:600;margin-top:8px">思科</p>
+              <p>使用 IOS-XE ZTP。DHCP 通过 Option 150 告诉 TFTP 地址，Option 67 告诉脚本名。设备下载 Python 脚本，脚本再去 HTTP/TFTP 拉取配置文件。机制最复杂但灵活。</p>
+            </el-collapse-item>
+
+            <el-collapse-item title="操作步骤：从创建到设备开局" name="z3">
+              <p style="font-weight:600">第 1 步：创建 ZTP 模板</p>
+              <p>进入「ZTP 开局」页面，点「新建模板」，填写：</p>
+              <pre class="code-block">名称:     h3c-core-sw      (自定义)
+厂商:     H3C / 华为 / 思科
+管理 VLAN: 100               (设备管理网段)
+管理 IP:  192.168.100.1/24   (设备管理地址)
+网关:     192.168.100.254
+管理账号: admin
+管理密码: Admin@123
+SNMP 社区: public
+SSH 版本: 2</pre>
+
+              <p style="font-weight:600;margin-top:12px">第 2 步：添加设备清单</p>
+              <p>每台设备需要登记其 MAC 地址，系统会按 MAC 生成单独的配置文件：</p>
+              <pre class="code-block"># 获取 MAC 方式:
+# 1. 设备贴纸上的 MAC 标签
+# 2. 打开设备控制台: display device manuinfo (H3C/华为)
+# 3. 打开设备控制台: show inventory (Cisco)
+
+# 在设备清单中填写:
+MAC:      3c8c-4012-abcd  (H3C/华为 格式) 或 aabb.ccdd.eeff (思科)
+主机名: core-sw-floor3
+IP:       192.168.100.10  (可选，不填则用模板默认)</pre>
+
+              <p style="font-weight:600;margin-top:12px">第 3 步：生成配置 + 部署</p>
+              <p>点「生成配置」，选择投递模式（同样支持 standalone/proxy/relay）。然后：</p>
+              <ol style="margin:4px 0 4px 20px">
+                <li>点「下载 ZIP」获取全套文件</li>
+                <li>将 .cfg 配置文件放入 TFTP 的 ztp/ 目录</li>
+                <li>部署 dnsmasq 配置（含 Option 66/67/150）</li>
+                <li>重启 dnsmasq</li>
+              </ol>
+
+              <p style="font-weight:600;margin-top:12px">第 4 步：设备上电</p>
+              <ol style="margin:4px 0 4px 20px">
+                <li>设备接入与服务器同网段的端口（或 Trunk 口）</li>
+                <li>确保设备为出厂默认配置（空配置）</li>
+                <li>上电后设备自动发起 DHCP 并下载配置</li>
+                <li>完成后可用模板中的管理 IP 和账号登录</li>
+              </ol>
+            </el-collapse-item>
+
+            <el-collapse-item title="三种投递模式" name="z4">
+              <el-table :data="pxeModes" border size="small" style="margin:8px 0">
+                <el-table-column prop="mode" label="模式" width="130" />
+                <el-table-column prop="dhcp" label="DHCP 行为" width="220" />
+                <el-table-column prop="scene" label="适用场景" />
+              </el-table>
+              <p style="margin-top:8px">ZTP 的三种模与 PXE 完全一致，区别在于投递的是设备配置文件而非 OS 内核。</p>
+              <p style="font-weight:600;margin-top:8px">standalone</p>
+              <p>OpsToolkit 自己作为 DHCP + TFTP 服务器。适合专用的设备初始化网络，如维护 VLAN。</p>
+              <p style="font-weight:600;margin-top:8px">proxy</p>
+              <p>不分配 IP，只额外广播 ZTP 引导信息。适合在现有网络里临时开局设备，不影响现有 DHCP。</p>
+              <p style="font-weight:600;margin-top:8px">relay</p>
+              <p>不跑 DHCP，交换机 ip helper-address 中继。适合大规模集中开局。</p>
+            </el-collapse-item>
+
+            <el-collapse-item title="配置文件结构说明" name="z5">
+              <el-table :data="ztpFiles" border size="small">
+                <el-table-column prop="file" label="文件" width="160" />
+                <el-table-column prop="vendor" label="厂商" width="80" />
+                <el-table-column prop="desc" label="说明" />
+              </el-table>
+            </el-collapse-item>
+
+          </el-collapse>
         </el-tab-pane>
 
         <!-- ===== 概念 ===== -->
@@ -284,6 +490,39 @@ const activeTab = ref("quick")
 const conceptActive = ref("c1")
 
 const deployActive = ref("d1")
+
+const pxeActive = ref("p3")
+const ztpActive = ref("z3")
+const pxeFields = [
+  { field: "名称", required: "是", desc: "自定义模板名，方便区分", example: "ubuntu-web-prod" },
+  { field: "系统类型", required: "是", desc: "ubuntu 生成 autoinstall，rhel 生成 Kickstart", example: "ubuntu / rhel" },
+  { field: "系统版本", required: "是", desc: "需与 ISO 版本一致，决定内核文件路径", example: "22.04 / 9.3" },
+  { field: "管理账号", required: "是", desc: "安装后的管理用户名，已加入 sudo", example: "ops" },
+  { field: "管理密码", required: "是", desc: "加密存储，生成 shadow 哈希", example: "Ops@2024" },
+  { field: "时区", required: "否", desc: "默认 Asia/Shanghai", example: "Asia/Shanghai" },
+  { field: "磁盘分区", required: "否", desc: "lvm (推荐) 或 direct", example: "lvm" },
+  { field: "网络模式", required: "否", desc: "dhcp 自动获取 / static 静态", example: "dhcp" },
+  { field: "镜像源", required: "否", desc: "apt/yum 源，留空用默认", example: "mirrors.aliyun.com" },
+  { field: "SSH 公钥", required: "否", desc: "可添加公钥实现免密登录", example: "ssh-rsa AAA..." },
+  { field: "后置脚本", required: "否", desc: "安装后自动执行的 Shell 脚本", example: "systemctl enable docker" },
+]
+const pxeFiles = [
+  { file: "user-data", role: "Ubuntu 应答", desc: "autoinstall: 账号/磁盘/网络/软件包/后置脚本" },
+  { file: "ks.cfg", role: "RHEL 应答", desc: "Kickstart 配置，功能同 user-data" },
+  { file: "meta-data", role: "cloud-init", desc: "主机名、实例 ID 等元数据" },
+  { file: "boot.ipxe", role: "iPXE 菜单", desc: "告诉 iPXE 去哪里下载内核、传什么参数" },
+  { file: "dnsmasq.conf", role: "网络服务", desc: "DHCP + TFTP 配置，三种模式各不相同" },
+  { file: "vmlinuz", role: "Linux 内核", desc: "从 ISO 提取，通过 HTTP 下载到内存" },
+  { file: "initrd", role: "初始内存盘", desc: "从 ISO 提取，含安装器和驱动" },
+  { file: "squashfs", role: "文件系统", desc: "从 ISO 提取，压缩的完整根文件系统" },
+]
+const ztpFiles = [
+  { file: "device.cfg", vendor: "H3C", desc: "按 MAC 生成的配置文件，含 VLAN/IP/账号" },
+  { file: "device.cfg", vendor: "华为", desc: "同上，华为语法格式" },
+  { file: "ztp_script.py", vendor: "思科", desc: "Python 脚本，负责拉取并应用配置" },
+  { file: "中间文件", vendor: "华为", desc: "描述需下载的文件列表" },
+  { file: "dnsmasq.conf", vendor: "通用", desc: "含 Option 66/67 (H3C/华为) 或 150 (思科)" },
+]
 const troubleActive = ref("t1")
 const deployReqs = [
   { item: "操作系统", req: "Linux (Rocky/RHEL/Ubuntu)", note: "Windows 仅 Web 界面" },
