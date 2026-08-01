@@ -162,7 +162,7 @@ function buildPayload() {
 
 async function doGenerate() {
   try {
-    const resp = await http.post("/it/netconfig/generate", buildPayload())
+    const resp = await http.post("/it/netconfig/generate", buildPayload(), { _silent: true })
     previewScript.value = resp.script
     previewFilename.value = resp.filename
   } catch (e) { /* keep previous */ }

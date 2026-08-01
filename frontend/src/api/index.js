@@ -21,7 +21,9 @@ http.interceptors.response.use(
       if (location.pathname !== '/login') location.href = '/login'
     }
     const msg = err.response?.data?.detail || err.message || '请求失败'
-    ElMessage.error(msg)
+    if (!err.config?._silent) {
+      ElMessage.error(msg)
+    }
     return Promise.reject(err)
   }
 )
