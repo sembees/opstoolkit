@@ -83,7 +83,7 @@
             <template #default="{ row }">
               <template v-if="row._type==='bond'">
                 <el-select v-model="row.bondMode" size="small" style="width:80px" @change="preview">
-                  <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.id" :value="m.id" />
+                  <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.name" :value="m.id" />
                 </el-select>
                 <el-input v-model="row.miimon" size="small" style="width:50px;margin-left:4px" placeholder="100" @input="preview" />
               </template>
@@ -177,7 +177,7 @@ function buildPayload() {
     if (row._type === "iface") {
       payload.interfaces.push({ name: row.name, mode: row.mode, ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr, gateway: row.gateway, dns: row.dns || [] })
     } else if (row._type === "bond") {
-      payload.bonds.push({ name: row.name, mode: row.bondMode || 1, interfaces: row.slaves || [], ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "", gateway: row.gateway, dns: row.dns || [], miimon: row.miimon || 100 })
+      payload.bonds.push({ name: row.name, mode: (row.bondMode != null ? row.bondMode : 1), interfaces: row.slaves || [], ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "", gateway: row.gateway, dns: row.dns || [], miimon: (row.miimon != null ? row.miimon : 100) })
     } else if (row._type === "vlan") {
       payload.vlans.push({ parent: row.parent, vlan_id: parseInt(row.vlanId) || parseInt(row.name.split(".").pop()) || 100, mode: row.mode, ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr || "", gateway: row.gateway })
     } else if (row._type === "bridge") {
