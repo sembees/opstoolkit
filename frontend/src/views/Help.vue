@@ -10,15 +10,193 @@
 
       <el-tabs v-model="activeTab" tab-position="left" style="min-height:520px">
         <!-- ===== 快速开始 ===== -->
-        <el-tab-pane label="快速开始" name="quick">
-          <h3>快速上手</h3>
-          <el-steps direction="vertical" :active="5">
-            <el-step title="登录" description="默认账号 admin / admin@123，首次登录后请尽快修改密码。" />
-            <el-step title="录入资产" description="在「资产管理」添加设备/服务器，填写 IP、厂商、设备类型。" />
-            <el-step title="绱定凭据" description="在「凭据管理」添加登录账号密码（加密存储），回到资产里关联。" />
-            <el-step title="开始使用" description="根据需求进入对应功能页面：巡检 / 网络配置 / PXE 装机 / ZTP 开局。" />
-            <el-step title="下载结果" description="配置生成后点「下载 ZIP」获取全部文件，拷贝到目标机器执行。" />
-          </el-steps>
+        <el-tab-pane label="工具使用手册" name="quick">
+          <h3>OpsToolkit 工具使用手册</h3>
+          <p>一体化运维工具平台。后端 Python/FastAPI，前端 Vue 3 + Element Plus，数据库 SQLite。支持 CT 设备巡检/ZTP 开局，IT 服务器 PXE 装机/网络配置生成。</p>
+
+          <el-collapse v-model="quickActive" style="margin-top:12px">
+
+            <el-collapse-item title="代码结构说明" name="q0">
+              <pre class="code-block">01-project/
+├── backend/                    # 后端 (Python FastAPI)
+│   ├── app/
+│   │   ├── main.py              # 入口: FastAPI 应用 + 静态文件挂载
+│   │   ├── config.py           # 配置: 数据库路径/密钥/超时参数
+│   │   ├── database.py         # 异步 SQLite 引擎
+│   │   ├── api/                # API 路由
+│   │   │   ├── auth.py         #   登录/JWT
+│   │   │   ├── assets.py       #   资产/凭据 CRUD
+│   │   │   ├── inspection.py   #   CT 设备巡检
+│   │   │   ├── netconfig.py    #   IT 网络配置生成
+│   │   │   ├── pxe.py          #   PXE 装机
+│   │   │   └── ztp.py           #   ZTP 开局
+│   │   ├── core/               # 核心逻辑
+│   │   │   ├── models.py       #   数据模型 (SQLAlchemy)
+│   │   │   ├── schemas.py      #   Pydantic 模型
+│   │   │   ├── crypto.py       #   Fernet 加密
+│   │   │   ├── auth.py         #   JWT + bcrypt
+│   │   │   └── crud.py         #   通用 CRUD
+│   │   ├── ct/                 # CT 模块 (网络设备)
+│   │   │   ├── drivers/        #   SSH 驱动 H3C/华为/思科
+│   │   │   ├── inspection/     #   巡检解析 + TextFSM
+│   │   │   └── ztp/            #   ZTP 配置生成器
+│   │   └── it/                 # IT 模块 (服务器)
+│   │       ├── netconfig/      #   nmcli/netplan 配置生成
+│   │       └── pxe/            #   PXE 配置生成 + 本机服务管控
+│   ├── requirements.txt        # Python 依赖
+│   ├── Dockerfile             # 容器构建
+│   └── docker-entrypoint.sh    # 容器启动脚本
+├── frontend/                  # 前端 (Vue 3 + Element Plus)
+│   ├── src/views/            # 10 个页面组件
+│   ├── src/api/              # axios HTTP 封装
+│   ├── src/router/           # Vue Router
+│   └── src/layouts/          # 侧边栏布局
+├── docker-compose.yml         # 容器编排
+└── README.md</pre>
+            </el-collapse-item>
+
+            <el-collapse-item title="本地开发环境运行（Windows）" name="q1">
+              <p style="font-weight:600">后端启动</p>
+              <pre class="code-block"># 1. 安装依赖
+cd backend
+pip install -r requirements.txt
+# 额外补装: pip install pydantic-settings eval_type_backport
+
+# 2. 设置环境变量
+ = "backend"
+
+# 3. 启动
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+
+# 访问: http://localhost:8000
+# 默认账号: admin / admin@123</pre>
+              <p style="font-weight:600;margin-top:12px">前端开发服务</p>
+              <pre class="code-block">cd frontend
+npm install
+npm run dev    # 开发服务, 热更新, 访问 http://localhost:5173
+
+# 生产构建 (写入 dist/ 目录, 后端自动挂载)
+npm run build</pre>
+              <el-alert type="warning" :closable="false" style="margin:8px 0">
+                <template #title><b>Windows 限制</b></template>
+                <p style="margin:4px 0">· PXE 本机部署不可用 (DHCP/TFTP 需 Linux)</p>
+                <p style="margin:4px 0">· ZTP 本机部署不可用 (同上)</p>
+                <p style="margin:4px 0">· 其他功能完全可用: 巡检、生成配置、下载 ZIP、资产管理</p>
+              </el-alert>
+            </el-collapse-item>
+
+            <el-collapse-item title="远程服务器完整部署（从零开始）" name="q2">
+              <p style="color:#999;font-size:13px">以 Rocky Linux 9 为例, 其他 RHEL 系或 Ubuntu 类似。详细命令见「部署指南」标签页。</p>
+              <pre class="code-block"># ===== 第 1 步: 安装系统依赖 =====
+dnf install -y dnsmasq ipxe util-linux python3 python3-pip
+
+# ===== 第 2 步: 创建虚拟环境 =====
+python3 -m venv /opt/opstk/venv
+
+# ===== 第 3 步: 上传代码 =====
+# 用 scp 或其他方式上传项目到 /opt/opstk/
+# 最终目录结构:
+#   /opt/opstk/backend/app/main.py
+#   /opt/opstk/frontend/dist/index.html
+
+# ===== 第 4 步: 安装 Python 依赖 =====
+cd /opt/opstk/backend
+/opt/opstk/venv/bin/pip install -r requirements.txt
+/opt/opstk/venv/bin/pip install pydantic-settings eval_type_backport
+
+# ===== 第 5 步: 配置 sudo 免密 =====
+echo 'yang ALL=(root) NOPASSWD: /usr/bin/systemctl * dnsmasq, /usr/sbin/systemctl * dnsmasq, /usr/bin/tee /etc/dnsmasq.d/*, /usr/bin/chown, /usr/bin/mount, /usr/bin/umount, /usr/sbin/restorecon, /usr/sbin/semanage' | sudo tee /etc/sudoers.d/opstk
+sudo chmod 440 /etc/sudoers.d/opstk
+
+# ===== 第 6 步: 创建目录 + SELinux =====
+mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/iso /srv/opstk/mnt
+sudo chown -R yang\codexsandboxoffline /srv/tftp /srv/opstk
+sudo semanage fcontext -a -t tftpdir_t '/srv/tftp(/.*)?'
+sudo restorecon -R /srv/tftp
+
+# ===== 第 7 步: 启动 =====
+cd /opt/opstk/backend
+PYTHONPATH=/opt/opstk/backend /opt/opstk/venv/bin/uvicorn \
+  app.main:app --host 0.0.0.0 --port 8000
+
+# ===== 验证 =====
+curl http://localhost:8000/health
+# 应返回: {"status":"ok"}
+# 浏览器: http://服务器IP:8000</pre>
+              <p style="font-weight:600;margin-top:12px">配置开机自启（可选）</p>
+              <pre class="code-block">cat > /tmp/opstk.service << 'EOF'
+[Unit]
+Description=OpsToolkit
+After=network.target
+[Service]
+Type=simple
+User=yang\codexsandboxoffline
+WorkingDirectory=/opt/opstk/backend
+Environment=PYTHONPATH=/opt/opstk/backend
+ExecStart=/opt/opstk/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo cp /tmp/opstk.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now opstk</pre>
+            </el-collapse-item>
+
+            <el-collapse-item title="Docker 容器部署（一键迁移）" name="q3">
+              <pre class="code-block"># 在项目根目录执行
+docker compose up -d --build
+
+# 镜像包含全套环境: Python + dnsmasq + iPXE + 前端
+# 访问: http://宿主机IP:8000
+
+# 迁移到其他主机: 复制项目目录, 重复上述命令
+# 或导出镜像: docker save opstk-opstoolkit | gzip > opstk.tar.gz</pre>
+              <el-alert type="warning" :closable="false" style="margin:8px 0" title="必须配置" description="docker-compose.yml 中 network_mode: host 和 privileged: true 不能改，否则 PXE DHCP 广播和 ISO 挂载无法工作。" />
+            </el-collapse-item>
+
+            <el-collapse-item title="日常使用指南" name="q4">
+              <el-table :data="dailyOps" border size="small">
+                <el-table-column prop="page" label="页面" width="120" />
+                <el-table-column prop="func" label="功能" width="140" />
+                <el-table-column prop="how" label="怎么用" />
+              </el-table>
+            </el-collapse-item>
+
+            <el-collapse-item title="数据存储与备份" name="q5">
+              <el-table :data="dataPaths" border size="small">
+                <el-table-column prop="path" label="路径" width="250" />
+                <el-table-column prop="content" label="内容" />
+                <el-table-column prop="backup" label="备份方式" width="160" />
+              </el-table>
+              <p style="margin-top:12px;font-weight:600">备份命令</p>
+              <pre class="code-block"># 完整备份 (包含数据库 + PXE 配置 + 内核文件)
+tar czf opstk-backup-.tar.gz \
+  /opt/opstk/backend/data/ \
+  /srv/opstk/pxe-web/ \
+  /srv/opstk/iso/ \
+  /etc/dnsmasq.d/opstk-pxe.conf
+
+# 恢复: 解压到原路径, 重启服务</pre>
+              <el-alert type="warning" :closable="false" style="margin:8px 0" title="重要提示" description="backend/.env 中的 credential_key 是凭据加密密钥。如果删除了数据库但保留 .env，旧凭据仍可解密。但如果 .env 丢失，所有加密凭据将无法解密。" />
+            </el-collapse-item>
+
+            <el-collapse-item title="版本更新与重启" name="q6">
+              <pre class="code-block"># 更新代码后只需重启 (Python 代码无需重编译)
+sudo systemctl restart opstk
+
+# 前端更新: 重新构建后上传 dist/
+cd frontend && npm run build
+# 上传 /opt/opstk/frontend/dist/ 后刷新浏览器即可
+
+# Docker 更新
+docker compose up -d --build
+
+# 数据库迁移 (SQLite 是单文件, 直接拷贝即可)
+cp /opt/opstk/backend/data/ops.db /backup/</pre>
+            </el-collapse-item>
+
+          </el-collapse>
         </el-tab-pane>
 
         <!-- ===== CT 巡检 ===== -->
@@ -490,6 +668,28 @@ const activeTab = ref("quick")
 const conceptActive = ref("c1")
 
 const deployActive = ref("d1")
+
+const quickActive = ref("q4")
+const dailyOps = [
+  { page: "登录", func: "JWT 认证", how: "admin / admin@123, 首次登录后建议修改密码" },
+  { page: "仪表盘", func: "总览", how: "查看资产数/巡检记录/快捷入口" },
+  { page: "资产管理", func: "设备清单", how: "添加设备 IP/厂商/类型, 可批大批量导入" },
+  { page: "凭据管理", func: "加密密码", how: "录入 SSH/Telnet 密码, Fernet 加密存储, 与资产关联" },
+  { page: "CT 巡检", func: "设备巡检", how: "选择设备 + 模板, WebSocket 实时看命令输出和解析结果" },
+  { page: "CT 巡检", func: "模板管理", how: "系统默认模板可查看/克隆; 用户模板可增删改" },
+  { page: "IT 网络配置", func: "生成脚本", how: "选 OS 类型, 配置网卡/Bond/VLAN/Bridge, 下载脚本" },
+  { page: "PXE 装机", func: "一键装机", how: "上传 ISO → 提取内核 → 创建模板 → 点部署 → 裸机接线" },
+  { page: "ZTP 开局", func: "设备初始化", how: "建模板 → 添设设备 MAC → 生成配置 → 部署 → 设备上电" },
+  { page: "使用帮助", func: "在线手册", how: "查看每个功能的详细说明和操作步骤" },
+]
+const dataPaths = [
+  { path: "/opt/opstk/backend/data/ops.db", content: "SQLite 数据库 (资产/凭据/模板)", backup: "直接拷贝备份" },
+  { path: "/opt/opstk/backend/.env", content: "加密密钥 + JWT 密钥", backup: "必须一并备份" },
+  { path: "/etc/dnsmasq.d/opstk-pxe.conf", content: "PXE/ZTP dnsmasq 配置", backup: "备份后可快速恢复" },
+  { path: "/srv/tftp/", content: "iPXE 固件 (ipxe.efi/undionly.kpxe)", backup: "可从系统包重装" },
+  { path: "/srv/opstk/pxe-web/", content: "应答文件 + 内核文件", backup: "重要, tar 打包" },
+  { path: "/srv/opstk/iso/", content: "ISO 镜像文件", backup: "可重新下载" },
+]
 
 const pxeActive = ref("p3")
 const ztpActive = ref("z3")
