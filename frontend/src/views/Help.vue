@@ -102,6 +102,67 @@
         </el-tab-pane>
 
         <!-- ===== 概念 ===== -->
+        <!-- ===== 部署指南 ===== -->
+        <el-tab-pane label="部署指南" name="deploy">
+          <h3>部署指南</h3>
+
+          <el-alert type="info" :closable="false" title="两种部署方式" description="方式一: 直接部署在 Linux 服务器上（推荐，性能最好）。方式二: 用 Docker 容器运行（方便迁移）。两种方式的 PXE 功能完全相同。" style="margin:12px 0" />
+
+          <h4 style="margin:16px 0 8px">方式一：直接部署在 Linux 服务器</h4>
+          <p style="font-weight:600;color:#409eff">适用于 Rocky/RHEL/CentOS 9+ 或 Ubuntu 22.04+</p>
+          <ol>
+            <li><b>安装依赖包</b><br/>
+              <code>RHEL系: dnf install -y dnsmasq ipxe util-linux python3 python3-pip</code><br/>
+              <code>Ubuntu: apt install -y dnsmasq ipxe util-linux python3 python3-pip</code>
+            </li>
+            <li><b>创建 Python 虚拟环境</b><br/>
+              <code>python3 -m venv /opt/opstk/venv</code><br/>
+              <code>/opt/opstk/venv/bin/pip install fastapi uvicorn sqlalchemy pydantic pydantic-settings python-jose passlib cryptography netmiko textfsm jinja2 aiosqlite bcrypt paramiko eval_type_backport</code>
+            </li>
+            <li><b>上传代码</b><br/>
+              将项目 backend/ 和 frontend/dist/ 上传到 <code>/opt/opstk/</code><br/>
+              目录结构: <code>/opt/opstk/backend/app/</code> + <code>/opt/opstk/frontend/dist/</code>
+            </li>
+            <li><b>配置 sudo 免密</b> (必要，dnsmasq 管控需要)<br/>
+              <code>echo 'yang ALL=(root) NOPASSWD: /usr/bin/systemctl * dnsmasq, /usr/bin/tee /etc/dnsmasq.d/*, /usr/bin/mount, /usr/bin/umount, /usr/sbin/restorecon, /usr/sbin/semanage' > /etc/sudoers.d/opstk && chmod 440 /etc/sudoers.d/opstk</code>
+            </li>
+            <li><b>创建目录 + 修复 SELinux</b><br/>
+              <code>mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/iso /srv/opstk/mnt</code><br/>
+              <code>chown -R yang\codexsandboxoffline /srv/tftp /srv/opstk</code><br/>
+              <code>semanage fcontext -a -t tftpdir_t '/srv/tftp(/.*)?' && restorecon -R /srv/tftp</code>
+            </li>
+            <li><b>启动服务</b><br/>
+              <code>cd /opt/opstk/backend && PYTHONPATH=/opt/opstk/backend /opt/opstk/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000</code><br/>
+              或配置 systemd 服务实现开机自启。
+            </li>
+            <li><b>访问</b>: 浏览器打开 <code>http://服务器IP:8000</code>，默认账号 admin / admin@123</li>
+          </ol>
+
+          <el-divider />
+
+          <h4 style="margin:16px 0 8px">方式二：Docker 容器部署</h4>
+          <p style="font-weight:600;color:#409eff">一条命令构建镜像，方便迁移到任意主机</p>
+          <ol>
+            <li><b>构建镜像</b><br/>
+              <code>docker compose up -d --build</code><br/>
+              镜像包含: OpsToolkit + dnsmasq + iPXE 固件 + Python 环境，全部打包。
+            </li>
+            <li><b>关键配置说明</b><br/>
+              · <code>network_mode: host</code> — PXE 需要广播 DHCP 数据包，必须用宿主机网络<br/>
+              · <code>privileged: true</code> — 挂载 ISO 需要访问 loop 设备<br/>
+              · 数据卷: data(数据库) + tftp-root + pxe-web + iso-store 持久化保存
+            </li>
+            <li><b>迁移到其他主机</b><br/>
+              · 将项目目录复制到新服务器<br/>
+              · 执行 <code>docker compose up -d --build</code> 即可<br/>
+              · 数据卷中的配置/内核文件会自动持续
+            </li>
+            <li><b>访问</b>: <code>http://宿主机IP:8000</code>，同样点「部署」启动 PXE 全链路</li>
+          </ol>
+
+          <el-alert type="warning" :closable="false" title="注意事项" description="容器部署时，宿主机上不能有其他 DHCP 服务占用 67 端口（standalone 模式）。如果宿主机网络里已有 DHCP，遵选 proxy 模式。" style="margin:12px 0" />
+        </el-tab-pane>
+
         <el-tab-pane label="常见概念" name="concept">
           <h3>常见概念解释</h3>
           <el-collapse v-model="conceptActive">

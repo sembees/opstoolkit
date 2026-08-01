@@ -1,13 +1,25 @@
-version: "3.8"
 services:
   opstoolkit:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    ports:
-      - "8000:8000"
+    container_name: opstoolkit
+    # PXE 需要: host 网络 (DHCP 广播) + privileged (mount ISO loop)
+    network_mode: host
+    privileged: true
     volumes:
-      - ./data:/app/data
-    env_file:
-      - .env
+      # 持久化数据
+      - ./data:/app/backend/data
+      - ./dnsmasq-conf:/etc/dnsmasq.d
+      # PXE 文件 (内核 + 固件 + 应答文件)
+      - tftp-root:/srv/tftp
+      - pxe-web:/srv/opstk/pxe-web
+      - iso-store:/srv/opstk/iso
+      - mnt-tmp:/srv/opstk/mnt
     restart: unless-stopped
+
+volumes:
+  tftp-root:
+  pxe-web:
+  iso-store:
+  mnt-tmp:

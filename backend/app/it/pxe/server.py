@@ -19,8 +19,8 @@ DNSMASQ_CONF = "/etc/dnsmasq.d/opstk-pxe.conf"
 
 # 固件来源 (依赖 ipxe-bootimgs 包, 支持多备选路径)
 FIRMWARE = {
-    "ipxe.efi": ["/usr/share/ipxe/ipxe-x86_64.efi", "/usr/share/ipxe/ipxe.efi", "/usr/share/ipxe/ipxe-i386.efi"],
-    "undionly.kpxe": ["/usr/share/ipxe/undionly.kpxe"],
+    "ipxe.efi": ["/usr/share/ipxe/ipxe-x86_64.efi", "/usr/share/ipxe/ipxe.efi", "/usr/share/ipxe/ipxe-i386.efi", "/usr/lib/ipxe/ipxe.efi"],
+    "undionly.kpxe": ["/usr/share/ipxe/undionly.kpxe", "/usr/lib/ipxe/undionly.kpxe"],
 }
 
 # 需要落地到 HTTP 目录的应答文件
@@ -31,9 +31,24 @@ def is_linux() -> bool:
     return platform.system() == "Linux"
 
 
+def _has_systemd() -> bool:
+    """??????? systemd ??? (???? vs ??)?"""
+    return os.path.isfile("/run/systemd/system")
+
+
+def _is_root() -> bool:
+    """?????? root ??, ?? sudo?"""
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return False  # Windows ? geteuid
+
+
 def _run(cmd, sudo=False, timeout=15, stdin_data=None):
     """执行命令，返回 (rc, stdout, stderr)。sudo 用 -n 免密。"""
-    prefix = ["sudo", "-n"] if sudo else []
+    # ??? root ??? sudo ???
+    need_sudo = sudo and not _is_root()
+    prefix = ["sudo", "-n"] if need_sudo else []
     full = prefix + cmd if isinstance(cmd, list) else prefix + [cmd]
     data = stdin_data.encode() if isinstance(stdin_data, str) else stdin_data
     try:
