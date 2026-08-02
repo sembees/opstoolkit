@@ -298,14 +298,29 @@ def _mode_label(mode) -> str:
 
 
 def _detect_iface():
-    """检测系统主要网络接口名，容器友好。"""
-    import subprocess as _sp
+    """检测物理网络接口名，容器友好，不依赖 ip 命令。
+    优先 ens/eth/enp 开头的物理网卡，跳过 lo/docker/veth/br-。"""
+    import os
     try:
-        r = _sp.run(["ip", "-o", "-f", "inet", "addr", "show"], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 4 and parts[1] != "lo":
-                return parts[1]
+        preferred = []
+        fallback = []
+        for name in os.listdir("/sys/class/net"):
+            if name == "lo" or name.startswith(("docker", "veth", "br-", "virbr")):
+                continue
+            # 仅选择已 UP 且有 IP 的接口
+            try:
+                if not open(f"/sys/class/net/{name}/operstate").read().strip() == "up":
+                    continue
+            except Exception:
+                pass
+            if name.startswith(("ens", "eth", "enp", "eno")):
+                preferred.append(name)
+            else:
+                fallback.append(name)
+        if preferred:
+            return preferred[0]
+        if fallback:
+            return fallback[0]
     except Exception:
         pass
     return "eth0"

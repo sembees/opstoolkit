@@ -79,13 +79,29 @@ def detect_network() -> dict:
                 iface = parts[i + 1]
         break
     if not iface:
-        # 没有默认路由时，取第一个有 IP 的非 loopback 接口作为回退
-        rc, out, _ = _run(["ip", "-o", "-f", "inet", "addr", "show"])
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) >= 4:
-                iface2 = parts[1]
-                if iface2 != "lo":
+        # 没有默认路由时，取第一个活的物理接口作为回退（不依赖 ip 命令）
+        try:
+            for iface2 in os.listdir("/sys/class/net"):
+                if iface2 == "lo" or iface2.startswith(("docker", "veth", "br-", "virbr")):
+                    continue
+                try:
+                    state = open(f"/sys/class/net/{iface2}/operstate").read().strip()
+                except Exception:
+                    state = ""
+                if state == "up":
+                    iface = iface2
+                    break
+        except Exception:
+            pass
+        if not iface:
+            # 再试 ip 命令（宿主机环境）
+            rc, out, _ = _run(["ip", "-o", "-f", "inet", "addr", "show"])
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    iface2 = parts[1]
+                    if iface2 == "lo" or iface2.startswith(("docker", "veth", "br-", "virbr")):
+                        continue
                     iface = iface2
                     for tok in parts[2:]:
                         if "/" in tok and tok[0].isdigit():
