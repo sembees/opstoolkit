@@ -125,6 +125,7 @@ const items = ref([])
 const previewScript = ref("")
 const previewFilename = ref("")
 const generating = ref(false)
+const downloading = ref(false)
 
 let previewTimer = null
 function preview() {
@@ -189,7 +190,7 @@ function buildPayload() {
 
 async function doGenerate() {
   try {
-    const resp = await http.post("/it/netconfig/generate", buildPayload(), { _silent: true })
+    const resp = await http.post("/it/netconfig/generate", buildPayload())
     previewScript.value = resp.script
     previewFilename.value = resp.filename
   } catch (e) { /* keep previous */ }
@@ -202,9 +203,9 @@ function parseIpCidr(val) {
 }
 
 async function doDownload() {
-  generating.value = true
+  downloading.value = true
   try { await downloadZip("/it/netconfig/download", buildPayload()) }
-  finally { generating.value = false }
+  finally { downloading.value = false }
 }
 
 onMounted(async () => {

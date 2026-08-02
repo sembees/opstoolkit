@@ -34,10 +34,11 @@ export default http
 // 下载后端打包的 zip（POST，返回 blob 流）
 export async function downloadZip(url, body) {
   const token = localStorage.getItem('opstk_token')
-  const res = await fetch('/api' + url, {
+  const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), 30000); const res = await fetch('/api' + url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (token || '') },
     body: JSON.stringify(body || {}),
+    signal: ctrl.signal,
   })
   if (!res.ok) {
     ElMessage.error('下载失败: ' + res.status)

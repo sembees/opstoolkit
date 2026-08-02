@@ -41,4 +41,7 @@ async def generate(body: NetConfigRequest, _user=Depends(get_current_user)):
 async def download(body: NetConfigRequest, _user=Depends(get_current_user)):
     """直接下载生成的脚本文件。"""
     script, _ = generate_netconfig(body)
-    return PlainTextResponse(script, media_type="text/x-shellscript")
+    from fastapi.responses import Response
+    filename = body.hostname + "-" if body.hostname else ""
+    filename += "99-opstk.yaml" if body.format == "netplan" else ("ifcfg-files.txt" if body.format == "ifcfg" else "apply-network.sh")
+    return Response(script, media_type="text/plain", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
