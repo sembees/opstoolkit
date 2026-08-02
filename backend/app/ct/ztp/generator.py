@@ -323,13 +323,13 @@ def dnsmasq(p, devices) -> str:
         "# dnsmasq ZTP 投递配置 (OpsToolkit 生成)",
         f"# 厂商: {vendor}  部署模式: {_mode_label(p.deploy_mode)}",
         "port=0",
-        f"interface={_detect_iface() if p.dhcp_iface == "eth0" else p.dhcp_iface}",
+        f"interface={_detect_iface() if p.dhcp_iface == 'eth0' else p.dhcp_iface}",
         "bind-interfaces",
         "",
     ]
     if p.deploy_mode == "relay":
         L.append("# 中继模式: 不开 DHCP, 仅 TFTP; 交换机 ip-helper 指向本机")
-        L.append(f"no-dhcp-interface={_detect_iface() if p.dhcp_iface == "eth0" else p.dhcp_iface}")
+        L.append(f"no-dhcp-interface={_detect_iface() if p.dhcp_iface == 'eth0' else p.dhcp_iface}")
     elif p.deploy_mode == "proxy":
         L.append("# ProxyDHCP: 不分配 IP, 仅下发 PXE/ZTP 引导, 与现有 DHCP 并存")
         L.append(f"dhcp-range={srv},proxy")
