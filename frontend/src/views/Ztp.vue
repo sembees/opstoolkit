@@ -1,5 +1,31 @@
 <template>
   <div>
+    <!-- ZTP 服务器状态 -->
+    <el-card shadow="never" style="margin-bottom: 16px">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
+        <span style="font-weight: 600">
+          <el-icon><Cpu /></el-icon> ZTP 服务器（本机）
+          <el-tag v-if="serverStatus.dnsmasq" :type="serverStatus.dnsmasq.active ? 'success' : 'danger'" size="small" style="margin-left: 8px">
+            dnsmasq {{ serverStatus.dnsmasq.active ? '运行中' : '未运行' }}
+          </el-tag>
+        </span>
+        <div>
+          <el-button size="small" @click="controlService('start')" :disabled="serverStatus.supported === false">启动</el-button>
+          <el-button size="small" @click="controlService('stop')" :disabled="serverStatus.supported === false">停止</el-button>
+          <el-button size="small" @click="controlService('restart')" :disabled="serverStatus.supported === false">重启 dnsmasq</el-button>
+          <el-button size="small" @click="loadServerStatus"><el-icon><Refresh /></el-icon> 刷新</el-button>
+        </div>
+      </div>
+      <el-descriptions v-if="serverStatus.supported" :column="3" size="small" border>
+        <el-descriptions-item label="小工具目录">{{ serverStatus.sudo_ok ? '是' : '否' }}</el-descriptions-item>
+        <el-descriptions-item label="TFTP">{{ serverStatus.dirs && serverStatus.dirs.tftp ? '已创建' : '未创建' }}</el-descriptions-item>
+        <el-descriptions-item label="HTTP">{{ serverStatus.dirs && serverStatus.dirs.web ? '已创建' : '未创建' }}</el-descriptions-item>
+      </el-descriptions>
+      <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" style="margin-top: 8px">
+        本机部署需 Linux 环境，当前：{{ serverStatus.platform }}
+      </el-alert>
+    </el-card>
+
     <!-- 模板列表 -->
     <el-card shadow="never" style="margin-bottom: 16px">
       <div style="display: flex; justify-content: space-between; margin-bottom: 12px">
@@ -209,6 +235,7 @@ import { ref, reactive, onMounted } from "vue"
 import http, { downloadZip } from "../api"
 import { ElMessage } from "element-plus"
 
+const serverStatus = ref({})
 const templates = ref([])
 const devices = ref([])
 const templateDialog = ref(false)
@@ -407,5 +434,20 @@ async function doDeploy() {
 async function loadTemplates() { templates.value = await http.get("/ct/ztp/templates") }
 async function loadDevices() { devices.value = await http.get("/ct/ztp/devices") }
 
-onMounted(() => { loadTemplates(); loadDevices() })
+async function loadServerStatus() {
+  try { serverStatus.value = await http.get("/ct/ztp/server/status") } catch (e) {}
+}
+
+async function controlService(action) {
+  try {
+    const res = await http.post("/ct/ztp/server/service", { action })
+    if (res.log) res.log.forEach(l => ElMessage.info(l))
+    ElMessage.success(action + " 已执行")
+    loadServerStatus()
+  } catch (e) {
+    ElMessage.error("服务控制失败")
+  }
+}
+
+onMounted(() => { loadTemplates(); loadDevices(); loadServerStatus() })
 </script>
