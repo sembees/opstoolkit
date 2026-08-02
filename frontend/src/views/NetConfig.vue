@@ -170,19 +170,26 @@ function dupItem(idx) { const copy = JSON.parse(JSON.stringify(items.value[idx])
 function delItem(idx) { items.value.splice(idx, 1); preview() }
 function clearAll() { items.value = []; previewScript.value = "" }
 
+function _safeInt(v, d) { var n = parseInt(v); return isNaN(n) ? d : n }
+function _safeStr(v) { return (v && v.trim()) ? v.trim() : null }
+
 function buildPayload() {
   const payload = { os: config.os, format: config.format, hostname: config.hostname, interfaces: [], bonds: [], vlans: [], bridges: [] }
   if (config.format === "netplan") payload.netplan_renderer = config.netplan_renderer
   for (const row of items.value) {
     const ipCidr = parseIpCidr(row.ip)
+    const ip = ipCidr?.ip || row.ip || null
+    const cidr = ipCidr?.cidr
+    const gw = _safeStr(row.gateway)
+    const dns = row.dns || []
     if (row._type === "iface") {
-      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr, gateway: row.gateway, dns: row.dns || [] })
+      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ip, cidr: cidr, gateway: gw, dns: dns })
     } else if (row._type === "bond") {
-      payload.bonds.push({ name: row.name, mode: (row.bondMode != null ? row.bondMode : 1), interfaces: row.slaves || [], ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "", gateway: row.gateway, dns: row.dns || [], miimon: (row.miimon != null ? row.miimon : 100) })
+      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, dns: dns, miimon: _safeInt(row.miimon, 100) })
     } else if (row._type === "vlan") {
-      payload.vlans.push({ parent: row.parent, vlan_id: parseInt(row.vlanId) || parseInt(row.name.split(".").pop()) || 100, mode: row.mode, ip: ipCidr?.ip || row.ip, cidr: ipCidr?.cidr || "", gateway: row.gateway })
+      payload.vlans.push({ parent: row.parent, vlan_id: _safeInt(row.vlanId, 100), ip: ip, cidr: cidr, gateway: gw })
     } else if (row._type === "bridge") {
-      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], ip: ipCidr?.ip || "", cidr: ipCidr?.cidr || "", gateway: row.gateway })
+      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw })
     }
   }
   return payload
