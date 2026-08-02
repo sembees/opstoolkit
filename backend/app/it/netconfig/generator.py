@@ -83,6 +83,10 @@ def _bond(cmds, obj):
     opts = f"mode={mode_str},miimon={obj.get('miimon', 100)}"
     if obj.get("primary"):
         opts += f",primary={obj['primary']}"
+    if obj.get("lacp_rate"):
+        opts += f",lacp_rate={obj['lacp_rate']}"
+    if obj.get("xmit_hash_policy"):
+        opts += f",xmit_hash_policy={obj['xmit_hash_policy']}"
     cmds.append(f"nmcli connection add type bond ifname {name} con-name {name} bond.options {opts}")
     _mod(cmds, name, obj)
     for i in obj.get("interfaces", []):
@@ -214,6 +218,10 @@ def _build_netplan(req):
             out.append(f"{ind}    miimon: {o.miimon}")
             if o.primary:
                 out.append(f"{ind}    primary: {o.primary}")
+            if o.lacp_rate:
+                out.append(f"{ind}    lacp-rate: {o.lacp_rate}")
+            if o.xmit_hash_policy:
+                out.append(f"{ind}    transmit-hash-policy: {o.xmit_hash_policy}")
             _netplan_addr_block(out, ind + "  ", o.model_dump())
     # VLAN 子接口：从父接口创建 tagged sub-interface
     if req.vlans:
@@ -295,6 +303,10 @@ def _build_ifcfg(req):
         opts = "mode=" + mode_str + " miimon=" + str(o.miimon or 100)
         if o.primary:
             opts += " primary=" + o.primary
+        if o.lacp_rate:
+            opts += " lacp_rate=" + o.lacp_rate
+        if o.xmit_hash_policy:
+            opts += " xmit_hash_policy=" + o.xmit_hash_policy
         lines = ["DEVICE=" + name, "TYPE=Bond", "BONDING_MASTER=yes", "BONDING_OPTS=\"" + opts + "\""]
         lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "dns": o.dns, "netmask": o.netmask})
         files["ifcfg-" + name] = "\n".join(lines) + "\n"

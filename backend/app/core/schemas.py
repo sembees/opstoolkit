@@ -255,6 +255,8 @@ class NetBondIn(BaseModel):
     dns: list[str] = []
     miimon: int = 100
     primary: Optional[str] = None   # active-backup 主接口
+    lacp_rate: Optional[str] = None  # 802.3ad: slow / fast
+    xmit_hash_policy: Optional[str] = None  # balance-xor/802.3ad: layer2 / layer2+3 / layer3+4
 
 
 class NetVlanIn(BaseModel):

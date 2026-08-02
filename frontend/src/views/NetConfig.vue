@@ -79,19 +79,35 @@
               <span v-else style="color:#999;font-size:11px">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="Bond/VLAN参数" width="170">
+          <el-table-column label="Bond/VLAN参数" width="190">
             <template #default="{ row }">
               <template v-if="row._type==='bond'">
-                <div style="display:flex;gap:4px;align-items:center;margin-bottom:2px">
-                  <el-select v-model="row.bondMode" size="small" style="width:75px" @change="preview">
+                <div style="display:flex;flex-wrap:wrap;gap:2px;align-items:center;line-height:1.6">
+                  <el-select v-model="row.bondMode" size="small" style="width:70px" @change="onBondModeChange(row)">
                     <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.name" :value="m.id" />
                   </el-select>
                   <span style="font-size:10px;color:#999">miimon</span>
-                  <el-input v-model="row.miimon" size="small" style="width:48px" placeholder="100" @input="preview" />
+                  <el-input v-model="row.miimon" size="small" style="width:42px" placeholder="100" @input="preview" />
+                  <!-- mode 4 (802.3ad): lacp_rate -->
+                  <template v-if="row.bondMode==4">
+                    <span style="font-size:10px;color:#999">lacp</span>
+                    <el-select v-model="row.lacpRate" size="small" style="width:55px" @change="preview">
+                      <el-option label="slow" value="slow" /><el-option label="fast" value="fast" />
+                    </el-select>
+                  </template>
+                  <!-- mode 2/4: xmit_hash_policy -->
+                  <template v-if="row.bondMode==2||row.bondMode==4">
+                    <span style="font-size:10px;color:#999">hash</span>
+                    <el-select v-model="row.xmitHash" size="small" style="width:70px" @change="preview">
+                      <el-option label="layer2" value="layer2" />
+                      <el-option label="layer2+3" value="layer2+3" />
+                      <el-option label="layer3+4" value="layer3+4" />
+                    </el-select>
+                  </template>
                 </div>
-                <div v-if="row.bondMode==1||row.bondMode==5||row.bondMode==6" style="display:flex;gap:2px;align-items:center">
+                <div v-if="row.bondMode==1||row.bondMode==5||row.bondMode==6" style="display:flex;gap:2px;align-items:center;margin-top:1px">
                   <span style="font-size:10px;color:#999">primary</span>
-                  <el-input v-model="row.primary" size="small" style="width:100px" placeholder="主口(eth0)" @input="preview" />
+                  <el-input v-model="row.primary" size="small" style="width:110px" placeholder="主口" @input="preview" />
                 </div>
               </template>
               <template v-else-if="row._type==='vlan'">
@@ -158,13 +174,19 @@ function onVlanIdChange(row) {
   preview()
 }
 
+function onBondModeChange(row) {
+  if (row.bondMode == 4) { row.lacpRate = row.lacpRate || "slow" }
+  if (row.bondMode == 2 || row.bondMode == 4) { row.xmitHash = row.xmitHash || "layer2+3" }
+  preview()
+}
+
 function onVlanParentChange(row) {
   row.name = (row.parent || "eth0") + "." + (row.vlanId || 100)
   preview()
 }
 
 function addItem(typ) {
-  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100, primary: "" }
+  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100, primary: "", lacpRate: "slow", xmitHash: "layer2+3" }
   if (typ === "iface") { base.name = "eth" + items.value.filter(i => i._type === "iface").length; base.mode = "dhcp" }
   else if (typ === "bond") { base.name = "bond" + items.value.filter(i => i._type === "bond").length; base.slavesStr = "eth0,eth1"; onSlavesChange(base) }
   else if (typ === "vlan") { base.vlanId = 100; base.parent = items.value.find(i => i._type === "iface")?.name || availableParents.value[0] || "eth0"; base.name = base.parent + "." + base.vlanId }
@@ -192,7 +214,7 @@ function buildPayload() {
     if (row._type === "iface") {
       payload.interfaces.push({ name: row.name, mode: row.mode, ip: ip, cidr: cidr, gateway: gw, dns: dns })
     } else if (row._type === "bond") {
-      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, dns: dns, miimon: _safeInt(row.miimon, 100), primary: row.primary || null })
+      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, dns: dns, miimon: _safeInt(row.miimon, 100), primary: row.primary || null, lacp_rate: row.lacpRate || null, xmit_hash_policy: row.xmitHash || null })
     } else if (row._type === "vlan") {
       payload.vlans.push({ parent: row.parent, vlan_id: _safeInt(row.vlanId, 100), ip: ip, cidr: cidr, gateway: gw })
     } else if (row._type === "bridge") {
