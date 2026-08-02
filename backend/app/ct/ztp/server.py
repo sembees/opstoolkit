@@ -70,8 +70,13 @@ def server_status() -> dict:
     dirs = {}
     for name, d in [("tftp", TFTP_ROOT), ("tftp_ztp", os.path.join(TFTP_ROOT, "ztp")), ("web", WEB_ROOT)]:
         dirs[name] = os.path.isdir(d)
-    rc, out, _ = _run(["systemctl", "is-active", "dnsmasq"])
-    active = rc == 0
+    has_systemd = os.path.isfile("/run/systemd/system")
+    if has_systemd:
+        rc, out, _ = _run(["systemctl", "is-active", "dnsmasq"])
+        active = rc == 0
+    else:
+        rc, out, _ = _run(["pgrep", "-x", "dnsmasq"])
+        active = rc == 0
     return {
         "supported": True,
         "dirs": dirs,
@@ -87,6 +92,28 @@ def service_control(action: str) -> dict:
         return {"ok": False, "log": ["不支持的操作: " + action]}
     if not is_linux():
         return {"ok": False, "log": ["仅支持 Linux 环境"]}
+    has_systemd = os.path.isfile("/run/systemd/system")
+    if not has_systemd:
+        pid_file = "/var/run/dnsmasq-ztp.pid"
+        if action in ("stop", "restart"):
+            _run(["pkill", "dnsmasq"])
+            if os.path.exists(pid_file):
+                os.remove(pid_file)
+        if action in ("start", "restart"):
+            if os.path.exists(DNSMASQ_CONF):
+                import subprocess as _sp
+                try:
+                    _sp.Popen(
+                        ["dnsmasq", "--conf-file=" + DNSMASQ_CONF, "--pid-file=" + pid_file],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                        start_new_session=True, close_fds=True
+                    )
+                    return {"ok": True, "action": action, "log": ["dnsmasq 已启动"], "active": True}
+                except Exception as e:
+                    return {"ok": False, "log": ["启动失败: " + str(e)[:80]]}
+            else:
+                return {"ok": False, "log": ["配置文件不存在: " + DNSMASQ_CONF]}
+        return {"ok": True, "action": action, "log": [action + " OK"], "active": False}
     rc, out, err = _run(["systemctl", action, "dnsmasq"], sudo=(action != "status"))
     log = [out.strip()] if out.strip() else []
     if err.strip():
