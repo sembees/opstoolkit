@@ -231,7 +231,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from "vue"
+import { ref, reactive, onMounted, onBeforeUnmount } from "vue"
 import http, { downloadZip } from "../api"
 import { ElMessage } from "element-plus"
 
@@ -436,6 +436,7 @@ async function loadDevices() { devices.value = await http.get("/ct/ztp/devices")
 
 async function loadServerStatus() {
   try { serverStatus.value = await http.get("/ct/ztp/server/status") } catch (e) {}
+  serverPollTimer = setTimeout(loadServerStatus, 5000)
 }
 
 async function controlService(action) {
@@ -449,5 +450,7 @@ async function controlService(action) {
   }
 }
 
-onMounted(() => { loadTemplates(); loadDevices(); loadServerStatus() })
+let serverPollTimer = null
+onBeforeUnmount(() => { clearTimeout(serverPollTimer) })
+onMounted(() => { loadTemplates(); loadDevices(); loadServerStatus(); serverPollTimer = setTimeout(loadServerStatus, 5000) })
 </script>

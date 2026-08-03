@@ -1,9 +1,9 @@
-"""ZTP 服务本场管控 (Linux)。
+"""ZTP server management (Linux).
 
-让 OpsToolkit 本机直接作为 ZTP 开局服务器:
-  - 配置文件自动落地 TFTP/HTTP 目录
-  - dnsmasq 服务启停重载
-非 Linux 或无 sudo 权限时优雅降级，返回明确提示。
+OpsToolkit host acts as a ZTP startup server:
+  - Config files auto-deployed to TFTP/HTTP directories
+  - dnsmasq lifecycle managed by shared DHCP module (app.core.dhcp)
+Non-Linux or no-sudo gracefully degrades.
 """
 from __future__ import annotations
 
@@ -11,138 +11,71 @@ import os
 import platform
 import subprocess
 
+from app.core import dhcp as _dhcp
+
 TFTP_ROOT = "/srv/tftp"
 WEB_ROOT = "/srv/opstk/ztp-web"
-DNSMASQ_CONF = "/etc/dnsmasq.d/opstk-ztp.conf"
 
+
+# ── Delegated to shared DHCP module ──
 
 def is_linux() -> bool:
-    return platform.system() == "Linux"
-
-
-def _is_root() -> bool:
-    try:
-        return os.geteuid() == 0
-    except AttributeError:
-        return False
-
-
-def _run(cmd, sudo=False, timeout=15):
-    """执行命令，返回 (rc, stdout, stderr)。sudo 用 -n 免密。"""
-    need_sudo = sudo and not _is_root()
-    full = (["sudo", "-n"] if need_sudo else []) + list(cmd)
-    try:
-        p = subprocess.run(full, capture_output=True, timeout=timeout)
-        return p.returncode, p.stdout.decode(errors="replace"), p.stderr.decode(errors="replace")
-    except FileNotFoundError as e:
-        return 127, "", str(e)
-    except subprocess.TimeoutExpired:
-        return 124, "", "timeout"
+    return _dhcp.is_linux()
 
 
 def sudo_ok() -> bool:
-    if not is_linux():
-        return False
-    rc, _, _ = _run(["true"], sudo=True)
-    return rc == 0
-
-
-def prepare_dirs() -> list:
-    """创建 TFTP / HTTP 目录并调整属主。"""
-    log = []
-    for d in (TFTP_ROOT, os.path.join(TFTP_ROOT, "ztp"), WEB_ROOT):
-        if not os.path.isdir(d):
-            os.makedirs(d, exist_ok=True)
-            log.append("创建目录 " + d)
-    if is_linux():
-        rc, _, err = _run(["chown", "-R", str(os.getuid()) + ":" + str(os.getgid()), TFTP_ROOT, WEB_ROOT], sudo=True)
-        if rc == 0:
-            log.append("已调整目录属主")
-        else:
-            log.append("调整属主跳过(可能需 root): " + err.strip()[:60])
-    return log
+    return _dhcp.sudo_ok()
 
 
 def server_status() -> dict:
-    """查看本机 ZTP 服务状态 (TFTP/HTTP 目录 + dnsmasq)。"""
-    if not is_linux():
-        return {"supported": False, "dirs": {}, "dnsmasq": {"installed": False, "active": False, "message": "仅支持 Linux"}}
+    """Combined status: shared DHCP + ZTP-specific directories."""
+    dhcp_st = _dhcp.dhcp_status()
+    if not dhcp_st["supported"]:
+        return {
+            "supported": False,
+            "dirs": {},
+            "dnsmasq": {"installed": False, "active": False, "message": "Linux only"},
+        }
     dirs = {}
-    for name, d in [("tftp", TFTP_ROOT), ("tftp_ztp", os.path.join(TFTP_ROOT, "ztp")), ("web", WEB_ROOT)]:
+    for name, d in [
+        ("tftp", TFTP_ROOT),
+        ("tftp_ztp", os.path.join(TFTP_ROOT, "ztp")),
+        ("web", WEB_ROOT),
+    ]:
         dirs[name] = os.path.isdir(d)
-    out = ""
-    has_systemd = os.path.isfile("/run/systemd/system")
-    if has_systemd:
-        rc, out, _ = _run(["systemctl", "is-active", "dnsmasq"])
-        active = rc == 0
-    else:
-        # 容器环境没有 pgrep/ps，直接读 /proc 检测活跳 dnsmasq 进程（排除僵尸）
-        active = False
-        try:
-            for pid in os.listdir("/proc"):
-                if not pid.isdigit():
-                    continue
-                try:
-                    if open(f"/proc/{pid}/comm").read().strip() != "dnsmasq":
-                        continue
-                    st = open(f"/proc/{pid}/status").read()
-                    for ln in st.splitlines():
-                        if ln.startswith("State:"):
-                            if "zombie" not in ln.lower():
-                                active = True
-                            break
-                    if active:
-                        break
-                except Exception:
-                    pass
-        except Exception:
-            pass
     return {
         "supported": True,
         "dirs": dirs,
-        "dnsmasq": {"installed": True, "active": active, "message": out.strip() or ("active" if active else "inactive")},
-        "sudo_ok": sudo_ok(),
+        "dnsmasq": {
+            "installed": True,
+            "active": dhcp_st["running"],
+            "message": "running" if dhcp_st["running"] else "stopped",
+        },
+        "sudo_ok": dhcp_st["sudo_ok"],
     }
 
 
 def service_control(action: str) -> dict:
-    """控制 dnsmasq: start/stop/restart/reload/status。"""
-    action = (action or "status").strip().lower()
-    if action not in ("start", "stop", "restart", "reload", "status"):
-        return {"ok": False, "log": ["不支持的操作: " + action]}
-    if not is_linux():
-        return {"ok": False, "log": ["仅支持 Linux 环境"]}
-    has_systemd = os.path.isfile("/run/systemd/system")
-    if not has_systemd:
-        pid_file = "/var/run/dnsmasq-ztp.pid"
-        if action in ("stop", "restart"):
-            _run(["pkill", "dnsmasq"])
-            if os.path.exists(pid_file):
-                os.remove(pid_file)
-        if action in ("start", "restart"):
-            if os.path.exists(DNSMASQ_CONF):
-                import subprocess as _sp
-                try:
-                    _sp.Popen(
-                        ["dnsmasq", "--conf-file=" + DNSMASQ_CONF, "--pid-file=" + pid_file],
-                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                        start_new_session=True, close_fds=True
-                    )
-                    return {"ok": True, "action": action, "log": ["dnsmasq 已启动"], "active": True}
-                except Exception as e:
-                    return {"ok": False, "log": ["启动失败: " + str(e)[:80]]}
-            else:
-                return {"ok": False, "log": ["配置文件不存在: " + DNSMASQ_CONF]}
-        return {"ok": True, "action": action, "log": [action + " OK"], "active": False}
-    rc, out, err = _run(["systemctl", action, "dnsmasq"], sudo=(action != "status"))
-    log = [out.strip()] if out.strip() else []
-    if err.strip():
-        log.append(err.strip()[:120])
-    return {"ok": rc == 0, "action": action, "log": log, "active": server_status().get("dnsmasq", {}).get("active", False)}
+    """Delegate to shared DHCP module."""
+    result = _dhcp.dhcp_control(action)
+    return {
+        "ok": result["ok"],
+        "action": result["action"],
+        "log": [result["msg"]],
+        "active": result["running"],
+    }
+
+
+# ── Directory prep ──
+
+def prepare_dirs() -> list:
+    """Create TFTP/HTTP dirs and adjust ownership."""
+    log = _dhcp.ensure_dirs([TFTP_ROOT, os.path.join(TFTP_ROOT, "ztp"), WEB_ROOT])
+    return log
 
 
 def _safe_dst(root: str, name: str):
-    """核算安全的落地路径，防止路径穿越。"""
+    """Compute safe landing path, prevent traversal."""
     root_abs = os.path.abspath(root)
     rel = os.path.normpath(name.lstrip("/"))
     if rel == "." or rel.startswith("..") or os.path.isabs(rel):
@@ -153,30 +86,34 @@ def _safe_dst(root: str, name: str):
     return dst
 
 
+# ── Deploy ──
+
 def deploy_files(files: dict, tid: str = "") -> dict:
-    """一键部署: 写 dnsmasq 配置 + 应答文件落地 TFTP/HTTP + 重启服务。"""
-    if not is_linux():
-        return {"ok": False, "log": ["仅支持 Linux 环境"]}
+    """One-click deploy: write dnsmasq config + response files to TFTP/HTTP
+       + restart dnsmasq."""
+    if not _dhcp.is_linux():
+        return {"ok": False, "log": ["Linux only"]}
     log = prepare_dirs()
     files = files or {}
 
-    if files.get("dnsmasq.conf"):
-        try:
-            with open(DNSMASQ_CONF, "w", encoding="utf-8") as fh:
-                fh.write(files["dnsmasq.conf"])
-            log.append("落地 " + DNSMASQ_CONF)
-        except Exception as e:  # noqa: BLE001
-            log.append("写 dnsmasq 配置失败: " + str(e)[:120])
+    # Write dnsmasq config via shared module
+    dnsmasq_content = files.get("dnsmasq.conf", "")
+    if dnsmasq_content:
+        ok = _dhcp.write_conf("opstk-ztp.conf", dnsmasq_content)
+        if ok:
+            log.append("Written: /etc/dnsmasq.d/opstk-ztp.conf")
+        else:
+            log.append("FAILED: write dnsmasq config")
 
+    # Write response files to both TFTP and HTTP
     written = 0
     for name, content in files.items():
         if name == "dnsmasq.conf":
             continue
-        # 同时落地到 TFTP 和 HTTP 目录，保证多种引导方式均可用
         for root in (TFTP_ROOT, WEB_ROOT):
             dst = _safe_dst(root, name)
             if dst is None:
-                log.append("跳过非法路径 " + name)
+                log.append("Skip illegal path: " + name)
                 continue
             parent = os.path.dirname(dst)
             if parent:
@@ -184,8 +121,9 @@ def deploy_files(files: dict, tid: str = "") -> dict:
             with open(dst, "w", encoding="utf-8") as fh:
                 fh.write(content)
             written += 1
-    log.append("落地文件 " + str(written) + " 个 (TFTP + HTTP)")
+    log.append("Deployed " + str(written) + " files (TFTP + HTTP)")
 
-    svc = service_control("restart")
-    log.extend(svc.get("log", []))
-    return {"ok": bool(svc.get("ok")), "log": log, "dnsmasq": svc}
+    # Restart via shared module
+    svc = _dhcp.dhcp_control("restart")
+    log.append("dnsmasq: " + svc.get("msg", "unknown"))
+    return {"ok": svc.get("ok", False), "log": log, "dnsmasq": svc}

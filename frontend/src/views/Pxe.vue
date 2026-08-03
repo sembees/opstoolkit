@@ -247,6 +247,7 @@ const extractLog = ref([])
 
 async function loadServerStatus() {
   try { serverStatus.value = await http.get("/it/pxe/server/status") } catch(e) {}
+  serverPollTimer = setTimeout(loadServerStatus, 5000)
 }
 async function controlService(action) {
   try { const r = await http.post("/it/pxe/server/service", { action }); ElMessage.success(r.msg || action) } catch(e) {}
@@ -453,6 +454,7 @@ function startInstallPolling() {
   }, 10000)
 }
 
-onBeforeUnmount(() => clearTimeout(installTimer))
-onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); startInstallPolling() })
+let serverPollTimer = null
+onBeforeUnmount(() => { clearTimeout(installTimer); clearTimeout(serverPollTimer) })
+onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); startInstallPolling(); serverPollTimer = setTimeout(loadServerStatus, 5000) })
 </script>
