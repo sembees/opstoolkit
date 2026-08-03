@@ -70,13 +70,33 @@ def server_status() -> dict:
     dirs = {}
     for name, d in [("tftp", TFTP_ROOT), ("tftp_ztp", os.path.join(TFTP_ROOT, "ztp")), ("web", WEB_ROOT)]:
         dirs[name] = os.path.isdir(d)
+    out = ""
     has_systemd = os.path.isfile("/run/systemd/system")
     if has_systemd:
         rc, out, _ = _run(["systemctl", "is-active", "dnsmasq"])
         active = rc == 0
     else:
-        rc, out, _ = _run(["pgrep", "-x", "dnsmasq"])
-        active = rc == 0
+        # 容器环境没有 pgrep/ps，直接读 /proc 检测活跳 dnsmasq 进程（排除僵尸）
+        active = False
+        try:
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    if open(f"/proc/{pid}/comm").read().strip() != "dnsmasq":
+                        continue
+                    st = open(f"/proc/{pid}/status").read()
+                    for ln in st.splitlines():
+                        if ln.startswith("State:"):
+                            if "zombie" not in ln.lower():
+                                active = True
+                            break
+                    if active:
+                        break
+                except Exception:
+                    pass
+        except Exception:
+            pass
     return {
         "supported": True,
         "dirs": dirs,

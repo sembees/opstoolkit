@@ -253,15 +253,27 @@ def service_control(action) -> dict:
             return {"ok": True, "active": active, "enabled": out2.strip() == "enabled",
                     "msg": "active" if active else "inactive"}
         else:
-            # 直接检查 dnsmasq 进程
-            # 排除僵尸进程：用 ps 检查活着的 dnsmasq
-            rc, out, _ = _run(["pgrep", "-x", "dnsmasq"])
-            active = rc == 0
-            if active:
-                # 确认不是僵尸进程
-                rc2, out2, _ = _run(["ps", "-p", out.strip().split()[0] if out.strip() else "", "-o", "stat="])
-                if rc2 == 0 and "Z" in (out2 or ""):
-                    active = False
+            # 直接检查 dnsmasq 进程（容器无 pgrep/ps，用 /proc，排除僵尸）
+            active = False
+            try:
+                for pid in os.listdir("/proc"):
+                    if not pid.isdigit():
+                        continue
+                    try:
+                        if open(f"/proc/{pid}/comm").read().strip() != "dnsmasq":
+                            continue
+                        st = open(f"/proc/{pid}/status").read()
+                        for ln in st.splitlines():
+                            if ln.startswith("State:"):
+                                if "zombie" not in ln.lower():
+                                    active = True
+                                break
+                        if active:
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             return {"ok": True, "active": active, "enabled": False,
                     "msg": "active" if active else "inactive"}
 
