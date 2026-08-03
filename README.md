@@ -48,7 +48,7 @@ OpsToolkit 是一个 Web 版的运维工具箱，覆盖 CT(网络设备/安全�
 | 名称 | 位置 |
 |------|------|
 | IP | 10.128.118.113 |
-| 账号 | yang / yang (wheel 组, sudo 免密) |
+| 账号 | yang / <your-password> (wheel 组) |
 | 项目目录 | /opt/opstk/ |
 | 容器名 | opstoolkit |
 | 镜像 | opstk-opstoolkit:latest (~360MB) |
@@ -56,7 +56,7 @@ OpsToolkit 是一个 Web 版的运维工具箱，覆盖 CT(网络设备/安全�
 | PXE HTTP | /srv/opstk/pxe-web/ |
 | ISO 存储 | /srv/opstk/iso/ |
 | 访问地址 | http://10.128.118.113:8000 |
-| 默认账号 | admin / admin@123 |
+| 默认账号 | admin / <见 .env 或管理员分发> |
 远程服务器是完整的 PXE 服务器，裸机接上网线即可自动装机。
 
 ## 快速开始
@@ -69,7 +69,7 @@ uvicorn app.main:app --reload --port 8000
 ```
 ### 远程服务器管理
 ```bash
-ssh yang@10.128.118.113  # 密码 yang
+ssh yang@10.128.118.113  # 输入密码
 cd /opt/opstk
 docker compose ps
 docker compose restart
@@ -120,7 +120,7 @@ docker load < /tmp/opstk.tar.gz
 Q: 打不开网页? A: SSH 进服务器运行 docker compose restart
 Q: 巡检连接超时? A: 确认设备IP可达、SSH端口22未阻止
 Q: PXE 装机不引导? A: 检查dnsmasq是否运行、裸机是否同网段、有无其他DHCP冲突
-Q: 忘记密码? A: 默认 admin/admin@123，删除 ops.db 重启会重置
+Q: 忘记密码? A: 默认见管理员分发，删除 ops.db 重启会重置
 
 ## 测试
 | 类型 | 命令 | 数量 |
