@@ -78,6 +78,9 @@ class DriverStructureTest(unittest.TestCase):
 
     def test_vendor_from_device_type(self):
         self.assertEqual(vendor_from_device_type("hp_comware"), "h3c")
+        self.assertEqual(vendor_from_device_type("h3c"), "h3c")
+        self.assertEqual(vendor_from_device_type("comware"), "h3c")
+        self.assertEqual(vendor_from_device_type("hp"), "h3c")
         self.assertEqual(vendor_from_device_type("huawei"), "huawei")
         self.assertEqual(vendor_from_device_type("huawei_vrpv8"), "huawei")
         self.assertEqual(vendor_from_device_type("cisco_ios"), "cisco")

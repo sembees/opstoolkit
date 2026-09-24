@@ -1,9 +1,9 @@
 """FastAPI 应用入口。"""
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -63,6 +63,34 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+# 装机镜像（ISO）单独挂一个静态路径。
+# 现有的 ISO 上传/列表/删除都作用于 /srv/opstk/iso，所以挂这一个目录就实现
+# "上传完即可用"，且支持任意多个不同系统的镜像。
+# casper 的 url=<iso> 会把这个文件取到内存并 loop 挂载，再从里面找 casper/*.squashfs——
+# 这是 live 介质能被找到的前提（只给一个裸 squashfs 是不行的）。
+class _IsoOnlyStatic(StaticFiles):
+    """只对外提供 *.iso。
+
+    /srv/opstk/iso 除了镜像，还可能混进运维产物（例如 download-iso.sh、
+    download-complete.flag）。装机网段通常是无认证的，这些文件不该被任何人 HTTP 取走，
+    所以这里只放行 .iso，其余一律 404（目录列表本来就没开）。
+    """
+
+    async def get_response(self, path, scope):
+        if not str(path).lower().endswith(".iso"):
+            return Response(status_code=404)
+        return await super().get_response(path, scope)
+
+
+try:
+    from pathlib import Path
+
+    _pxe_iso = Path("/srv/opstk/iso")
+    if _pxe_iso.is_dir():
+        app.mount("/pxe/iso", _IsoOnlyStatic(directory=str(_pxe_iso)), name="pxe-iso")
+except Exception:  # noqa: BLE001
+    pass
+
 # 部署时把前端构建产物挂到根路径（可选）
 # 前端 SPA 静态页（若已构建），使用 SPA fallback 路由
 try:
@@ -76,6 +104,9 @@ try:
         # SPA fallback：所有非 API 路由返回 index.html（Vue Router history mode）
         @app.get("/{full_path:path}")
         async def spa_fallback(full_path: str):
+            # 未匹配的 /api/* 必须返回 404 JSON，不能被 SPA 兜底吞成 200+HTML
+            if full_path.startswith(settings.api_prefix.strip("/")):
+                raise HTTPException(status_code=404, detail="Not Found")
             index = _dist / "index.html"
             if index.exists():
                 return FileResponse(index)

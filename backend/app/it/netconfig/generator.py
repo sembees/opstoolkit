@@ -1,6 +1,26 @@
 """服务器网络配置脚本生成器。统一用 nmcli，RHEL 8+ 与 Ubuntu 22.04+ 通用。"""
 from __future__ import annotations
 
+import json
+import re
+import shlex
+
+# 安全标量：原样输出；否则做引用。shlex.quote 对 [A-Za-z0-9_@%+=:,./-] 是恒等变换，
+# 因此对正常输入（eth0 / 10.0.0.1 / bond0.100 / mode=active-backup,miimon=100）
+# 产出与修复前逐字节一致，不改变既有输出；仅对含特殊字符的值加引用。
+_YAML_SAFE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def _sh(v) -> str:
+    """落进 shell 的值：POSIX 安全词。"""
+    return shlex.quote(str(v))
+
+
+def _yaml(v) -> str:
+    """落进 YAML 的值：安全则原样，否则 JSON 双引号标量（合法 YAML）。"""
+    s = str(v)
+    return s if _YAML_SAFE.match(s) else json.dumps(s)
+
 
 BOND_MODES = {
     0: "balance-rr",
@@ -51,27 +71,30 @@ def _ipv4_lines(obj) -> list:
     if not obj.get("ip"):
         lines.append("ipv4.method auto")
         return lines
-    lines.append(f"ipv4.addresses {obj['ip']}/{_prefix(obj)}")
+    lines.append(f"ipv4.addresses {_sh(obj['ip'])}/{_prefix(obj)}")
     lines.append("ipv4.method manual")
     if obj.get("gateway"):
-        lines.append(f"ipv4.gateway {obj['gateway']}")
+        lines.append(f"ipv4.gateway {_sh(obj['gateway'])}")
     if obj.get("dns"):
-        lines.append("ipv4.dns " + ";".join(obj["dns"]))
+        # 修 D1：原来是 ";".join(...) —— 未加引号的 ; 会被 bash 当命令分隔符，
+        # set -e 下脚本在此中止，后面的 nmcli connection up 永不执行。
+        # nmcli 接受「一个参数内空格分隔」的 DNS，故整体引用成单个 shell 词。
+        lines.append("ipv4.dns " + _sh(" ".join(str(d) for d in obj["dns"])))
     return lines
 
 
 def _mod(cmds, name, obj):
     lines = _ipv4_lines(obj)
     if lines:
-        cmds.append("nmcli connection modify " + name + " " + " ".join(lines))
+        cmds.append("nmcli connection modify " + _sh(name) + " " + " ".join(lines))
 
 
 def _iface(cmds, obj):
     name = obj["name"]
-    cmds.append("# 接口 " + name)
-    cmds.append(f"nmcli connection add type ethernet ifname {name} con-name {name}")
+    cmds.append("# 接口 " + str(name))
+    cmds.append(f"nmcli connection add type ethernet ifname {_sh(name)} con-name {_sh(name)}")
     _mod(cmds, name, obj)
-    cmds.append(f"nmcli connection up {name}")
+    cmds.append(f"nmcli connection up {_sh(name)}")
     cmds.append("")
 
 
@@ -80,42 +103,43 @@ def _bond(cmds, obj):
     mode = int(obj.get("mode", 1))
     mode_str = BOND_MODES.get(mode, "active-backup")
     cmds.append(f"# 聚合 {name} 模式={mode}:{mode_str}")
-    opts = f"mode={mode_str},miimon={obj.get('miimon', 100)}"
+    opts = f"mode={mode_str},miimon={int(obj.get('miimon', 100))}"
     if obj.get("primary"):
         opts += f",primary={obj['primary']}"
     if obj.get("lacp_rate"):
         opts += f",lacp_rate={obj['lacp_rate']}"
     if obj.get("xmit_hash_policy"):
         opts += f",xmit_hash_policy={obj['xmit_hash_policy']}"
-    cmds.append(f"nmcli connection add type bond ifname {name} con-name {name} bond.options {opts}")
+    cmds.append(f"nmcli connection add type bond ifname {_sh(name)} con-name {_sh(name)} bond.options {_sh(opts)}")
     _mod(cmds, name, obj)
     for i in obj.get("interfaces", []):
         sub = f"{name}-slave-{i}"
-        cmds.append(f"nmcli connection add type ethernet ifname {i} con-name {sub} master {name}")
-        cmds.append(f"nmcli connection up {sub}")
-    cmds.append(f"nmcli connection up {name}")
+        cmds.append(f"nmcli connection add type ethernet ifname {_sh(i)} con-name {_sh(sub)} master {_sh(name)}")
+        cmds.append(f"nmcli connection up {_sh(sub)}")
+    cmds.append(f"nmcli connection up {_sh(name)}")
     cmds.append("")
 
 
 def _vlan(cmds, obj):
     name = f"{obj['parent']}.{obj['vlan_id']}"
     cmds.append(f"# VLAN {name}")
-    cmds.append(f"nmcli connection add type vlan ifname {name} con-name {name} dev {obj['parent']} id {obj['vlan_id']}")
+    cmds.append(f"nmcli connection add type vlan ifname {_sh(name)} con-name {_sh(name)} "
+                f"dev {_sh(obj['parent'])} id {int(obj['vlan_id'])}")
     _mod(cmds, name, obj)
-    cmds.append(f"nmcli connection up {name}")
+    cmds.append(f"nmcli connection up {_sh(name)}")
     cmds.append("")
 
 
 def _bridge(cmds, obj):
     name = obj["name"]
     cmds.append(f"# 网桥 {name}")
-    cmds.append(f"nmcli connection add type bridge ifname {name} con-name {name}")
+    cmds.append(f"nmcli connection add type bridge ifname {_sh(name)} con-name {_sh(name)}")
     _mod(cmds, name, obj)
     for i in obj.get("interfaces", []):
         sub = f"{name}-port-{i}"
-        cmds.append(f"nmcli connection add type ethernet ifname {i} con-name {sub} master {name}")
-        cmds.append(f"nmcli connection up {sub}")
-    cmds.append(f"nmcli connection up {name}")
+        cmds.append(f"nmcli connection add type ethernet ifname {_sh(i)} con-name {_sh(sub)} master {_sh(name)}")
+        cmds.append(f"nmcli connection up {_sh(sub)}")
+    cmds.append(f"nmcli connection up {_sh(name)}")
     cmds.append("")
 
 
@@ -134,7 +158,7 @@ def _build_nmcli(req):
     cmds.append("fi")
     cmds.append("")
     if req.hostname:
-        cmds.append(f"hostnamectl set-hostname {req.hostname}")
+        cmds.append(f"hostnamectl set-hostname {_sh(req.hostname)}")
         cmds.append("")
     # 收集 bond/bridge 从接口，跳过独立配置
     nm_bond_slaves = set()
@@ -169,14 +193,14 @@ def _netplan_addr_block(out, indent, obj, dhcp_default=False):
         return
     p = _prefix(obj)
     out.append(f"{indent}dhcp4: false")
-    out.append(f"{indent}addresses: [{obj['ip']}/{p}]")
+    out.append(f"{indent}addresses: [{_yaml(str(obj['ip']) + '/' + str(p))}]")
     if obj.get("gateway"):
         out.append(f"{indent}routes:")
         out.append(f"{indent}  - to: default")
-        out.append(f"{indent}    via: {obj['gateway']}")
+        out.append(f"{indent}    via: {_yaml(obj['gateway'])}")
     if obj.get("dns"):
         out.append(f"{indent}nameservers:")
-        out.append(f"{indent}  addresses: [{', '.join(obj['dns'])}]")
+        out.append(f"{indent}  addresses: [{', '.join(_yaml(d) for d in obj['dns'])}]")
 
 
 # Ubuntu 22.04+ 使用 netplan 生成 YAML 配置 ，默认 renderer=networkd
@@ -201,43 +225,43 @@ def _build_netplan(req):
         for o in req.interfaces:
             # 如果该接口被 bond 或 bridge 引用，仅设为禁用状态
             if o.name in bond_slaves or o.name in bridge_slaves:
-                out.append(f"{ind}{o.name}:")
+                out.append(f"{ind}{_yaml(o.name)}:")
                 out.append(f"{ind}  dhcp4: false")
                 continue
-            out.append(f"{ind}{o.name}:")
+            out.append(f"{ind}{_yaml(o.name)}:")
             _netplan_addr_block(out, ind + "  ", o.model_dump(), dhcp_default=True)
     # 网卡聚合 (bond)：支持 active-backup/802.3ad 等模式
     if req.bonds:
         out.append("  bonds:")
         for o in req.bonds:
             ms = BOND_MODES.get(int(o.mode), "active-backup")
-            out.append(f"{ind}{o.name}:")
-            out.append(f"{ind}  interfaces: [{', '.join(o.interfaces)}]")
+            out.append(f"{ind}{_yaml(o.name)}:")
+            out.append(f"{ind}  interfaces: [{', '.join(_yaml(i) for i in o.interfaces)}]")
             out.append(f"{ind}  parameters:")
             out.append(f"{ind}    mode: {ms}")
-            out.append(f"{ind}    miimon: {o.miimon}")
+            out.append(f"{ind}    miimon: {int(o.miimon)}")
             if o.primary:
-                out.append(f"{ind}    primary: {o.primary}")
+                out.append(f"{ind}    primary: {_yaml(o.primary)}")
             if o.lacp_rate:
-                out.append(f"{ind}    lacp-rate: {o.lacp_rate}")
+                out.append(f"{ind}    lacp-rate: {_yaml(o.lacp_rate)}")
             if o.xmit_hash_policy:
-                out.append(f"{ind}    transmit-hash-policy: {o.xmit_hash_policy}")
+                out.append(f"{ind}    transmit-hash-policy: {_yaml(o.xmit_hash_policy)}")
             _netplan_addr_block(out, ind + "  ", o.model_dump())
     # VLAN 子接口：从父接口创建 tagged sub-interface
     if req.vlans:
         out.append("  vlans:")
         for o in req.vlans:
             vname = f"{o.parent}.{o.vlan_id}"
-            out.append(f"{ind}{vname}:")
-            out.append(f"{ind}  id: {o.vlan_id}")
-            out.append(f"{ind}  link: {o.parent}")
+            out.append(f"{ind}{_yaml(vname)}:")
+            out.append(f"{ind}  id: {int(o.vlan_id)}")
+            out.append(f"{ind}  link: {_yaml(o.parent)}")
             _netplan_addr_block(out, ind + "  ", o.model_dump())
     # 网桥 (bridge)：将多个接口归入同一二层广播域
     if req.bridges:
         out.append("  bridges:")
         for o in req.bridges:
-            out.append(f"{ind}{o.name}:")
-            out.append(f"{ind}  interfaces: [{', '.join(o.interfaces)}]")
+            out.append(f"{ind}{_yaml(o.name)}:")
+            out.append(f"{ind}  interfaces: [{', '.join(_yaml(i) for i in o.interfaces)}]")
             _netplan_addr_block(out, ind + "  ", o.model_dump())
     return "\n".join(out) + "\n"
 
@@ -259,41 +283,41 @@ def _build_ifcfg(req):
             lines.append("BOOTPROTO=dhcp")
         else:
             lines.append("BOOTPROTO=static")
-            lines.append("IPADDR=" + str(obj["ip"]))
+            lines.append("IPADDR=" + _sh(obj["ip"]))
             lines.append("PREFIX=" + str(_prefix(obj)))
             gw = obj.get("gateway")
             if gw:
-                lines.append("GATEWAY=" + str(gw))
+                lines.append("GATEWAY=" + _sh(gw))
             dns = obj.get("dns") or []
             for i, d in enumerate(dns, 1):
-                lines.append("DNS" + str(i) + "=" + str(d))
+                lines.append("DNS" + str(i) + "=" + _sh(d))
         lines.append("ONBOOT=yes")
         return lines
 
     # Interfaces
     for o in req.interfaces:
         name = o.name
-        lines = ["DEVICE=" + name, "TYPE=Ethernet"]
+        lines = ["DEVICE=" + _sh(name), "TYPE=Ethernet"]
         if name in bond_slaves:
             master = next((b.name for b in req.bonds if name in b.interfaces), "")
-            lines += ["MASTER=" + master, "SLAVE=yes", "ONBOOT=yes"]
+            lines += ["MASTER=" + _sh(master), "SLAVE=yes", "ONBOOT=yes"]
         elif name in bridge_ports:
             master = next((br.name for br in req.bridges if name in br.interfaces), "")
-            lines += ["BRIDGE=" + master, "ONBOOT=yes"]
+            lines += ["BRIDGE=" + _sh(master), "ONBOOT=yes"]
         else:
             lines += _ip_lines(o.model_dump())
-        files["ifcfg-" + name] = "\n".join(lines) + "\n"
+        files["ifcfg-" + _sh(name)] = "\n".join(lines) + "\n"
 
     # ? bond/bridge ??? interfaces ????????????
     all_ifaces = {o.name for o in req.interfaces}
     for b in req.bonds:
         for ifname in b.interfaces:
             if ifname not in all_ifaces:
-                files["ifcfg-" + ifname] = "DEVICE=" + ifname + "\nTYPE=Ethernet\nMASTER=" + b.name + "\nSLAVE=yes\nONBOOT=yes\n"
+                files["ifcfg-" + _sh(ifname)] = ("DEVICE=" + _sh(ifname) + "\nTYPE=Ethernet\nMASTER=" + _sh(b.name) + "\nSLAVE=yes\nONBOOT=yes\n")
     for br in req.bridges:
         for ifname in br.interfaces:
             if ifname not in all_ifaces:
-                files["ifcfg-" + ifname] = "DEVICE=" + ifname + "\nTYPE=Ethernet\nBRIDGE=" + br.name + "\nONBOOT=yes\n"
+                files["ifcfg-" + _sh(ifname)] = ("DEVICE=" + _sh(ifname) + "\nTYPE=Ethernet\nBRIDGE=" + _sh(br.name) + "\nONBOOT=yes\n")
 
     # Bonds
     for o in req.bonds:
@@ -302,28 +326,28 @@ def _build_ifcfg(req):
         mode_str = BOND_MODES.get(mode, "active-backup")
         opts = "mode=" + mode_str + " miimon=" + str(o.miimon or 100)
         if o.primary:
-            opts += " primary=" + o.primary
+            opts += " primary=" + _sh(o.primary)
         if o.lacp_rate:
-            opts += " lacp_rate=" + o.lacp_rate
+            opts += " lacp_rate=" + _sh(o.lacp_rate)
         if o.xmit_hash_policy:
-            opts += " xmit_hash_policy=" + o.xmit_hash_policy
-        lines = ["DEVICE=" + name, "TYPE=Bond", "BONDING_MASTER=yes", "BONDING_OPTS=\"" + opts + "\""]
+            opts += " xmit_hash_policy=" + _sh(o.xmit_hash_policy)
+        lines = ["DEVICE=" + _sh(name), "TYPE=Bond", "BONDING_MASTER=yes", "BONDING_OPTS=\"" + opts + "\""]
         lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "dns": o.dns, "netmask": o.netmask})
-        files["ifcfg-" + name] = "\n".join(lines) + "\n"
+        files["ifcfg-" + _sh(name)] = "\n".join(lines) + "\n"
 
     # VLANs
     for o in req.vlans:
         name = o.parent + "." + str(o.vlan_id)
-        lines = ["DEVICE=" + name, "TYPE=Vlan", "VLAN=yes", "PHYSDEV=" + o.parent]
+        lines = ["DEVICE=" + _sh(name), "TYPE=Vlan", "VLAN=yes", "PHYSDEV=" + _sh(o.parent)]
         lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "netmask": o.netmask})
-        files["ifcfg-" + name] = "\n".join(lines) + "\n"
+        files["ifcfg-" + _sh(name)] = "\n".join(lines) + "\n"
 
     # Bridges
     for o in req.bridges:
         name = o.name
-        lines = ["DEVICE=" + name, "TYPE=Bridge"]
+        lines = ["DEVICE=" + _sh(name), "TYPE=Bridge"]
         lines += _ip_lines({"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "netmask": o.netmask})
-        files["ifcfg-" + name] = "\n".join(lines) + "\n"
+        files["ifcfg-" + _sh(name)] = "\n".join(lines) + "\n"
 
     # Combine output
     result = ["# ===== 网络配置文件 (ifcfg格式) ====="]

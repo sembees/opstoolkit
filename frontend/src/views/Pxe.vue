@@ -209,9 +209,10 @@
             </el-form-item>
           </el-col>
           <el-col :span="6"><el-form-item label="主机名"><el-input v-model="genForm.hostname" /></el-form-item></el-col>
-          <el-col :span="6"><el-form-item label="PXE服务IP"><el-input v-model="genForm.server_ip" /></el-form-item></el-col>
+          <el-col :span="6"><el-form-item label="PXE服务IP"><el-input v-model="genForm.server_ip" placeholder="PXE服务本机IP，如 10.128.118.113" /></el-form-item></el-col>
           <el-col :span="6"><el-form-item label="内核路径"><el-input v-model="genForm.kernel_path" placeholder="rhel/9/vmlinuz" /></el-form-item></el-col>
           <el-col :span="6"><el-form-item label="initrd"><el-input v-model="genForm.initrd_path" placeholder="rhel/9/initrd.img" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="HTTP根地址"><el-input v-model="genForm.http_root" placeholder="留空由后端生成，格式 http://<IP>:8000/pxe/serve" /></el-form-item></el-col>
         </el-row>
         <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> 生成文件</el-button>
           <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
@@ -221,6 +222,35 @@
           <div class="terminal-output" style="white-space: pre; max-height: 420px">{{ genFiles[name] }}</div>
         </el-tab-pane>
       </el-tabs>
+    </el-dialog>
+
+    <!-- 部署确认弹窗：deploy_mode 默认 proxy（更安全），server_ip 留空由后端自动探测 -->
+    <el-dialog v-model="deployDialog" title="确认部署" width="560px" :close-on-click-modal="false">
+      <el-form label-width="100px" size="default">
+        <el-form-item label="装机模板">
+          <span>{{ deployRow ? (deployRow.name || ('#' + deployRow.id)) : '-' }}</span>
+        </el-form-item>
+        <el-form-item label="部署模式">
+          <el-select v-model="deployForm.deploy_mode" style="width: 100%">
+            <el-option label="ProxyDHCP (与现有DHCP并存, 推荐)" value="proxy" />
+            <el-option label="独立DHCP (专用装机网络)" value="standalone" />
+            <el-option label="中继模式 (仅TFTP, 依赖交换机)" value="relay" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="PXE服务IP">
+          <el-input v-model="deployForm.server_ip" placeholder="留空则由后端自动探测本机IP" />
+        </el-form-item>
+      </el-form>
+      <el-alert v-if="deployForm.deploy_mode === 'standalone'" type="warning" :closable="false" show-icon>
+        将在本网段启动完整 DHCP，确认无其他 DHCP 服务器，否则会与现有 DHCP 冲突导致断网！
+      </el-alert>
+      <el-alert v-else type="info" :closable="false" show-icon>
+        {{ deployForm.deploy_mode === 'proxy' ? 'ProxyDHCP 模式与现有 DHCP 并存，不分配地址，影响面小。' : '中继模式仅提供引导，依赖外部 DHCP 与交换机 IP helpers。' }}
+      </el-alert>
+      <template #footer>
+        <el-button @click="deployDialog = false">取消</el-button>
+        <el-button type="primary" :loading="deploying" @click="confirmDeploy">确认部署</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -242,6 +272,11 @@ const activeFile = ref("")
 const serverStatus = ref({ supported: false })
 const deployLog = ref([])
 const deploying = ref(false)
+
+// 部署确认弹窗：deploy_mode 默认 proxy（与现有 DHCP 并存，更安全）；server_ip 留空由后端自动探测
+const deployDialog = ref(false)
+const deployRow = ref(null)
+const deployForm = reactive({ deploy_mode: "proxy", server_ip: "" })
 const isoList = ref({ supported: false, isos: [] })
 const extractLog = ref([])
 
@@ -253,13 +288,28 @@ async function controlService(action) {
   try { const r = await http.post("/it/pxe/server/service", { action }); ElMessage.success(r.msg || action) } catch(e) {}
   loadServerStatus()
 }
-async function deployProfile(row) {
+function deployProfile(row) {
+  deployRow.value = row
+  deployForm.deploy_mode = "proxy"
+  deployForm.server_ip = ""
+  deployDialog.value = true
+}
+
+async function confirmDeploy() {
+  const row = deployRow.value
+  if (!row) return
   deploying.value = true
   try {
-    const r = await http.post("/it/pxe/profiles/" + row.id + "/deploy", { deploy_mode: "standalone", hostname: "default", installs: [] })
+    const r = await http.post("/it/pxe/profiles/" + row.id + "/deploy", {
+      deploy_mode: deployForm.deploy_mode,
+      server_ip: (deployForm.server_ip || "").trim(),
+      hostname: "default",
+      installs: []
+    })
     deployLog.value = r.log || []
     if (r.ok) ElMessage.success("部署完成")
     else ElMessage.warning("部署未完全成功，查看日志")
+    deployDialog.value = false
     loadServerStatus()
   } finally { deploying.value = false }
 }
@@ -299,7 +349,7 @@ const emptyForm = () => ({
 })
 const form = reactive(emptyForm())
 
-const genForm = reactive({ hostname: "server01", server_ip: "192.168.1.100", http_root: "", kernel_path: "", initrd_path: "", squashfs_path: "", deploy_mode: "standalone" })
+const genForm = reactive({ hostname: "server01", server_ip: "", http_root: "", kernel_path: "", initrd_path: "", squashfs_path: "", deploy_mode: "standalone" })
 
 function osLabel(row) { return row.os_type + " " + row.os_version }
 function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", failed: "danger" }[s] || "info" }
@@ -378,8 +428,8 @@ async function delProfile(id) {
 
 function openGenDialog(row) {
   genForm.hostname = "server01"
-  genForm.server_ip = "192.168.1.100"
-  genForm.http_root = "http://192.168.1.100/pxe"
+  genForm.server_ip = ""
+  genForm.http_root = ""
   if (row.os_type === "ubuntu") {
     genForm.kernel_path = "ubuntu/22.04/vmlinuz"
     genForm.initrd_path = "ubuntu/22.04/initrd"
@@ -402,7 +452,7 @@ async function doGenerate() {
     const body = {
       hostname: genForm.hostname,
       server_ip: genForm.server_ip,
-      http_root: genForm.http_root || ("http://" + genForm.server_ip + "/pxe"),
+      http_root: genForm.http_root,
       kernel_path: genForm.kernel_path,
       initrd_path: genForm.initrd_path,
       squashfs_path: genForm.squashfs_path,
@@ -422,7 +472,7 @@ async function doDownload() {
   await downloadZip("/it/pxe/profiles/" + pid + "/download", {
     hostname: genForm.hostname,
     server_ip: genForm.server_ip,
-    http_root: genForm.http_root || ("http://" + genForm.server_ip + "/pxe"),
+    http_root: genForm.http_root,
     kernel_path: genForm.kernel_path,
     initrd_path: genForm.initrd_path,
     squashfs_path: genForm.squashfs_path,

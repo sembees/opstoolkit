@@ -21,3 +21,17 @@ backend/.env
 .DS_Store
 Thumbs.db
 *.log
+
+# 本地/个人文件（不入库）
+.vscode/
+*.pptx
+*.xlsx
+*.ndjson
+*.7z
+*.preadmin
+
+# 临时运维脚本与生成物：不入库。
+# 注意 backend/scripts/ 里有脚本带过明文 SSH 口令（remote_check.py），
+# 推上去等于把凭据写进公开仓库，所以在清理干净之前先整体忽略。
+backend/scripts/
+netconfig_tests/

@@ -23,6 +23,12 @@ WORKDIR /app/backend
 COPY backend/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt pydantic-settings eval_type_backport
 
+# 测试依赖：只为了让运维/落地验证能在容器内直接跑 backend/tests
+#   docker exec opstoolkit python -m pytest tests -q
+# 没有它时，容器里的代码只能靠"接口冒烟"验，跑不了单测；backend/tests 本来就已经
+# 被 COPY 进镜像（见下面的 COPY backend/ ./），缺的只是 pytest 本身。
+RUN pip3 install --no-cache-dir pytest
+
 # 应用代码
 COPY backend/ ./
 COPY --from=frontend /build/dist /app/frontend/dist

@@ -10,18 +10,19 @@ services:
     volumes:
       # 持久化数据
       - ./data:/app/backend/data
-      - ./dnsmasq-conf:/etc/dnsmasq.d
+      - /etc/dnsmasq.d:/etc/dnsmasq.d
       - ./frontend/dist:/app/frontend/dist
       - ./backend/app:/app/backend/app
+      # 入口脚本也挂进去：它是"容器是否自起 dnsmasq"的开关，必须与仓库保持一致，
+      # 不能依赖镜像里烤进去的那份副本（改它需要重建镜像，而前端阶段重建当前会失败）。
+      - ./backend/docker-entrypoint.sh:/docker-entrypoint.sh:ro
       # PXE 文件 (内核 + 固件 + 应答文件)
-      - tftp-root:/srv/tftp
-      - pxe-web:/srv/opstk/pxe-web
+      - /srv/tftp:/srv/tftp
+      - /srv/opstk/pxe-web:/srv/opstk/pxe-web
       - /srv/opstk/iso:/srv/opstk/iso
       - /srv/opstk/mnt:/srv/opstk/mnt
     restart: unless-stopped
 
 volumes:
-  tftp-root:
-  pxe-web:
   iso-store:
   mnt-tmp:

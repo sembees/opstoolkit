@@ -27,6 +27,25 @@ def _is_root():
         return False
 
 
+def _in_container():
+    """Best-effort container detection (union of both signals).
+
+    True when /.dockerenv exists, or when /proc/1/cgroup mentions
+    docker/containerd. Any read error counts as "not a container".
+    """
+    try:
+        if os.path.exists("/.dockerenv"):
+            return True
+    except Exception:
+        pass
+    try:
+        with open("/proc/1/cgroup", "r", encoding="utf-8", errors="replace") as f:
+            cgroup = f.read()
+    except Exception:
+        return False
+    return ("docker" in cgroup) or ("containerd" in cgroup)
+
+
 def _run(cmd, sudo=False, timeout=15, stdin_data=None):
     need_sudo = sudo and not _is_root()
     prefix = ["sudo", "-n"] if need_sudo else []
@@ -104,6 +123,26 @@ def _find_dnsmasq_pids(skip_zombies=True):
     return pids
 
 
+def _port_67_listening() -> bool:
+    """共享网络命名空间里是否已有 UDP :67 监听（即宿主机 dnsmasq 在跑）。
+
+    为什么不能靠进程判断：容器与宿主机共享**网络**命名空间，但**不共享 PID**
+    命名空间，所以容器内 `_find_dnsmasq_pids()` 看不到宿主机的 dnsmasq。
+    /proc/net/udp 反映的是网络命名空间，因此用它判断监听状态是可靠的
+    （端口是 hex：0x43 = 67）。`it/pxe/server.py` 的 `_listen_ports_from_proc()`
+    用的是同一套事实。
+    """
+    try:
+        with open("/proc/net/udp", encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].endswith(":0043"):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def dhcp_status():
     result = {
         "supported": is_linux(),
@@ -125,7 +164,9 @@ def dhcp_status():
     else:
         pids = _find_dnsmasq_pids(skip_zombies=True)
         result["pids"] = pids
-        result["running"] = len(pids) > 0
+        # 容器内看不到宿主机的 dnsmasq 进程，但共享网络命名空间：
+        # :67 有监听即说明 dnsmasq 在跑（宿主机的那个）。
+        result["running"] = len(pids) > 0 or _port_67_listening()
     conf_files = []
     if os.path.isdir(CONF_DIR):
         try:
@@ -142,6 +183,15 @@ def dhcp_control(action):
         return {"ok": False, "action": action, "msg": "unsupported: " + action, "running": False}
     if not is_linux():
         return {"ok": False, "action": action, "msg": "Linux only", "running": False}
+    if _in_container():
+        # Never kill or spawn dnsmasq from inside a container: the daemon is
+        # owned by the host. A second dnsmasq here races the host one for
+        # ports 67/69 and breaks PXE (see P0/U8 incident). Config files are
+        # still written by the callers; reloading is delegated to the host,
+        # e.g. via the opstk-dnsmasq-reload.path/.service units.
+        return {"ok": True, "action": action, "managed": False,
+                "msg": "运行在容器内，dnsmasq 由宿主机管理；配置已写入，请由宿主机外部重载",
+                "running": len(_find_dnsmasq_pids(skip_zombies=True)) > 0}
     has_systemd = os.path.isfile("/run/systemd/system")
     if action == "status":
         st = dhcp_status()

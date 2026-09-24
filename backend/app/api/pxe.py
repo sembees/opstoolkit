@@ -1,18 +1,20 @@
 """PXE 装机接口。"""
 from __future__ import annotations
 
+import os
 import socket
+from urllib.parse import quote, unquote
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crypto, models
 from app.core.auth import get_current_user
-from app.core.schemas import PxeGenerateResult, PxeInstallIn, PxeInstallOut, PxeProfileIn, PxeProfileOut
+from app.core.schemas import PxeGenerateIn, PxeGenerateResult, PxeInstallIn, PxeInstallOut, PxeProfileIn, PxeProfileOut
 from app.database import get_db
 from app.core.ziputil import files_to_zip_response
 from app.it.pxe import server as pxe_server
-from app.it.pxe.generator import PxeConfig, generate_all
+from app.it.pxe.generator import DEFAULT_KERNEL_CONSOLE, PxeConfig, generate_all, pick_iso
 
 router = APIRouter()
 
@@ -60,10 +62,51 @@ def _default_media(p):
     return base + "vmlinuz", base + "initrd", base + "installer.squashfs"
 
 
+def _iso_url_for(p, server_ip, iso_url=""):
+    """定出本次装机用的可挂载 ISO 介质 URL。
+
+    显式指定的 iso_url 优先；否则按 os_type/os_version 在 /srv/opstk/iso 里自动匹配
+    （正式环境同一目录会放多个系统镜像，必须挑准，见 generator.pick_iso）。
+    匹配不到返回 ""，由 generator 抛出可读的 4xx 提示，而不是生成一份必然失败的菜单。
+    注意 ISO 由 app/main.py 挂在 /pxe/iso，与应答文件的 /pxe/serve 是两个不同的前缀。
+    """
+    if iso_url:
+        return iso_url
+    name = pick_iso(pxe_server.iso_names(), p.os_type, p.os_version)
+    if not name:
+        return ""
+    # 文件名可能含空格 / 非 ASCII / `#` / `?`。不编码的话，空格会让 iPXE 的 kernel 行
+    # 在该处**断开参数**（url= 只剩前半截，后半截变成多余内核参数），`#`/`?` 会被
+    # 当成 URL 片段/查询串 —— 结果都是 casper 取不到介质。
+    # 这里按路径段百分号编码；文件名本身不含 `/`，所以 safe="" 是安全的。
+    return ("http://" + (server_ip or "192.168.1.100") + ":8000/pxe/iso/"
+            + quote(name, safe=""))
+
+
+def _iso_size_mb(iso_url):
+    """把 iso_url 末段当文件名，到 /srv/opstk/iso 下 stat 出 MB；取不到返回 0。
+
+    只用于在生成的 README 里给出"目标机内存要多大"的具体数字（casper 走 HTTP 时
+    会把整份 ISO 读进内存）。名字虽然来自我们自己的拼接，仍做一次 basename 与
+    路径穿越防护，避免被拿来 stat 任意路径。
+    """
+    if not iso_url:
+        return 0
+    # URL 里的文件名是百分号编码过的（见 _iso_url_for），stat 前必须反解回来。
+    name = unquote(str(iso_url).rstrip("/").rsplit("/", 1)[-1])
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        return 0
+    try:
+        return int(os.stat(os.path.join("/srv/opstk/iso", name)).st_size // 1048576)
+    except OSError:
+        return 0
+
+
 def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
                   kernel_path="", initrd_path="", squashfs_path="",
-                  deploy_mode="standalone") -> PxeConfig:
+                  deploy_mode="standalone", iso_url="", kernel_console="") -> PxeConfig:
     _dk, _di, _ds = _default_media(p)
+    _iso = _iso_url_for(p, server_ip, iso_url)
     return PxeConfig(
         os_type=p.os_type, os_version=p.os_version,
         hostname="default", timezone=p.timezone, locale=p.locale, keyboard=p.keyboard,
@@ -76,10 +119,31 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
         mirror=p.mirror, extra_packages=p.extra_packages or [],
         post_script=p.post_script,
         server_ip=server_ip or "192.168.1.100",
-        http_root=http_root or ("http://" + (server_ip or "192.168.1.100") + ":8000/pxe"),
+        # H5: 静态服务实际挂载在 :8000/pxe/serve（见 app/main.py），兜底路径必须带 /serve
+        http_root=http_root or ("http://" + (server_ip or "192.168.1.100") + ":8000/pxe/serve"),
         kernel_path=kernel_path or _dk, initrd_path=initrd_path or _di, squashfs_path=squashfs_path or _ds,
+        # Ubuntu 必须给出可挂载介质（casper 的 url=），否则必失败：
+        # 显式 iso_url 优先，其次按 os_type/os_version 自动匹配 /srv/opstk/iso
+        iso_url=_iso,
+        iso_size_mb=_iso_size_mb(_iso),
+        # 留空则用后端默认值（带串口，便于无显示器机器的装机排障）
+        kernel_console=kernel_console or DEFAULT_KERNEL_CONSOLE,
         deploy_mode=deploy_mode,
     )
+
+
+def _require_admin_password(body: PxeProfileIn) -> str:
+    """admin_password 必填非空：这是裸机 root/管理员口令，不允许留空，也不代填任何默认口令。
+
+    创建时必填；更新时 None 表示不修改原口令（放行），显式传空串一律拒绝。
+    """
+    pw = body.admin_password
+    if not pw:
+        raise HTTPException(
+            status_code=422,
+            detail="管理员密码不能为空；这是裸机 root 口令，不允许留空",
+        )
+    return pw
 
 
 # ---------- 模板 CRUD ----------
@@ -91,6 +155,7 @@ async def list_profiles(db: AsyncSession = Depends(get_db), _user=Depends(get_cu
 
 @router.post("/profiles", response_model=PxeProfileOut)
 async def create_profile(body: PxeProfileIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    _require_admin_password(body)
     p = models.PxeProfile(
         name=body.name, os_type=body.os_type, os_version=body.os_version,
         timezone=body.timezone, locale=body.locale, keyboard=body.keyboard,
@@ -122,6 +187,8 @@ async def update_profile(pid: str, body: PxeProfileIn, db: AsyncSession = Depend
     p.keyboard = body.keyboard
     p.admin_user = body.admin_user
     if body.admin_password is not None:
+        # 更新时显式传空串同样拒绝（None 表示不修改原口令，保持放行）
+        _require_admin_password(body)
         p.admin_password_enc = crypto.encrypt(body.admin_password)
     if body.root_password is not None:
         p.root_password_enc = crypto.encrypt(body.root_password)
@@ -179,8 +246,28 @@ async def delete_install(iid: str, db: AsyncSession = Depends(get_db), _user=Dep
 
 
 # ---------- 应答文件生成 ----------
+def _gen_body_dict(body: PxeGenerateIn | None) -> dict:
+    """PxeGenerateIn → 与旧版 dict 载荷逐键等价的摊平 dict。
+
+    D7 第 2 层：HTTP 层的输入校验由 PxeGenerateIn（U-C 交付）完成，
+    非法载荷在进入本函数之前就已被 FastAPI 以 422 拒绝；这里只做
+    模型 → dict 的摊平，供 _gen_pxe_files 按原有 body.get(...) 语义消费。
+    exclude_none 保证"未填写"的可选键保持缺键状态（而不是出现 None 值），
+    从而维持 _gen_pxe_files / deploy_to_host 中所有回退与合并语义不变：
+    否则一个全 None 的 net_config 会把模板或 detect_network() 探测到的
+    网络值覆盖成 None。
+    """
+    if body is None:
+        return {}
+    return body.model_dump(exclude_none=True)
+
+
 async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
-    """生成全部 PXE 部署文件 (autoinstall/kickstart + iPXE + dnsmasq)。"""
+    """生成全部 PXE 部署文件 (autoinstall/kickstart + iPXE + dnsmasq)。
+
+    入参 body 约定来自 `PxeGenerateIn.model_dump(exclude_none=True)`
+    （见 _gen_body_dict）：模型校验在 HTTP 层完成，这里只消费摊平后的字段。
+    """
     p = await db.get(models.PxeProfile, pid)
     if not p:
         raise HTTPException(status_code=404, detail="模板不存在")
@@ -192,6 +279,8 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
         kernel_path=body.get("kernel_path", ""),
         initrd_path=body.get("initrd_path", ""),
         squashfs_path=body.get("squashfs_path", ""),
+        iso_url=body.get("iso_url", ""),
+        kernel_console=body.get("kernel_console", ""),
         deploy_mode=body.get("deploy_mode", "standalone"),
     )
     cfg.hostname = body.get("hostname", "default")
@@ -201,19 +290,23 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
         merged.update(body["net_config"])
         cfg.net_config = merged
     installs = list(body.get("installs", []))
-    return generate_all(cfg, installs)
+    try:
+        return generate_all(cfg, installs)
+    except ValueError as e:
+        # 存量空口令模板等生成期校验失败：以 4xx + 中文提示暴露，而不是 500
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @router.post("/profiles/{pid}/generate", response_model=PxeGenerateResult)
-async def generate_files(pid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
-    files = await _gen_pxe_files(pid, body, db)
+async def generate_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    files = await _gen_pxe_files(pid, _gen_body_dict(body), db)
     return {"files": files}
 
 
 @router.post("/profiles/{pid}/download")
-async def download_files(pid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def download_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """下载全部 PXE 部署文件 (zip 压缩包)。"""
-    files = await _gen_pxe_files(pid, body, db)
+    files = await _gen_pxe_files(pid, _gen_body_dict(body), db)
     return files_to_zip_response(files, "pxe-deploy.zip")
 
 
@@ -232,18 +325,43 @@ async def service_control(body: dict = None, _user=Depends(get_current_user)):
 
 
 @router.post("/profiles/{pid}/deploy")
-async def deploy_to_host(pid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """POST /api/it/pxe/profiles/{pid}/deploy — 一键部署到本机：生成配置→落地文件→重启 dnsmasq。"""
-    body = body or {}
-    if not body.get("server_ip"):
-        body["server_ip"] = _local_ip()
-    # 自动检测本机网络 (Linux)
+    body = body or PxeGenerateIn()
     net = pxe_server.detect_network()
+
+    # 1. 调用方显式给出的 server_ip —— 最高优先级
+    # 2. 否则用 detect_network()["server_ip"]
+    # 3. 否则回退 _local_ip()
+    if body.server_ip:
+        pass
+    elif net and net.get("server_ip"):
+        body.server_ip = net["server_ip"]
+    else:
+        body.server_ip = _local_ip()
+
+    # 解析到环回地址说明无法确定对外 IP，必须报错而不是生成不可用的配置
+    ip = body.server_ip
+    if ip.startswith("127.") or ip == "::1":
+        raise HTTPException(
+            status_code=400,
+            detail="无法确定本机对外 IP：解析到环回地址 " + ip
+            + "。请在前端显式填写 server_ip，或修复主机名解析 /etc/hosts",
+        )
+
+    # http_root 强制为本机静态服务地址（app/main.py 挂载在 /pxe/serve，见 H5）
+    body.http_root = "http://" + body.server_ip + ":8000/pxe/serve"
+
+    payload = body.model_dump(exclude_none=True)
+    # 合并 net_config：以 detect_network() 为底，调用方显式传入的键覆盖它。
+    # 注意必须在 dict 层合并：detect_network() 的结果含 server_ip、warnings
+    # 等模型字段之外的键，须原样保留并传给生成器，不能经过模型二次过滤。
+    caller_net_config = payload.get("net_config") or {}
     if net:
-        body.setdefault("server_ip", net.get("server_ip") or _local_ip())
-        body["net_config"] = net
-    body["http_root"] = "http://" + body["server_ip"] + ":8000/pxe/serve"
-    files = await _gen_pxe_files(pid, body, db)
+        merged = dict(net)
+        merged.update(caller_net_config)
+        payload["net_config"] = merged
+    files = await _gen_pxe_files(pid, payload, db)
     return pxe_server.deploy_files(files, pid)
 
 

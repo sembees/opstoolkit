@@ -32,16 +32,26 @@ class BaseDriver:
 
 
 _TYPE_TO_VENDOR = {
+    "hp": "h3c",
+    "comware": "h3c",
+    "h3c": "h3c",
     "hp_comware": "h3c",
     "huawei": "huawei",
     "huawei_vrpv8": "huawei",
+    "cisco": "cisco",
     "cisco_ios": "cisco",
+    "ios": "cisco",
+    "ios_xe": "cisco",
     "cisco_xe": "cisco",
     "cisco_asa": "cisco",
+    "asa": "cisco",
     "cisco_nxos": "cisco",
+    "nxos": "cisco",
     "cisco_xr": "cisco",
+    "ios_xr": "cisco",
 }
 
 
 def vendor_from_device_type(device_type: str) -> str:
-    return _TYPE_TO_VENDOR.get((device_type or "").lower(), "generic")
+    normalized = (device_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return _TYPE_TO_VENDOR.get(normalized, "generic")
