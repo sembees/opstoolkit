@@ -116,7 +116,7 @@
         <el-divider content-position="left">账号与安全</el-divider>
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="管理员"><el-input v-model="form.admin_user" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="密码"><el-input v-model="form.admin_password" type="password" show-password placeholder="留空不修改" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="密码"><el-input v-model="form.admin_password" type="password" show-password placeholder="新建必填；编辑时留空=不修改" /></el-form-item></el-col>
           <el-col :span="8" v-if="form.vendor === 'cisco'"><el-form-item label="Enable密钥"><el-input v-model="form.enable_secret" type="password" show-password /></el-form-item></el-col>
         </el-row>
         <el-row :gutter="12">
@@ -328,6 +328,13 @@ function openTemplateDialog(row) {
 
 async function saveTemplate() {
   if (!form.name) { ElMessage.warning("请输入模板名"); return }
+  // 新建时必须有设备管理员口令：ZTP 生成器现在**不代填**默认口令（旧的 ChangeMe@123
+  // 是公开仓库里的常量，等于给设备发一个全网都知道的口令），没有口令的模板一生成就 422。
+  // 挡在这里比让运维撞 422 友好。编辑时留空仍表示"不修改"（后端 null 时不改原值）。
+  if (!editingId.value && !form.admin_password) {
+    ElMessage.warning("请填写设备管理员口令（新建必填；编辑时留空表示不修改）")
+    return
+  }
   saving.value = true
   try {
     const payload = buildPayload()
