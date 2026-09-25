@@ -14,7 +14,7 @@
         </el-form-item>
         <el-button type="primary" size="large" style="width: 100%" :loading="loading" @click="handleLogin">登 录</el-button>
       </el-form>
-      <p style="text-align: center; color: #bbb; font-size: 12px; margin-top: 16px">默认账号 admin / admin@123</p>
+      <p style="text-align: center; color: #bbb; font-size: 12px; margin-top: 16px">管理员账号 admin（初始口令见服务日志）</p>
     </el-card>
   </div>
 </template>

@@ -29,7 +29,10 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000"
 
     admin_username: str = "admin"
-    admin_password: str = "admin@123"
+    # 不再硬编码默认口令。本仓库是公开的，写死的默认口令等于把后台入口贴在墙上，
+    # 而且线上极可能原样沿用。留空时由 database.init_db() 在首次初始化生成一次性随机口令
+    # 并打印到服务日志（docker logs opstoolkit）；要固定口令就设环境变量 ADMIN_PASSWORD。
+    admin_password: str = ""
 
 
 @lru_cache

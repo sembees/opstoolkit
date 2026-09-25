@@ -45,7 +45,7 @@
 
             <el-collapse-item title="我要巡检设备，从头怎么操作？" name="b2">
               <el-steps direction="vertical" :active="5">
-                <el-step title="第 1 步：登录" description="浏览器打开 http://10.128.118.113:8000，输入 admin / admin@123" />
+                <el-step title="第 1 步：登录" description="浏览器打开 http://10.128.118.113:8000，用管理员账号 admin 登录（初始口令见服务日志）" />
                 <el-step title="第 2 步：录入设备" description="点「资产管理」→ 添加设备，填写 IP 地址、选择厂商（H3C/华为/思科）、设备类型（交换机/路由器/防火墙）" />
                 <el-step title="第 3 步：录入密码" description="点「凭据管理」→ 添加密码，填写 SSH 账号和密码（自动加密）。回到「资产管理」把这个凭据关联到设备上" />
                 <el-step title="第 4 步：开始巡检" description="点「CT 巡检」→ 勾选设备 → 选择巡检模板（系统默认或自定义）→ 点「开始巡检」" />
@@ -104,7 +104,7 @@ docker compose up -d --build</pre>
                   <p>检查：1) dnsmasq 是否运行 (systemctl status dnsmasq)；2) 裸机和服务器是否同一网段；3) 网段内是否有其他 DHCP 服务。</p>
                 </el-collapse-item>
                 <el-collapse-item title="“忘记密码”" name="faq4">
-                  <p>默认 admin / admin@123。如果改过忘了，删除 /opt/opstk/backend/data/ops.db 后重启服务会重置为默认账号（但已录入的资产/凭据会丢失）。</p>
+                  <p>管理员口令在首次初始化时随机生成并打印在服务日志里（docker logs opstoolkit）。若忘记了：删除 /opt/opstk/backend/data/ops.db 后重启服务会重新生成并打印新的初始口令（但已录入的资产/凭据会丢失）。</p>
                 </el-collapse-item>
               </el-collapse>
             </el-collapse-item>
@@ -172,7 +172,7 @@ pip install -r requirements.txt
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 
 # 访问: http://localhost:8000
-# 默认账号: admin / admin@123</pre>
+# 管理员: admin（初始口令见服务日志）</pre>
               <p style="font-weight:600;margin-top:12px">前端开发服务</p>
               <pre class="code-block">cd frontend
 npm install
@@ -550,7 +550,7 @@ Boot → 选择 PXE 网卡启动</pre>
 管理 IP:  192.168.100.1/24   (设备管理地址)
 网关:     192.168.100.254
 管理账号: admin
-管理密码: Admin@123
+管理密码: <开局时填写>
 SNMP 社区: public
 SSH 版本: 2</pre>
 
@@ -721,7 +721,7 @@ docker compose up -d --build</pre>
 
             <el-collapse-item title="首次使用流程：从部署到裸机装机" name="d3">
               <ol>
-                <li><b>登录</b> — 浏览器打开 http://服务器IP:8000，账号 admin / admin@123</li>
+                <li><b>登录</b> — 浏览器打开 http://服务器IP:8000，管理员账号 admin（初始口令见服务日志）</li>
                 <li><b>上传 ISO</b> — 将 OS 安装镜像 (.iso) 放到服务器 /srv/opstk/iso/ 目录</li>
                 <li><b>提取内核</b> — PXE 页面 ISO 面板，选择 OS 类型和版本，点「提取」，自动挂载 ISO 并提取 vmlinuz/initrd/squashfs</li>
                 <li><b>创建模板</b> — 填写系统类型、磁盘分区、管理账号、密码、网络等</li>
@@ -869,7 +869,7 @@ const remotePaths = [
 
 const quickActive = ref("q4")
 const dailyOps = [
-  { page: "登录", func: "JWT 认证", how: "admin / admin@123, 首次登录后建议修改密码" },
+  { page: "登录", func: "JWT 认证", how: "admin（初始口令见服务日志），首次登录后请修改密码" },
   { page: "仪表盘", func: "总览", how: "查看资产数/巡检记录/快捷入口" },
   { page: "资产管理", func: "设备清单", how: "添加设备 IP/厂商/类型, 可批大批量导入" },
   { page: "凭据管理", func: "加密密码", how: "录入 SSH/Telnet 密码, Fernet 加密存储, 与资产关联" },

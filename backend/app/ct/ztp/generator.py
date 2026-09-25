@@ -92,11 +92,28 @@ def _vlans_block_cisco(p) -> list:
     return lines
 
 
+def _require_ztp_password(p) -> str:
+    """设备开局配置里的管理员口令**不允许代填默认值**。
+
+    原实现是 `p.admin_password or "ChangeMe@123"`：这个常量就写在**公开**仓库里，
+    等于给"没填口令"的模板发一个全网都知道的设备口令。与 PXE 模块同一口径
+    （那边也是"必填、绝不代填默认口令"）：宁可显式失败，也不发弱口令。
+    调用方（api/ztp.py）会把 ValueError 映射成 4xx + 中文提示。
+    """
+    pw = p.admin_password
+    if not pw:
+        raise ValueError(
+            "ZTP 开局必须填写设备管理员口令：出于安全考虑不代填任何默认口令，"
+            "请在模板的 admin_password 里填写。"
+        )
+    return pw
+
+
 # ============ H3C Comware 7 ============
 def h3c_config(dev, p) -> str:
     ip = dev.mgmt_ip or "10.0.0.1"
     user = p.admin_user or "admin"
-    pw = p.admin_password or "ChangeMe@123"
+    pw = _require_ztp_password(p)
     L = [
         "# H3C Comware 7 开局配置 (OpsToolkit 生成)",
         f"# host={dev.hostname} mgmt={ip}/{p.mgmt_netmask}",
@@ -158,7 +175,7 @@ def h3c_config(dev, p) -> str:
 def huawei_config(dev, p) -> str:
     ip = dev.mgmt_ip or "10.0.0.1"
     user = p.admin_user or "admin"
-    pw = p.admin_password or "ChangeMe@123"
+    pw = _require_ztp_password(p)
     vlanif = p.mgmt_interface.replace("Vlan-interface", "Vlanif")
     L = [
         "# Huawei VRP 开局配置 (OpsToolkit 生成)",
@@ -219,7 +236,7 @@ def huawei_config(dev, p) -> str:
 def cisco_config(dev, p) -> str:
     ip = dev.mgmt_ip or "10.0.0.1"
     user = p.admin_user or "admin"
-    pw = p.admin_password or "ChangeMe@123"
+    pw = _require_ztp_password(p)
     enable = p.enable_secret or pw
     vlanif = p.mgmt_interface.replace("Vlan-interface", "Vlan")
     L = [

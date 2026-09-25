@@ -202,7 +202,12 @@ async def _gen_ztp_files(tid: str, body: dict, db: AsyncSession) -> dict:
         for x in body.get("devices", [])
     ]
     devices = db_devices + inline_devices
-    return generate_all(prof, devices)
+    try:
+        return generate_all(prof, devices)
+    except ValueError as e:
+        # 生成期校验失败（例如模板没填设备管理员口令）以 4xx + 中文提示暴露，而不是 500。
+        # 与 api/pxe.py 的 _gen_pxe_files 同一处理口径。
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @router.post("/templates/{tid}/generate", response_model=ZtpGenerateResult)

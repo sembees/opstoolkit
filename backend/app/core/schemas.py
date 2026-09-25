@@ -115,6 +115,24 @@ class LoginIn(BaseModel):
     password: str
 
 
+class ChangePasswordIn(BaseModel):
+    """修改当前用户口令。要求提供原口令（避免 token 泄露即可直接改口令）。
+
+    新口令给一个最低长度约束：这是本工具唯一的管理入口，太短等于没设。
+    """
+    old_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _check_new_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("新口令至少 8 位")
+        if v == "admin@123":
+            raise ValueError("不允许把口令设回历史默认值")
+        return v
+
+
 class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
