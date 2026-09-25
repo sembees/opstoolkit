@@ -13,6 +13,14 @@ class ORMBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# 装机流程只分两条：ubuntu（casper/autoinstall）与 RHEL 家族（anaconda/kickstart）。
+# 这一组必须与 generator.RHEL_FAMILY 保持一致 —— 有测试锁住，避免两边漂移。
+# 之所以要在入口白名单化：生成器按 `== "ubuntu"` 分岔（其余全走 RHEL 分支），而
+# 介质路径只对 RHEL 家族特判；一个 "RHEL"（大写）或拼错的类型，会一边走 anaconda、
+# 一边拿到 Ubuntu 风格的介质名（initrd 而非 initrd.img），生成的地址必然是 404。
+_OS_TYPE_ALLOWED = ("ubuntu", "rhel", "centos", "rocky", "alma", "almalinux", "redhat")
+
+
 # ---------- IT 网络配置：输入侧校验辅助（NC2） ----------
 _IFNAME_PATTERN = r"^[A-Za-z0-9._:-]{1,32}$"
 _HOSTNAME_PATTERN = r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
@@ -275,7 +283,18 @@ class InspectionTemplateOut(ORMBase):
 # ---------- PXE 装机 ----------
 class PxeProfileIn(BaseModel):
     name: str
-    os_type: str = "ubuntu"       # ubuntu / rhel
+    os_type: str = "ubuntu"       # ubuntu / RHEL 家族（rhel/centos/rocky/alma/almalinux/redhat）
+
+    @field_validator("os_type")
+    @classmethod
+    def _check_os_type(cls, v: str) -> str:
+        """小写归一化 + 白名单（理由见 _OS_TYPE_ALLOWED 上方注释）。"""
+        t = (v or "").strip().lower()
+        if t not in _OS_TYPE_ALLOWED:
+            raise ValueError(
+                f"invalid os_type {v!r}: must be one of " + "/".join(_OS_TYPE_ALLOWED)
+            )
+        return t
     os_version: str = "22.04"
     timezone: str = "Asia/Shanghai"
     locale: str = "en_US.UTF-8"

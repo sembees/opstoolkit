@@ -14,7 +14,13 @@ from app.core.schemas import PxeGenerateIn, PxeGenerateResult, PxeInstallIn, Pxe
 from app.database import get_db
 from app.core.ziputil import files_to_zip_response
 from app.it.pxe import server as pxe_server
-from app.it.pxe.generator import DEFAULT_KERNEL_CONSOLE, PxeConfig, generate_all, pick_iso
+from app.it.pxe.generator import (
+    DEFAULT_KERNEL_CONSOLE,
+    PxeConfig,
+    generate_all,
+    is_rhel_family,
+    pick_iso,
+)
 
 router = APIRouter()
 
@@ -53,11 +59,17 @@ def _safe_decrypt(enc):
 
 
 def _default_media(p):
-    """根据 OS 类型/版本计算默认的 kernel/initrd/squashfs 路径。"""
-    ost = (p.os_type or "ubuntu").strip()
+    """根据 OS 类型/版本计算默认的 kernel/initrd/squashfs 路径。
+
+    注意 RHEL 家族（rhel/centos/rocky/alma/almalinux/redhat）与 rhel 完全一致，
+    媒体文件名都是 `initrd.img`；只有 Ubuntu 用 `initrd`。
+    曾经只特判 `ost == "rhel"`，于是 os_type 填 "rocky" 会走 anaconda 分支却拿到
+    Ubuntu 风格的 `rocky/9/initrd`（ISO 里实际是 images/pxeboot/initrd.img）→ 必然 404。
+    """
+    ost = (p.os_type or "ubuntu").strip().lower()
     ver = (p.os_version or "22.04").strip()
     base = ost + "/" + ver + "/"
-    if ost == "rhel":
+    if is_rhel_family(ost):
         return base + "vmlinuz", base + "initrd.img", ""
     return base + "vmlinuz", base + "initrd", base + "installer.squashfs"
 
@@ -176,14 +188,15 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
     _dk, _di, _ds = _default_media(p)
     _iso = _iso_url_for(p, server_ip, iso_url)
     _repo, _stage2, _extra = (p.mirror or ""), "", []
-    if (p.os_type or "").lower() == "rhel":
+    if is_rhel_family(p.os_type):
         _repo, _stage2, _extra = _detect_rhel_media(p.mirror or "", server_ip)
     if stage2:
         _stage2 = stage2
     if extra_repos:
         _extra = extra_repos
     return PxeConfig(
-        os_type=p.os_type, os_version=p.os_version,
+        # 归一化：库里可能存在历史写入的大小写/空白差异，而分支判断与介质路径都依赖它
+        os_type=(p.os_type or "ubuntu").strip().lower(), os_version=p.os_version,
         hostname="default", timezone=p.timezone, locale=p.locale, keyboard=p.keyboard,
         admin_user=p.admin_user,
         admin_password=_safe_decrypt(p.admin_password_enc),

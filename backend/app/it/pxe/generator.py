@@ -114,6 +114,18 @@ class PxeConfig:
     deploy_mode: str = "standalone"  # standalone(独立DHCP) / proxy(ProxyDHCP) / relay(中继模式)
 
 
+# 装机流程只有两条：ubuntu（casper/autoinstall）与 RHEL 家族（anaconda/kickstart）。
+# RHEL 家族与 rhel 完全同构 —— 同一套 inst.* 参数、同一个 kickstart 生成器，
+# 介质文件名也一样是 initrd.img（不是 Ubuntu 的 initrd）。
+# 校验层 schemas._OS_TYPE_ALLOWED 必须与此一致，有测试锁住两者不漂移。
+RHEL_FAMILY = ("rhel", "centos", "rocky", "alma", "almalinux", "redhat")
+
+
+def is_rhel_family(os_type) -> bool:
+    """是否属于 RHEL 家族（决定走 anaconda 分支与 initrd.img 介质路径）。"""
+    return (os_type or "").strip().lower() in RHEL_FAMILY
+
+
 # Ubuntu ISO 文件名里 OS 类型的关键字（用于自动挑选镜像）
 _ISO_TYPE_KEYS = {
     "ubuntu": ("ubuntu",),
@@ -433,7 +445,7 @@ def _ipxe_menu(c, mac="", answer_url=""):
     # D7 第 3 层：主机名/mac 会落进 iPXE 脚本的注释行，先做字符白名单
     hn = _safe_hostname(c.hostname)
     mac_s = _safe_mac(mac) or "auto"
-    if c.os_type == "ubuntu":
+    if (c.os_type or "").strip().lower() == "ubuntu":
         seed = _safe_line(answer_url, "answer_url") or (http_root + "/")
         if not seed.endswith("/"):
             seed += "/"
@@ -719,7 +731,7 @@ def _validate_lines(c):
 def generate_all(c, installs=None):
     _validate_lines(c)
     files = {}
-    if c.os_type == "ubuntu":
+    if (c.os_type or "").strip().lower() == "ubuntu":
         files["user-data"] = _ubuntu_user_data(c)
         files["meta-data"] = "local-hostname: " + _safe_hostname(c.hostname) + "\n"
     else:
@@ -736,7 +748,7 @@ def generate_all(c, installs=None):
         tag = _mac_tag(mac)
         hostname = _safe_hostname(inst.get("hostname"), "") or _safe_hostname(c.hostname)
         ic = replace(c, hostname=hostname)
-        if c.os_type == "ubuntu":
+        if (c.os_type or "").strip().lower() == "ubuntu":
             seed = c.http_root + "/user-data/" + tag + "/"
             files["user-data/" + tag + "/user-data"] = _ubuntu_user_data(ic)
             files["user-data/" + tag + "/meta-data"] = "local-hostname: " + hostname + "\n"

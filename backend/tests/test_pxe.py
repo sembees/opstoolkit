@@ -527,6 +527,49 @@ class RhelMediaDetectTest(unittest.TestCase):
         self.assertEqual(extra, [])
 
 
+class OsTypeFamilyTest(unittest.TestCase):
+    """os_type 家族：RHEL 系（rhel/centos/rocky/alma/…）与 rhel 必须完全同构。"""
+
+    def test_allowlist_matches_generator_family(self):
+        """校验层白名单与 generator.RHEL_FAMILY 必须一致，否则两边会漂移。"""
+        from app.core.schemas import _OS_TYPE_ALLOWED
+        from app.it.pxe.generator import RHEL_FAMILY
+        self.assertEqual(set(_OS_TYPE_ALLOWED) - {"ubuntu"}, set(RHEL_FAMILY))
+
+    def test_rhel_family_gets_initrd_img_media(self):
+        """填 rocky/centos/alma 时媒体必须与 rhel 一致（initrd.img）。
+
+        旧实现只特判 `== "rhel"`：os_type 填 "rocky" 会走 anaconda 分支却拿到
+        `rocky/9/initrd`（Ubuntu 风格），而 ISO 里是 images/pxeboot/initrd.img → 必然 404。
+        """
+        from app.api import pxe as api_pxe
+
+        for t in ("rhel", "rocky", "centos", "alma", "almalinux", "redhat", "RHEL", " Rocky "):
+            class _P:
+                os_type = t
+                os_version = "9"
+            k, i, s = api_pxe._default_media(_P())
+            self.assertEqual(i, t.strip().lower() + "/9/initrd.img", f"os_type={t!r}")
+            self.assertEqual(s, "", f"os_type={t!r} 不应给出 squashfs")
+        # Ubuntu 不受影响
+        class _U:
+            os_type = "ubuntu"
+            os_version = "22.04"
+        self.assertEqual(api_pxe._default_media(_U()),
+                         ("ubuntu/22.04/vmlinuz", "ubuntu/22.04/initrd",
+                          "ubuntu/22.04/installer.squashfs"))
+
+    def test_os_type_is_normalized_and_validated(self):
+        """大小写/空白归一化；未知类型必须被拒，而不是静默走错分支。"""
+        from pydantic import ValidationError
+
+        from app.core.schemas import PxeProfileIn
+        self.assertEqual(PxeProfileIn(name="x", os_type=" RHEL ").os_type, "rhel")
+        self.assertEqual(PxeProfileIn(name="x", os_type="Rocky").os_type, "rocky")
+        with self.assertRaises(ValidationError):
+            PxeProfileIn(name="x", os_type="windows")
+
+
 class PxeInjectionGuardTest(unittest.TestCase):
     """iPXE / dnsmasq 配置注入防护。
 
