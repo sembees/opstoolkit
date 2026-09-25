@@ -20,7 +20,21 @@ http.interceptors.response.use(
       localStorage.removeItem('opstk_user')
       if (location.pathname !== '/login') location.href = '/login'
     }
-    const msg = err.response?.data?.detail || err.message || '请求失败'
+    // FastAPI 的校验错误 detail 是**列表**（每项带 loc/msg）。直接丢给 ElMessage 会显示成
+    // [object Object]，运维只知道"保存失败"却不知道错在哪个字段 —— 所以这里拍平成一行，
+    // 并保留 loc 里的字段路径（例如 disk_config.partitions.2.fstype: 不在白名单内）。
+    let msg = err.response?.data?.detail ?? err.message ?? '请求失败'
+    if (Array.isArray(msg)) {
+      msg = msg.map((d) => {
+        if (d && d.loc) {
+          const loc = d.loc.filter((x) => x !== 'body').join('.')
+          return (loc ? loc + ': ' : '') + (d.msg || '')
+        }
+        return typeof d === 'string' ? d : JSON.stringify(d)
+      }).join('；')
+    } else if (msg && typeof msg === 'object') {
+      msg = JSON.stringify(msg)
+    }
     if (!err.config?._silent) {
       ElMessage.error(msg)
     }

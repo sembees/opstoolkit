@@ -536,6 +536,68 @@ def iso_names() -> list:
     return sorted(f for f in os.listdir(ISO_DIR) if f.lower().endswith(".iso"))
 
 
+def media_list() -> dict:
+    """列出**已从 ISO 提取好**的引导介质：`WEB_ROOT/<os_type>/<os_version>/`。
+
+    为什么需要这个接口：kernel/initrd 的 URL 是按模板的 os_type + os_version **拼**出来的
+    （见 `api/pxe.py::_default_media`）。版本只要差一个字符 —— 例如模板默认 `9.3`
+    而实际提取出来的是 `rhel/9/` —— 生成的 kernel URL 就是 404，而 iPXE 只会报
+    `Could not boot image`，运维根本看不出是"版本没对上"。
+    所以 UI 的"版本"必须以本接口的返回为准来选，而不是靠人记。
+
+    没有介质目录时返回 supported=True + 空列表（区别于"非 Linux"的 supported=False）。
+    """
+    if not _dhcp.is_linux():
+        return {"supported": False, "media": []}
+    out = []
+    if not os.path.isdir(WEB_ROOT):
+        return {"supported": True, "media": []}
+    try:
+        types = sorted(os.listdir(WEB_ROOT))
+    except OSError:
+        return {"supported": True, "media": []}
+    for ost in types:
+        # pxe-web 根下还住着 profiles/（应答文件）和 repo/（挂出来的安装树）。
+        # 它们不是引导介质；混进来会让前端"版本"下拉多出一堆假选项，
+        # 而选到假选项生成出来的 kernel URL 必然是 404。
+        if ost not in _ALLOWED_OS_TYPES:
+            continue
+        tdir = os.path.join(WEB_ROOT, ost)
+        if not os.path.isdir(tdir):
+            continue
+        try:
+            versions = sorted(os.listdir(tdir))
+        except OSError:
+            continue
+        for osv in versions:
+            vdir = os.path.join(tdir, osv)
+            if not os.path.isdir(vdir):
+                continue
+            try:
+                files = sorted(os.listdir(vdir))
+            except OSError:
+                files = []
+            # RHEL 家族是 initrd.img，只有 Ubuntu 是 initrd（与 _default_media 一致）
+            initrd = ""
+            if "initrd.img" in files:
+                initrd = "initrd.img"
+            elif "initrd" in files:
+                initrd = "initrd"
+            has_k = "vmlinuz" in files
+            # 连一个引导文件都没有的目录不是介质（例如 extract 中途失败的残留）
+            if not (has_k or initrd):
+                continue
+            out.append({
+                "os_type": ost,
+                "os_version": osv,
+                "kernel": "vmlinuz" if has_k else "",
+                "initrd": initrd,
+                "complete": bool(has_k and initrd),
+                "files": files,
+            })
+    return {"supported": True, "media": out}
+
+
 def extract_from_iso(iso_name, os_type="ubuntu", os_version="22.04") -> dict:
     if not _dhcp.is_linux():
         return {"ok": False, "log": ["Linux only"]}

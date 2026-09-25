@@ -14,6 +14,9 @@
       * post_script 的 YAML + POSIX shell 双层语义
       * iPXE 菜单里的分号必须转义（否则 iPXE 会把 kernel 行切成两条命令导致装机失败）
 """
+import hashlib
+import json
+import re
 import shlex
 import unittest
 
@@ -668,6 +671,609 @@ class PxeIsoUrlTest(unittest.TestCase):
         self.assertEqual(api_pxe._iso_size_mb("http://h/pxe/iso/."), 0)
         # 不存在的文件也必须是 0（不能抛）
         self.assertEqual(api_pxe._iso_size_mb("http://h/pxe/iso/nope-xyz.iso"), 0)
+
+
+# ==================== 磁盘与分区（方案 C / docs/PARTITION.md） ====================
+#
+# 这一组测试对应规格 §2/§3/§4/§5/§6。最要紧的两条：
+#   · 回归红线 §5.1：disk_config 缺省/空/只有历史键 "disk" 时**逐字不变**（真机验证过的 4 套）；
+#   · 反向断言：disk_config={"target":{"mode":"auto"}} 的产物里不许出现字面量 sda。
+
+# 改造前（HEAD）的磁盘行，逐字抄在这里当红线基准。任何"顺手重排注释/空格"都会被它抓住。
+LEGACY_KS_LVM = [
+    "clearpart --drives=sda --all --initlabel",
+    "part /boot/efi --fstype=efi --size=512",
+    "part /boot --fstype=ext4 --size=1024",
+    "part pv.01 --size=1 --grow",
+    "volgroup vg0 pv.01",
+    "logvol / --vgname=vg0 --name=root --size=20480 --fstype=ext4",
+    "logvol swap --vgname=vg0 --name=swap --size=8192",
+    "logvol /home --vgname=vg0 --name=home --size=10240 --fstype=ext4",
+    "bootloader --location=mbr --boot-drive=sda",
+]
+LEGACY_KS_DIRECT = [
+    "clearpart --drives=sda --all --initlabel",
+    "part /boot/efi --fstype=efi --size=512",
+    "part / --fstype=ext4 --ondisk=sda --grow",
+    "part swap --size=8192",
+    "bootloader --location=mbr --boot-drive=sda",
+]
+
+# 规格 §2 的示例分区表（LVM 那条按澄清补上 mount）
+CUSTOM_PARTS = [
+    {"mount": "/boot/efi", "size": "512M", "fstype": "fat32"},
+    {"mount": "/boot", "size": "1G", "fstype": "ext4"},
+    {"mount": "swap", "size": "8G"},
+    {"vg": "vg0", "lv": "root", "mount": "/", "size": "rest", "fstype": "ext4"},
+]
+
+
+def _mask_pw(text):
+    """sha512_crypt 每次调用盐都不同；比对"逐字不变"之前只 mask 密文本身。"""
+    return re.sub(r"\$6\$[^\s'\"]+", "$6$MASK", text)
+
+
+def _ks_disk_block(ks):
+    """取出 ks 主体里 user 行之后、selinux 行之前的磁盘行。"""
+    lines = ks.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("user --name=")) + 1
+    end = next(i for i, l in enumerate(lines) if l.startswith("selinux "))
+    return [l for l in lines[start:end] if l.strip()]
+
+
+def _ks_main_body(ks):
+    """%pre 块与 %include 之外的"主体"行（磁盘行必须已经从这里消失）。"""
+    out, in_pre = [], False
+    for line in ks.splitlines():
+        if line.startswith("%pre"):
+            in_pre = True
+            continue
+        if in_pre:
+            if line == "%end":
+                in_pre = False
+            continue
+        if line.startswith("%include"):
+            continue
+        out.append(line)
+    return out
+
+
+class PxeDiskRegressionTest(unittest.TestCase):
+    """回归红线 §5.1：disk_config 缺省/空/只有历史键 "disk" 时逐字不变。"""
+
+    def _rhel(self, **kw):
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        kw.setdefault("mirror", "http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        return _cfg(**kw)
+
+    def test_legacy_ubuntu_storage_line_is_unchanged(self):
+        """三个 layout + 历史键 disk 的 storage 行，必须与改造前逐字一致。"""
+        cases = [
+            ({}, '  storage: {"layout": {"name": "lvm"}}'),
+            ({"disk_scheme": "direct"}, '  storage: {"layout": {"name": "direct"}}'),
+            ({"disk_scheme": "zfs"}, '  storage: {"layout": {"name": "zfs"}}'),
+            # 非法 layout 回退 lvm（既有行为）
+            ({"disk_scheme": "unknown-xyz"}, '  storage: {"layout": {"name": "lvm"}}'),
+            # 历史键 disk → match.path，且 storage 仍是 layout 简写
+            ({"disk_config": {"disk": "vda"}},
+             '  storage: {"layout": {"name": "lvm", "match": {"path": "/dev/vda"}}}'),
+            # 只有历史键 disk 且为空串时，仍然是 match.path=/dev/（既有行为，不"优化"）
+            ({"disk_config": {"disk": ""}},
+             '  storage: {"layout": {"name": "lvm", "match": {"path": "/dev/"}}}'),
+        ]
+        for kw, expected in cases:
+            with self.subTest(kw=kw):
+                ud = generate_all(_cfg(**kw))["user-data"]
+                self.assertIn(expected, ud.splitlines(), ud)
+
+    def test_legacy_rhel_disk_lines_are_unchanged(self):
+        """RHEL 三个 layout（zfs 与 lvm 同构）的磁盘行 + bootloader 行逐行不变。"""
+        lvm = generate_all(self._rhel(disk_scheme="lvm"))["ks.cfg"]
+        self.assertEqual(_ks_disk_block(lvm), LEGACY_KS_LVM)
+        zfs = generate_all(self._rhel(disk_scheme="zfs"))["ks.cfg"]
+        self.assertEqual(_ks_disk_block(zfs), LEGACY_KS_LVM)
+        direct = generate_all(self._rhel(disk_scheme="direct"))["ks.cfg"]
+        self.assertEqual(_ks_disk_block(direct), LEGACY_KS_DIRECT)
+
+    def test_legacy_disk_key_only_is_unchanged(self):
+        """只有历史键 disk（前端 Pxe.vue 一直只发这个形状）时，除盘名外逐字不变。"""
+        ks = generate_all(self._rhel(disk_config={"disk": "nvme0n1"}))["ks.cfg"]
+        expect = [l.replace("sda", "nvme0n1") for l in LEGACY_KS_LVM]
+        self.assertEqual(_ks_disk_block(ks), expect)
+        # 空 dict / 缺省 / {"disk": ""} 的差异也只来自盘名（空串 → --drives= 的形式与旧版一致）
+        for dc in (None, {}):
+            with self.subTest(dc=dc):
+                self.assertEqual(
+                    _ks_disk_block(generate_all(self._rhel(disk_config=dc))["ks.cfg"]),
+                    LEGACY_KS_LVM,
+                )
+
+    def test_legacy_full_files_byte_identical_golden(self):
+        """整份 user-data / ks.cfg 的字节级冻结（sha256，取自改造前的 generator）。
+
+        口令密文是随机盐，先 mask。四个用例覆盖 Ubuntu 的 lvm/direct 与 RHEL 的
+        lvm/direct，其中两个带历史键 disk —— 只要有一个字节动了，这里就会红。
+        """
+        # key 用 json 文本（dict 不可哈希）
+        golden = {
+            '["ubuntu","lvm",null]':
+                "6680721c74a9cefc63bdba945daa035dbf199ad6ca312c2c180ab86a64e8931a",
+            '["ubuntu","direct",{"disk":"vda"}]':
+                "f7d357d3c69052f5f4abab66dc4428b0cc368a849cafb76c8104901022223346",
+            '["rhel","lvm",null]':
+                "76f4c51b696456af2e365750c7b363735c1bd9398bd03cc4c83e8b4fe8a93ac3",
+            '["rhel","direct",{"disk":"nvme0n1"}]':
+                "5a4d0316b6f6e5f34cceeec8151be8c5edad2b4e8cb3a3c0fbf96e149dc938ce",
+        }
+        cases = [
+            ("ubuntu", "lvm", None),
+            ("ubuntu", "direct", {"disk": "vda"}),
+            ("rhel", "lvm", None),
+            ("rhel", "direct", {"disk": "nvme0n1"}),
+        ]
+        for os_type, scheme, dc in cases:
+            key = json.dumps([os_type, scheme, dc], separators=(",", ":"))
+            with self.subTest(case=key):
+                cfg = _cfg(os_type=os_type, disk_scheme=scheme, disk_config=dc,
+                           mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+                files = generate_all(cfg)
+                name = "user-data" if os_type == "ubuntu" else "ks.cfg"
+                got = hashlib.sha256(_mask_pw(files[name]).encode()).hexdigest()
+                self.assertEqual(got, golden[key], name)
+
+
+class PxeDiskSizeTest(unittest.TestCase):
+    """规格 §6：尺寸单位转换（512M/20G/rest/100%FREE → bytes 或 rest）。"""
+
+    def test_converter(self):
+        from app.it.pxe.generator import _human_size_to_bytes, _size_mb
+        self.assertEqual(_human_size_to_bytes("512M"), 536870912)
+        self.assertEqual(_human_size_to_bytes("20G"), 21474836480)
+        self.assertEqual(_human_size_to_bytes("1.5G"), 1610612736)
+        self.assertEqual(_human_size_to_bytes("1T"), 1099511627776)
+        # rest / 100%FREE 语义相同（都是"吃掉剩余空间"），subiquity 只认 "rest"
+        self.assertEqual(_human_size_to_bytes("rest"), "rest")
+        self.assertEqual(_human_size_to_bytes("100%FREE"), "rest")
+        self.assertIsInstance(_human_size_to_bytes("512M"), int)
+        # kickstart 侧要整数 MB
+        self.assertEqual(_size_mb("512M"), 512)
+        self.assertEqual(_size_mb("20G"), 20480)
+        self.assertIsNone(_size_mb("rest"))
+
+    def test_converter_rejects_junk(self):
+        from app.it.pxe.generator import _human_size_to_bytes
+        for bad in ("10GB", "M512", "-1G", "rest2", "512", "", "1 G", "1e3M"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    _human_size_to_bytes(bad)
+
+
+class PxeCustomLayoutTest(unittest.TestCase):
+    """规格 §3.4 / §6：自定义分区在两边逐行生成。"""
+
+    def _rhel(self, dc, **kw):
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        kw.setdefault("mirror", "http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        return _cfg(disk_config=dc, **kw)
+
+    def test_ubuntu_custom_storage_config(self):
+        """EFI+boot+swap+LVM root(rest) 的 storage.config 逐条断言。"""
+        dc = {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+              "partitions": CUSTOM_PARTS}
+        doc = yaml.safe_load(generate_all(_cfg(disk_config=dc))["user-data"])
+        storage = doc["autoinstall"]["storage"]
+        self.assertEqual(storage["version"], 1)
+        self.assertEqual(storage["config"], [
+            {"type": "disk", "id": "disk0", "path": "/dev/sda", "wipe": True},
+            {"type": "partition", "id": "part0", "device": "disk0",
+             "size": 536870912, "flag": "esp"},
+            {"type": "format", "id": "fmt0", "volume": "part0", "fstype": "fat32"},
+            {"type": "partition", "id": "part1", "device": "disk0",
+             "size": 1073741824, "flag": "boot"},
+            {"type": "format", "id": "fmt1", "volume": "part1", "fstype": "ext4"},
+            {"type": "partition", "id": "part2", "device": "disk0", "size": 8589934592},
+            {"type": "format", "id": "fmt2", "volume": "part2", "fstype": "swap"},
+            {"type": "partition", "id": "part3", "device": "disk0", "size": "rest"},
+            {"type": "lvm_volgroup", "id": "vg0", "name": "vg0", "devices": ["part3"]},
+            {"type": "lvm_partition", "id": "lv0", "volgroup": "vg0", "name": "root",
+             "size": "rest"},
+            {"type": "format", "id": "fmt3", "volume": "lv0", "fstype": "ext4"},
+            {"type": "mount", "id": "mnt0", "device": "fmt0", "path": "/boot/efi"},
+            {"type": "mount", "id": "mnt1", "device": "fmt1", "path": "/boot"},
+            {"type": "mount", "id": "mnt2", "device": "fmt3", "path": "/"},
+        ])
+
+    def test_rhel_custom_ks_lines_name_mode(self):
+        """显式盘名：Python 侧直接输出，逐行断言。"""
+        dc = {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+              "partitions": CUSTOM_PARTS}
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        self.assertEqual(_ks_disk_block(ks), [
+            "ignoredisk --only-use=sda",
+            "clearpart --drives=sda --all --initlabel",
+            "part /boot/efi --fstype=efi --ondisk=sda --size=512",
+            "part /boot --fstype=ext4 --ondisk=sda --size=1024",
+            "part swap --fstype=swap --ondisk=sda --size=8192",
+            "part pv.01 --ondisk=sda --grow",
+            "volgroup vg0 pv.01",
+            "logvol / --vgname=vg0 --name=root --size=1 --grow --fstype=ext4",
+            # UEFI 也是 mbr：GRUB2 不接受 --location=partition（VM141/OVMF 真机实证）
+            "bootloader --location=mbr --boot-drive=sda",
+        ])
+
+    def test_rhel_custom_ks_lines_non_efi_is_mbr(self):
+        """没有 ESP 的自定义分区表 ⇒ BIOS ⇒ --location=mbr。"""
+        dc = {"target": {"mode": "name", "name": "vda"}, "layout": "custom",
+              "partitions": [{"mount": "/", "size": "rest", "fstype": "xfs"}]}
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        self.assertEqual(_ks_disk_block(ks), [
+            "ignoredisk --only-use=vda",
+            "clearpart --drives=vda --all --initlabel",
+            "part / --fstype=xfs --ondisk=vda --grow",
+            "bootloader --location=mbr --boot-drive=vda",
+        ])
+
+    def test_ubuntu_custom_rejects_auto_without_disk(self):
+        """subiquity 的 storage.config 没有"自动挑最大盘"的写法，必须显式失败而不是写死 sda。"""
+        dc = {"target": {"mode": "auto"}, "layout": "custom", "partitions": CUSTOM_PARTS}
+        with self.assertRaises(ValueError) as cm:
+            generate_all(_cfg(disk_config=dc))
+        self.assertIn("custom", str(cm.exception))
+
+    def test_efi_and_swap_fstype_are_forced(self):
+        """§2：/boot/efi 强制 fat32，swap 挂载点强制 swap（哪怕调用方写错了）。"""
+        dc = {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+              "partitions": [{"mount": "/boot/efi", "size": "512M", "fstype": "ext4"},
+                             {"mount": "swap", "size": "8G", "fstype": "xfs"},
+                             {"mount": "/", "size": "rest", "fstype": "ext4"}]}
+        doc = yaml.safe_load(generate_all(_cfg(disk_config=dc))["user-data"])
+        cfg = doc["autoinstall"]["storage"]["config"]
+        fstypes = [c["fstype"] for c in cfg if c["type"] == "format"]
+        self.assertIn("fat32", fstypes)
+        self.assertIn("swap", fstypes)
+        self.assertNotIn("ext4", [c["fstype"] for c in cfg
+                                  if c["type"] == "format" and c.get("volume") == "part0"])
+
+
+class PxeAutoDiskTest(unittest.TestCase):
+    """规格 §3.1 + §6：自动选盘，以及"产物里不许再有 sda"的反向断言。"""
+
+    AUTO = {"target": {"mode": "auto"}}
+
+    def _rhel(self, dc, **kw):
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        kw.setdefault("mirror", "http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        return _cfg(disk_config=dc, **kw)
+
+    def test_ubuntu_auto_uses_largest(self):
+        doc = yaml.safe_load(generate_all(_cfg(disk_config=self.AUTO))["user-data"])
+        layout = doc["autoinstall"]["storage"]["layout"]
+        self.assertEqual(layout["name"], "lvm")
+        self.assertEqual(layout["match"], {"size": "largest"})
+
+    def test_ubuntu_auto_min_size_is_accepted(self):
+        """min_size_gb 在 subiquity 侧表达不了下限（文档注明），但不能因此报错。"""
+        doc = yaml.safe_load(
+            generate_all(_cfg(disk_config={"target": {"mode": "auto", "min_size_gb": 20}}))["user-data"]
+        )
+        self.assertEqual(doc["autoinstall"]["storage"]["layout"]["match"], {"size": "largest"})
+
+    def test_rhel_auto_uses_pre_and_include(self):
+        """ks 没有"自动选盘"原语：必须 %pre 现场生成 /tmp/disk.ks 再 %include。"""
+        ks = generate_all(self._rhel(self.AUTO))["ks.cfg"]
+        self.assertIn("%pre --interpreter=/bin/bash --log=/tmp/pre-disk.log", ks)
+        self.assertIn("%include /tmp/disk.ks", ks)
+        self.assertIn("cat > /tmp/disk.ks <<EOF", ks)
+        self.assertIn("ignoredisk --only-use=$target", ks)
+        self.assertIn("clearpart --drives=$target --all --initlabel", ks)
+        self.assertIn("lsblk", ks)
+        # 磁盘行必须**全部**搬进片段：主体里一条都不许留（否则重复声明）
+        for line in _ks_main_body(ks):
+            self.assertFalse(line.startswith(("clearpart", "part ", "volgroup", "logvol",
+                                              "raid ", "bootloader", "ignoredisk")), line)
+        # 片段里不能残留任何写死的盘名
+        self.assertNotIn("sda", ks)
+
+    def test_rhel_auto_custom_bootloader_is_mbr_regardless_of_firmware(self):
+        """bootloader 一律 mbr —— **不能**按固件分支成 partition。
+
+        原规格 §3.2 让 UEFI 走 `--location=partition`，真机（VM141 / OVMF）实测被 anaconda 拒绝：
+            GRUB2 does not support installation to a partition.
+            The installer will now terminate.
+        `partition` 是 syslinux 时代的写法；RHEL 8+ 的 GRUB2 不接受。UEFI 下写 mbr 时
+        anaconda 会自己把 grub2-efi/shim 装进 ESP。这条测试就是钉住这个结论，
+        防止有人"好心"再把固件分支加回来。
+        """
+        dc = dict(self.AUTO, layout="custom", partitions=CUSTOM_PARTS)
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        self.assertNotIn("/sys/firmware/efi", ks)
+        self.assertNotIn("--location=partition", ks)
+        self.assertNotIn("--location=$loc", ks)
+        self.assertIn("bootloader --location=mbr --boot-drive=$target", ks)
+        self.assertIn("cat > /tmp/disk.ks <<EOF", ks)
+        self.assertIn("%include /tmp/disk.ks", ks)
+        for line in _ks_main_body(ks):
+            self.assertFalse(line.startswith(("clearpart", "part ", "volgroup", "logvol",
+                                              "raid ", "bootloader", "ignoredisk")), line)
+        # 注意：CUSTOM_PARTS 里本来就带 /boot/efi，所以上面这份 ks 正是真机挂掉的那一种配置
+        # （不用再拼一个带 ESP 的变体 —— 拼了会因为"两个 /boot/efi"被校验正当拒绝）。
+        # 非自定义分区路径同样是 mbr
+        ks_lvm = generate_all(self._rhel(self.AUTO))["ks.cfg"]
+        self.assertIn("bootloader --location=mbr --boot-drive=$target", ks_lvm)
+
+    def test_auto_ignores_target_name(self):
+        """§2：mode=auto 必须忽略 name（避免"以为自动其实写死"）。"""
+        for os_type in ("ubuntu", "rhel"):
+            with self.subTest(os_type=os_type):
+                files = generate_all(self._rhel(
+                    {"target": {"mode": "auto", "name": "sda"}}, os_type=os_type))
+                blob = "\n".join(files.values())
+                self.assertNotIn("sda", blob)
+
+    def test_reverse_assertion_no_sda_literal(self):
+        """§6 反向断言：disk_config={"target":{"mode":"auto"}} 的产物里 grep -c 'sda' == 0。"""
+        cases = [
+            _cfg(disk_config={"target": {"mode": "auto"}}),
+            self._rhel({"target": {"mode": "auto"}}),
+            # 自定义分区表 + 自动选盘（RHEL 走 %pre；Ubuntu 这条路径显式报错）
+            self._rhel({"target": {"mode": "auto"}, "layout": "custom",
+                        "partitions": CUSTOM_PARTS}),
+        ]
+        for cfg in cases:
+            with self.subTest(os_type=cfg.os_type):
+                blob = "\n".join(generate_all(cfg).values())
+                self.assertEqual(blob.count("sda"), 0, blob)
+
+    def test_rhel_match_mode_resolves_serial_in_pre(self):
+        """match 模式同样由 %pre 现场解析（lsblk 按 SERIAL/MODEL 找盘）。"""
+        ks = generate_all(self._rhel(
+            {"target": {"mode": "match", "serial": "S3Z1NB0K123456"}}))["ks.cfg"]
+        self.assertIn("awk -v s='S3Z1NB0K123456'", ks)
+        self.assertIn("%include /tmp/disk.ks", ks)
+        self.assertNotIn("sda", ks)
+
+    def test_min_size_gb_is_used_in_pre(self):
+        ks = generate_all(self._rhel(
+            {"target": {"mode": "auto", "min_size_gb": 20}}))["ks.cfg"]
+        self.assertIn("$5>=21474836480", ks)
+
+
+class PxeRaidAndDataDiskTest(unittest.TestCase):
+    """规格 §2/§3.3/§3.4：RAID 与"默认不碰"的数据盘。"""
+
+    RAID_DC = {
+        "target": {"mode": "match", "serial": "S3Z1NB0K123456"},
+        "layout": "custom",
+        "partitions": [
+            {"mount": "/boot/efi", "size": "512M"},
+            {"mount": "swap", "size": "4G"},
+            {"size": "10G", "fstype": "xfs"},
+            {"size": "10G", "fstype": "xfs"},
+            {"mount": "/", "size": "rest", "fstype": "ext4"},
+        ],
+        "raid": [{"name": "md0", "level": 1, "devices": ["part.03", "part.04"],
+                  "mount": "/data", "fstype": "xfs"}],
+        "data_disks": [{"name": "sdc", "mount": "/backup", "fstype": "xfs"}],
+    }
+
+    def _rhel(self, dc, **kw):
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        kw.setdefault("mirror", "http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        return _cfg(disk_config=dc, **kw)
+
+    def test_ubuntu_raid_and_data_disk(self):
+        doc = yaml.safe_load(generate_all(_cfg(disk_config=self.RAID_DC))["user-data"])
+        cfg = doc["autoinstall"]["storage"]["config"]
+        raid = [c for c in cfg if c["type"] == "raid"]
+        self.assertEqual(raid, [{"type": "raid", "id": "md0", "name": "md0", "raidlevel": 1,
+                                 "devices": ["part2", "part3"]}])
+        # RAID 成员自身不建文件系统
+        self.assertEqual([c["volume"] for c in cfg if c["type"] == "format"],
+                         ["part0", "part1", "part4", "md0"])
+        # 目标盘走 serial（§3.1 match 模式）；数据盘 sdc 没有 wipe → 完全不碰
+        disk = [c for c in cfg if c["type"] == "disk"]
+        self.assertEqual(disk, [{"type": "disk", "id": "disk0",
+                                 "serial": "S3Z1NB0K123456", "wipe": True}])
+        self.assertNotIn("sdc", json.dumps(cfg))
+
+    def test_rhel_raid_and_data_disk_not_touched(self):
+        ks = generate_all(self._rhel(self.RAID_DC))["ks.cfg"]
+        block = _ks_disk_block(ks)
+        # 该盘在 %pre 片段里 —— 取片段内容做断言
+        fragment = ks.split("cat > /tmp/disk.ks <<EOF\n", 1)[1].split("\nEOF", 1)[0].splitlines()
+        self.assertIn("raid /data --level=1 --device=md0 --fstype=xfs raid.01 raid.02", fragment)
+        self.assertIn("part raid.01 --ondisk=$target --size=10240", fragment)
+        self.assertIn("part raid.02 --ondisk=$target --size=10240", fragment)
+        # 数据盘默认 wipe=false ⇒ 只声明"别碰它"，绝无 clearpart/part
+        self.assertIn("ignoredisk --drives=sdc", fragment)
+        self.assertNotIn("clearpart --drives=$target,sdc", fragment)
+        self.assertNotIn("part /backup", fragment)
+        # 主体里没有磁盘行（磁盘行只在 %pre 片段里）
+        for line in _ks_main_body(ks):
+            self.assertFalse(line.startswith(("clearpart", "part ", "volgroup", "logvol",
+                                              "raid ", "bootloader", "ignoredisk")), line)
+
+    def test_data_disk_wipe_defaults_false(self):
+        """生产红线：data_disks[].wipe 缺省必须是 false。"""
+        from app.it.pxe.generator import _disk_plan
+        plan = _disk_plan(_cfg(disk_config=self.RAID_DC), self.RAID_DC)
+        self.assertEqual(plan["data_disks"], [
+            {"name": "sdc", "mount": "/backup", "fstype": "xfs", "wipe": False}])
+        # target 的 wipe 缺省是 true（装系统的盘本来就要清）
+        self.assertTrue(plan["wipe"])
+
+    def test_data_disk_wipe_true_gets_cleared_and_mounted(self):
+        dc = dict(self.RAID_DC, data_disks=[{"name": "sdc", "mount": "/backup",
+                                             "fstype": "xfs", "wipe": True}])
+        fragment = generate_all(self._rhel(dc))["ks.cfg"].split(
+            "cat > /tmp/disk.ks <<EOF\n", 1)[1].split("\nEOF", 1)[0]
+        self.assertIn("clearpart --drives=$target,sdc --all --initlabel", fragment)
+        self.assertIn("part /backup --fstype=xfs --size=1 --grow --ondisk=sdc", fragment)
+        self.assertNotIn("ignoredisk --drives=sdc", fragment)
+
+    def test_wipe_false_target_does_not_clearpart(self):
+        dc = dict(self.RAID_DC, wipe=False)
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        # 只允许注释里出现 clearpart（说明"未执行"），不能有真的 clearpart 命令
+        for line in ks.splitlines():
+            self.assertFalse(line.startswith("clearpart"), line)
+        self.assertIn("wipe=false", ks)
+
+    def test_raid_devices_accept_three_id_spellings(self):
+        """§3.3 的 part.01、subiquity 的 part0、§2 示例的 sda4 都折算到同一套"第 N 个分区"。"""
+        from app.it.pxe.generator import _disk_plan
+        for spelling in ("part.03", "part2", "sdc3"):
+            with self.subTest(spelling=spelling):
+                dc = dict(self.RAID_DC)
+                dc["raid"] = [{"name": "md0", "level": 1, "devices": [spelling, "part.04"],
+                               "mount": "/data", "fstype": "xfs"}]
+                plan = _disk_plan(_cfg(disk_config=dc), dc)
+                self.assertEqual(plan["raid"][0]["member_indexes"], [2, 3])
+
+
+class PxeDiskValidationTest(unittest.TestCase):
+    """规格 §4/§6：非法输入必须被拒，且 detail 要点明是哪个字段（含第几个分区）。"""
+
+    BAD = [
+        ("非白名单 fstype", {"layout": "custom",
+                             "partitions": [{"mount": "/data", "size": "1G", "fstype": "ntfs"}]},
+         "partitions[0].fstype"),
+        ("rest 不在最后", {"layout": "custom",
+                           "partitions": [{"mount": "/", "size": "rest"},
+                                          {"mount": "/data", "size": "10G"}]},
+         "partitions[0].size"),
+        ("/boot/efi 重复", {"layout": "custom",
+                            "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                                           {"mount": "/boot/efi", "size": "512M"},
+                                           {"mount": "/", "size": "rest"}]},
+         "/boot/efi"),
+        ("有 efi 无 /", {"layout": "custom",
+                         "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                                        {"mount": "/boot", "size": "1G"}]},
+         "/boot/efi"),
+        ("raid 引用未定义分区", {"layout": "custom",
+                                 "partitions": [{"mount": "/", "size": "rest"}],
+                                 "raid": [{"name": "md0", "level": 1, "devices": ["part.09"]}]},
+         "raid[0].devices"),
+        ("raid level 非法", {"layout": "custom",
+                             "partitions": [{"mount": "/", "size": "rest"}],
+                             "raid": [{"name": "md0", "level": 3, "devices": ["part.01"]}]},
+         "raid[0].level"),
+        ("vg 有而 lv 无", {"layout": "custom", "partitions": [{"vg": "vg0", "size": "rest"}]},
+         "vg 与 lv"),
+        ("lv 有而 vg 无", {"layout": "custom", "partitions": [{"lv": "root", "size": "rest"}]},
+         "vg 与 lv"),
+        ("data_disks 与目标盘同名", {"target": {"mode": "name", "name": "sda"},
+                                     "data_disks": [{"name": "sda"}]},
+         "data_disks[0].name"),
+        ("mount 含 ..", {"layout": "custom",
+                         "partitions": [{"mount": "/a/../etc", "size": "1G"}]},
+         "partitions[0].mount"),
+        ("mount 非绝对路径", {"layout": "custom",
+                              "partitions": [{"mount": "data", "size": "1G"}]},
+         "partitions[0].mount"),
+        ("size 非法", {"layout": "custom", "partitions": [{"mount": "/", "size": "10GB"}]},
+         "partitions[0].size"),
+        ("layout 非法", {"layout": "raid10"}, "layout"),
+        ("target.mode 非法", {"target": {"mode": "auto2"}}, "target.mode"),
+        ("vg 名带注入字符", {"layout": "custom",
+                             "partitions": [{"vg": "vg0;rm -rf /", "lv": "root",
+                                             "mount": "/", "size": "rest"}]},
+         "partitions[0].vg"),
+        ("data_disks[].name 为空", {"data_disks": [{"mount": "/data"}]},
+         "data_disks[0].name"),
+    ]
+
+    def test_schema_rejects_with_field_pointing_detail(self):
+        """第 2 层（HTTP 入口）：422 且 detail 点明字段。"""
+        from pydantic import ValidationError
+
+        from app.core.schemas import PxeProfileIn
+        for label, dc, needle in self.BAD:
+            with self.subTest(case=label):
+                with self.assertRaises(ValidationError) as cm:
+                    PxeProfileIn(name="x", disk_config=dc)
+                msgs = " | ".join(e["msg"] for e in cm.exception.errors())
+                locs = " ".join(".".join(str(x) for x in e["loc"]) for e in cm.exception.errors())
+                self.assertIn(needle, msgs + " " + locs, label)
+
+    def test_generator_rejects_same_cases(self):
+        """第 3 层：绕过 HTTP 直接调 generate_all，同样拦得住。"""
+        from app.it.pxe.generator import _disk_plan
+        for label, dc, _needle in self.BAD:
+            with self.subTest(case=label):
+                with self.assertRaises(ValueError):
+                    _disk_plan(_cfg(), dc)
+
+    def test_injection_through_new_fields_is_rejected(self):
+        """新增字段不得绕过注入防护：换行/控制字符在两层都要拦。"""
+        from app.it.pxe.generator import _disk_plan
+        nl = chr(10)
+        for dc in (
+            {"layout": "custom", "partitions": [{"mount": "/data", "size": "1G",
+                                                 "fstype": "ext4" + nl + "part evil"}]},
+            {"layout": "custom", "partitions": [{"mount": "/data" + nl + "x", "size": "1G"}]},
+            {"layout": "custom", "partitions": [{"vg": "vg0" + nl + "x", "lv": "r",
+                                                 "mount": "/", "size": "rest"}]},
+            {"target": {"mode": "match", "serial": "S3Z" + nl + "boom"}},
+        ):
+            with self.subTest(dc=str(dc)):
+                with self.assertRaises(ValueError):
+                    _disk_plan(_cfg(), dc)
+
+    def test_legacy_disk_key_cannot_inject(self):
+        """历史键 disk 会被拼进 ks 的 --drives=/--ondisk=：含换行时必须拦住（两层）。"""
+        from pydantic import ValidationError
+
+        from app.core.schemas import PxeProfileIn
+        nl = chr(10)
+        payload = {"disk": "sda" + nl + "clearpart --drives=sdb --all --initlabel"}
+        with self.assertRaises(ValidationError):
+            PxeProfileIn(name="x", disk_config=payload)
+        for os_type, kw in (("ubuntu", {}), ("rhel", {"mirror": "http://m/rocky9/"})):
+            with self.subTest(os_type=os_type):
+                with self.assertRaises(ValueError):
+                    generate_all(_cfg(os_type=os_type, disk_config=payload, **kw))
+        # 合法盘名照旧（不误伤）
+        ks = generate_all(_cfg(os_type="rhel", mirror="http://m/rocky9/",
+                               disk_config={"disk": "vda"}))["ks.cfg"]
+        self.assertIn("clearpart --drives=vda --all --initlabel", ks)
+
+    def test_schema_and_generator_whitelists_do_not_drift(self):
+        """两层的白名单必须一致（同 _OS_TYPE_ALLOWED 的做法：有测试锁住）。"""
+        from app.core import schemas
+        from app.it.pxe import generator
+        self.assertEqual(set(schemas._DISK_FSTYPE_ALLOWED), set(generator._FSTYPE_ALLOWED))
+        self.assertEqual(set(schemas._DISK_LAYOUT_ALLOWED), set(generator._DISK_LAYOUTS))
+        self.assertEqual(set(schemas._DISK_MODE_ALLOWED), set(generator._DISK_MODES))
+        self.assertEqual(tuple(schemas._RAID_LEVEL_ALLOWED), tuple(generator._RAID_LEVELS))
+        self.assertEqual(schemas._DISK_SIZE_PATTERN, generator._SIZE_RE.pattern)
+        self.assertEqual(schemas._DISK_MOUNT_RE.pattern, generator._MOUNT_RE.pattern)
+
+    def test_schema_normalizes_but_keeps_legacy_shape(self):
+        """disk_config 校验完必须还是普通 dict——它会落进 JSON 列并传给生成器。"""
+        from app.core.schemas import PxeProfileIn
+        self.assertEqual(PxeProfileIn(name="x").disk_config, {})
+        self.assertEqual(PxeProfileIn(name="x", disk_config={}).disk_config, {})
+        legacy = PxeProfileIn(name="x", disk_config={"disk": "sda"}).disk_config
+        self.assertEqual(legacy, {"disk": "sda"})
+        self.assertIsInstance(legacy, dict)
+        # 只回填用户真正给过的键，不把默认值灌进去（否则生成器会误判成结构化配置）
+        dc = PxeProfileIn(name="x", disk_config={"target": {"mode": "auto"}}).disk_config
+        self.assertEqual(dc, {"target": {"mode": "auto"}})
+
+    def test_legacy_shape_still_takes_the_old_path_after_schema(self):
+        """前端只发 {disk: 盘名}：过一遍 schema 之后生成物仍与既有路径逐字一致。"""
+        from app.core.schemas import PxeProfileIn
+        dc = PxeProfileIn(name="x", disk_config={"disk": "sda"}).disk_config
+        ks = generate_all(_cfg(os_type="rhel", os_version="9",
+                               mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/",
+                               disk_config=dc))["ks.cfg"]
+        self.assertEqual(_ks_disk_block(ks), LEGACY_KS_LVM)
 
 
 if __name__ == "__main__":

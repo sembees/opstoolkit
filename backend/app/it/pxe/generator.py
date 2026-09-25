@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 from passlib.hash import sha512_crypt
 import shlex
 from dataclasses import dataclass, replace
@@ -195,6 +196,594 @@ def _hash_pw(plaintext):
     return sha512_crypt.using(rounds=5000).hash(plaintext)
 
 
+# ===== 磁盘与分区（方案 C：任意分区表 + LVM/RAID + 自动选盘）=====
+# 规格见 docs/PARTITION.md。三条设计原则，改动前务必先读：
+#   1) **向后兼容是红线**：disk_config 缺省/空，或只含历史键 "disk"（前端 Pxe.vue 一直
+#      只发 {disk: <盘名>}）时，_disk_plan() 返回 None → 走【既有路径】，生成的每个字节
+#      与改造前逐字一致；
+#   2) 新字段一律先过白名单，风格与既有 _safe_line/_safe_ident 一致 —— 这些值会被拼进
+#      kickstart 与 autoinstall YAML，一个换行/空格就能改掉语法结构；
+#   3) 盘名不许写死：auto 模式在 RHEL 侧用 %pre+%include 现场挑盘（ks 没有"自动选盘"
+#      原语），Ubuntu 侧用 subiquity 的 match: {size: largest}。
+_SIZE_RE = re.compile(r"^[0-9]+(\.[0-9]+)?[MGTP]$|^rest$|^100%FREE$")
+_FSTYPE_ALLOWED = ("ext4", "xfs", "btrfs", "fat32", "vfat", "swap")
+_MOUNT_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
+_RAID_LEVELS = (0, 1, 5, 6, 10)
+_DISK_MODES = ("auto", "name", "match")
+_DISK_LAYOUTS = ("lvm", "direct", "zfs", "custom")
+_SIZE_UNIT = {"M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4, "P": 1024 ** 5}
+# "吃掉剩余空间"的两种写法：kickstart 用 --grow，subiquity 用字符串 "rest"
+_GROW_SIZES = ("rest", "100%FREE")
+# /boot/efi 与 /boot 在 GPT 上的分区标志（规格 §3.4）
+_PART_FLAGS = {"/boot/efi": "esp", "/boot": "boot"}
+# kickstart 里 raid 成员/物理卷的标识形式；与 §3.3 的 part.NN 同属一套"第 N 个分区"语义
+_RAID_DEV_RE = re.compile(r"^(?:(?:sd|vd|hd|xvd)[a-z]|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)p?([0-9]+)$")
+
+
+def _as_bool(v, field, default=False) -> bool:
+    """把 JSON 里的布尔（含前端可能发来的 "true"/1）收敛成 bool；其余一律拒绝。"""
+    if v is None or v == "":
+        return default
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return bool(v)
+    s = _safe_line(v, field).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(field + " 必须是布尔值，收到 " + repr(v))
+
+
+def _safe_size(v, field="disk_config 分区尺寸") -> str:
+    """尺寸白名单：512M / 20G / 1.5T / rest / 100%FREE（规格 §2）。"""
+    s = _safe_line(v, field).strip()
+    if not _SIZE_RE.fullmatch(s):
+        raise ValueError(
+            field + " 非法 " + repr(s) + "：只允许 <数字>[MGTP] / rest / 100%FREE"
+        )
+    return s
+
+
+def _safe_mount(v, field="disk_config 挂载点") -> str:
+    """挂载点白名单：空串（只建分区不挂载）、swap，或以 / 开头的绝对路径且不含 ..。"""
+    s = _safe_line(v, field).strip()
+    if s in ("", "swap"):
+        return s
+    if not _MOUNT_RE.fullmatch(s) or ".." in s:
+        raise ValueError(
+            field + " 非法 " + repr(s) + "：必须是 / 开头的绝对路径（只允许 [A-Za-z0-9._/-]），且不含 .."
+        )
+    return s
+
+
+def _safe_fstype(v, field="disk_config 文件系统", mount="") -> str:
+    """fstype 白名单；/boot/efi 强制 fat32（UEFI 必需）、swap 挂载点强制 swap。"""
+    s = _safe_line(v, field).strip().lower()
+    if mount == "/boot/efi":
+        return "fat32"
+    if mount == "swap":
+        return "swap"
+    if s == "":
+        return ""
+    if s not in _FSTYPE_ALLOWED:
+        raise ValueError(
+            field + " 非法 " + repr(s) + "：白名单 " + "|".join(_FSTYPE_ALLOWED)
+        )
+    return s
+
+
+def _human_size_to_bytes(v):
+    """人读尺寸 -> subiquity 需要的字节数（规格 §3.4）。rest/100%FREE 原样返回 "rest"。
+
+    用 Decimal 而不是 float：1.5G 必须是 1610612736，不能因为二进制浮点误差差几个字节。
+    """
+    s = _safe_size(v)
+    if s in _GROW_SIZES:
+        return "rest"
+    return int(Decimal(s[:-1]) * _SIZE_UNIT[s[-1]])
+
+
+def _size_mb(v):
+    """人读尺寸 -> kickstart 的整数 MB；grow 类返回 None（调用方改用 --grow）。"""
+    s = _safe_size(v)
+    if s in _GROW_SIZES:
+        return None
+    return max(1, int(Decimal(s[:-1]) * _SIZE_UNIT[s[-1]]) // (1024 * 1024))
+
+
+def _disk_config_active(dc) -> bool:
+    """disk_config 是否启用了【结构化】磁盘配置。
+
+    只有历史键 "disk"（或空/缺省）→ False，走既有路径（规格 §5.1 回归红线）。
+    """
+    if not dc:
+        return False
+    return any(k != "disk" for k in dc)
+
+
+def _raid_member_index(tok, partitions, field):
+    """把 raid.devices 里的分区标识解析成 partitions 的下标。
+
+    规格 §3.3 的规范写法是 `part.01`（1 起）；同时接受 `part0`（subiquity 侧 0 起）
+    与 §2 示例里的 `sda4`（盘名+分区号，按 1 起算）—— 三种写法都映射到同一套
+    "第 N 个分区" 语义，生成物里永远只出现我们自己算出的标识。
+    """
+    s = _safe_ident(tok, field)
+    avail = ", ".join(p["id_ks"] for p in partitions) or "(partitions 为空)"
+    idx = None
+    m = re.fullmatch(r"part\.0*([0-9]+)", s)
+    if m:
+        idx = int(m.group(1)) - 1
+    else:
+        m = re.fullmatch(r"part([0-9]+)", s)
+        if m:
+            idx = int(m.group(1))
+        else:
+            m = _RAID_DEV_RE.fullmatch(s)
+            if m:
+                idx = int(m.group(1)) - 1
+    if idx is None or not 0 <= idx < len(partitions):
+        raise ValueError(
+            field + " 引用了未定义的分区标识 " + repr(tok) + "；本次可用标识：" + avail
+        )
+    return idx
+
+
+def _disk_plan(c, dc):
+    """把 disk_config 归一化为内部结构；返回 None 表示走【既有路径】（逐字不变）。
+
+    这里做第 3 层校验（第 2 层在 schemas.PxeDiskConfigIn）：白名单、rest 只能一次且在最后、
+    /boot/efi 与 / 的搭配、vg/lv 必须成对、raid 引用必须已定义、data_disks 不得与目标盘同名。
+    """
+    if not _disk_config_active(dc):
+        return None
+
+    tgt = dc.get("target") or {}
+    if not isinstance(tgt, dict):
+        raise ValueError("disk_config.target 必须是对象")
+
+    legacy_disk = _safe_ident(dc.get("disk", ""), "disk_config.disk")
+    mode_raw = tgt.get("mode")
+    if mode_raw in (None, ""):
+        # 没显式给 mode：有盘名（历史键 disk 或 target.name）就按 name，否则自动选盘
+        mode = "name" if (legacy_disk or tgt.get("name")) else "auto"
+    else:
+        mode = _safe_ident(mode_raw, "disk_config.target.mode").strip().lower()
+        if mode not in _DISK_MODES:
+            raise ValueError(
+                "disk_config.target.mode 非法 " + repr(mode_raw) + "：只允许 auto|name|match"
+            )
+
+    name = _safe_ident(tgt.get("name", "") or legacy_disk, "disk_config.target.name")
+    serial = _safe_ident(tgt.get("serial", ""), "disk_config.target.serial", extra=" ")
+    model = _safe_ident(tgt.get("model", ""), "disk_config.target.model", extra=" ")
+    if mode == "auto":
+        # 规格 §2 明文要求：auto 必须忽略 name，避免"以为自动其实写死"
+        name = ""
+    if mode == "name" and not name:
+        raise ValueError("disk_config.target.mode=name 但没有给出 disk_config.target.name")
+    if mode == "match" and not (serial or model):
+        raise ValueError("disk_config.target.mode=match 但没有给出 serial 或 model")
+
+    min_gb = 0
+    mg = tgt.get("min_size_gb")
+    if mg not in (None, ""):
+        if isinstance(mg, bool):
+            raise ValueError("disk_config.target.min_size_gb 必须是整数")
+        s = _safe_line(mg, "disk_config.target.min_size_gb").strip()
+        try:
+            min_gb = int(s)
+        except ValueError:
+            raise ValueError("disk_config.target.min_size_gb 必须是整数：" + repr(mg))
+        if min_gb < 0:
+            raise ValueError("disk_config.target.min_size_gb 不能为负数")
+
+    wipe = _as_bool(dc.get("wipe"), "disk_config.wipe", default=True)
+
+    raw_layout = dc.get("layout")
+    if raw_layout in (None, ""):
+        # 结构化配置没给 layout 时沿用既有 disk_scheme（未知值同既有行为回退 lvm）
+        layout = c.disk_scheme if c.disk_scheme in _DISK_LAYOUTS else "lvm"
+    else:
+        layout = _safe_ident(raw_layout, "disk_config.layout").strip().lower()
+        if layout not in _DISK_LAYOUTS:
+            raise ValueError(
+                "disk_config.layout 非法 " + repr(raw_layout) + "：只允许 lvm|direct|zfs|custom"
+            )
+
+    parts_in = dc.get("partitions") or []
+    if not isinstance(parts_in, list):
+        raise ValueError("disk_config.partitions 必须是数组")
+    partitions = []
+    for i, p in enumerate(parts_in):
+        if not isinstance(p, dict):
+            raise ValueError("disk_config.partitions[%d] 必须是对象" % i)
+        f = "disk_config.partitions[%d]" % i
+        mount = _safe_mount(p.get("mount", ""), f + ".mount")
+        size = _safe_size(p.get("size", ""), f + ".size")
+        vg = _safe_ident(p.get("vg", ""), f + ".vg")
+        lv = _safe_ident(p.get("lv", ""), f + ".lv")
+        if bool(vg) != bool(lv):
+            raise ValueError(f + "：vg 与 lv 必须同时给出（只给其一是非法配置）")
+        fstype = _safe_fstype(p.get("fstype", ""), f + ".fstype", mount)
+        if not size and not (vg and lv):
+            raise ValueError(f + ".size 不能为空")
+        if size in _GROW_SIZES and i != len(parts_in) - 1:
+            raise ValueError(f + ".size=" + size + " 只能出现在最后一个分区")
+        partitions.append({
+            "index": i, "mount": mount, "size": size, "fstype": fstype,
+            "vg": vg, "lv": lv,
+            "id_ks": "part.%02d" % (i + 1),      # ks 侧标识，1 起（规格 §3.3）
+            "id_sub": "part%d" % i,              # subiquity 侧标识，0 起（规格 §3.4）
+        })
+    grow = [p for p in partitions if p["size"] in _GROW_SIZES]
+    if len(grow) > 1:
+        raise ValueError("disk_config.partitions：rest/100%FREE 只能出现一次")
+    # 一个 VG 里最多一个 LV 能吃"剩余空间"：再多就无从分配（主体已保证 rest 在最后，
+    # 这里再按 VG 收一次口，并指出到底是第几个 partition）。
+    for vg in _plan_volgroups({"partitions": partitions}):
+        grow_vg = [p for p in partitions if p["vg"] == vg and p["size"] in _GROW_SIZES]
+        if len(grow_vg) > 1:
+            raise ValueError(
+                "disk_config.partitions[%d].size：同一 VG(%s) 内只能有一个 lv 用 rest/100%%FREE"
+                % (grow_vg[1]["index"], vg)
+            )
+    mounts = [p["mount"] for p in partitions]
+    if mounts.count("/boot/efi") > 1:
+        raise ValueError("disk_config.partitions：/boot/efi 只能有 0 或 1 个")
+    if "/boot/efi" in mounts and "/" not in mounts:
+        raise ValueError("disk_config.partitions：有 /boot/efi 却没有 / 分区（系统起不来）")
+
+    raid_out = []
+    for j, r in enumerate(dc.get("raid") or []):
+        if not isinstance(r, dict):
+            raise ValueError("disk_config.raid[%d] 必须是对象" % j)
+        f = "disk_config.raid[%d]" % j
+        lvl_raw = r.get("level", 1)
+        if isinstance(lvl_raw, bool):
+            raise ValueError(f + ".level 必须是整数 0/1/5/6/10")
+        s = _safe_line(lvl_raw, f + ".level").strip()
+        try:
+            level = int(s)
+        except ValueError:
+            raise ValueError(f + ".level 必须是整数 0/1/5/6/10：" + repr(lvl_raw))
+        if level not in _RAID_LEVELS:
+            raise ValueError(f + ".level 非法 " + repr(lvl_raw) + "：只允许 0/1/5/6/10")
+        devs = r.get("devices") or []
+        if not isinstance(devs, list) or not devs:
+            raise ValueError(f + ".devices 不能为空")
+        idxs = [_raid_member_index(d, partitions, f + ".devices") for d in devs]
+        rmount = _safe_mount(r.get("mount", ""), f + ".mount")
+        raid_out.append({
+            "name": _safe_ident(r.get("name", ""), f + ".name") or ("md%d" % j),
+            "level": level,
+            "member_indexes": idxs,
+            "mount": rmount,
+            "fstype": _safe_fstype(r.get("fstype", ""), f + ".fstype", rmount),
+            "id_sub": "md%d" % j,
+        })
+
+    data = []
+    for k, d in enumerate(dc.get("data_disks") or []):
+        if not isinstance(d, dict):
+            raise ValueError("disk_config.data_disks[%d] 必须是对象" % k)
+        f = "disk_config.data_disks[%d]" % k
+        dname = _safe_ident(d.get("name", ""), f + ".name")
+        if not dname:
+            raise ValueError(f + ".name 不能为空")
+        if name and dname == name:
+            raise ValueError(f + ".name 不能与目标盘同名 " + repr(dname))
+        dmount = _safe_mount(d.get("mount", ""), f + ".mount")
+        data.append({
+            "name": dname, "mount": dmount,
+            "fstype": _safe_fstype(d.get("fstype", ""), f + ".fstype", dmount),
+            # 生产红线：数据盘默认不碰，必须显式 wipe=true 才动（规格 §2）
+            "wipe": _as_bool(d.get("wipe"), f + ".wipe", default=False),
+        })
+
+    return {
+        "mode": mode, "name": name, "serial": serial, "model": model,
+        "min_size_gb": min_gb, "wipe": wipe, "layout": layout,
+        "partitions": partitions, "raid": raid_out, "data_disks": data,
+    }
+
+
+def _plan_volgroups(plan) -> list:
+    """按首次出现顺序返回 partitions 里用到的 vg 名（一个 vg 只输出一次 volgroup）。"""
+    out = []
+    for p in plan["partitions"]:
+        if p["vg"] and p["vg"] not in out:
+            out.append(p["vg"])
+    return out
+
+
+# ---- Ubuntu / subiquity ----
+
+def _ubuntu_disk_match(plan):
+    """目标盘在 subiquity 里的表达（规格 §3.1）。"""
+    if plan["mode"] == "name":
+        return {"path": "/dev/" + plan["name"]}
+    if plan["mode"] == "match":
+        m = {}
+        if plan["serial"]:
+            m["serial"] = plan["serial"]
+        if plan["model"]:
+            m["model"] = plan["model"]
+        return m
+    return {}
+
+
+def _ubuntu_storage_obj(plan):
+    """layout != custom → 官方 layout 简写；custom → storage.version/config（规格 §3.4）。"""
+    if plan["layout"] != "custom":
+        cfg = {"name": plan["layout"]}
+        if plan["mode"] == "auto":
+            # subiquity 支持 size: largest；min_size_gb 在下限语义上表达不出来，
+            # 所以只认"最大盘"，下限由 RHEL 侧（%pre 里 lsblk）与文档保证。
+            cfg["match"] = {"size": "largest"}
+        else:
+            cfg["match"] = _ubuntu_disk_match(plan)
+        return {"layout": cfg}
+
+    if plan["mode"] == "auto":
+        raise ValueError(
+            "Ubuntu 的 layout=custom 需要明确的目标盘：subiquity 的自定义 storage.config "
+            "没有\"自动挑最大盘\"的写法，请把 disk_config.target.mode 设为 name 或 match"
+        )
+
+    cfg = []
+    disk = {"type": "disk", "id": "disk0"}
+    disk.update(_ubuntu_disk_match(plan))
+    disk["wipe"] = bool(plan["wipe"])
+    cfg.append(disk)
+
+    raid_members = set()
+    for r in plan["raid"]:
+        raid_members.update(r["member_indexes"])
+
+    fmt_n = [0]
+    mnt_n = [0]
+    lv_n = [0]
+    mounts = []
+
+    def _format(volume, fstype):
+        fid = "fmt%d" % fmt_n[0]
+        fmt_n[0] += 1
+        cfg.append({"type": "format", "id": fid, "volume": volume, "fstype": fstype})
+        return fid
+
+    for p in plan["partitions"]:
+        e = {"type": "partition", "id": p["id_sub"], "device": "disk0",
+             "size": _human_size_to_bytes(p["size"])}
+        if _PART_FLAGS.get(p["mount"]):
+            e["flag"] = _PART_FLAGS[p["mount"]]
+        cfg.append(e)
+        if p["vg"] or p["index"] in raid_members:
+            # LVM PV / RAID 成员本身不建文件系统
+            continue
+        fstype = p["fstype"] or ("ext4" if p["mount"] and p["mount"] != "swap" else "")
+        if not fstype:
+            continue                      # 只建分区不挂载
+        fid = _format(p["id_sub"], fstype)
+        if p["mount"] and p["mount"] != "swap":
+            mounts.append((fid, p["mount"]))
+
+    for r in plan["raid"]:
+        cfg.append({"type": "raid", "id": r["id_sub"], "name": r["name"],
+                    "raidlevel": r["level"],
+                    "devices": [plan["partitions"][i]["id_sub"] for i in r["member_indexes"]]})
+        fid = _format(r["id_sub"], r["fstype"] or "ext4")
+        if r["mount"]:
+            mounts.append((fid, r["mount"]))
+
+    for vg in _plan_volgroups(plan):
+        cfg.append({"type": "lvm_volgroup", "id": vg, "name": vg,
+                    "devices": [p["id_sub"] for p in plan["partitions"] if p["vg"] == vg]})
+    for p in plan["partitions"]:
+        if not p["vg"]:
+            continue
+        lv_id = "lv%d" % lv_n[0]
+        lv_n[0] += 1
+        cfg.append({"type": "lvm_partition", "id": lv_id, "volgroup": p["vg"],
+                    "name": p["lv"], "size": _human_size_to_bytes(p["size"])})
+        fid = _format(lv_id, p["fstype"] or ("swap" if p["mount"] == "swap" else "ext4"))
+        if p["mount"] and p["mount"] != "swap":
+            mounts.append((fid, p["mount"]))
+
+    for dev, path in mounts:
+        cfg.append({"type": "mount", "id": "mnt%d" % mnt_n[0], "device": dev, "path": path})
+        mnt_n[0] += 1
+    return {"version": 1, "config": cfg}
+
+
+# ---- RHEL / anaconda ----
+
+def _rhel_layout_lines(scheme, disk) -> str:
+    """既有 layout 简写的 ks 行（lvm/direct/zfs）。
+
+    disk_config 缺省时**必须逐字命中**本函数返回值（回归红线 §5.1）——所以这里只做
+    参数替换，标点/顺序/空格一个都不许动。zfs 沿用既有行为（与 lvm 同构）。
+    """
+    if scheme == "direct":
+        return (
+            "clearpart --drives=" + disk + " --all --initlabel\n"
+            "part /boot/efi --fstype=efi --size=512\n"
+            "part / --fstype=ext4 --ondisk=" + disk + " --grow\n"
+            "part swap --size=8192\n"
+        )
+    return (
+        "clearpart --drives=" + disk + " --all --initlabel\n"
+        "part /boot/efi --fstype=efi --size=512\n"
+        "part /boot --fstype=ext4 --size=1024\n"
+        "part pv.01 --size=1 --grow\n"
+        "volgroup vg0 pv.01\n"
+        "logvol / --vgname=vg0 --name=root --size=20480 --fstype=ext4\n"
+        "logvol swap --vgname=vg0 --name=swap --size=8192\n"
+        "logvol /home --vgname=vg0 --name=home --size=10240 --fstype=ext4\n"
+    )
+
+
+def _rhel_boot_location(plan) -> str:
+    """显式盘名（Python 侧直接输出）时的 bootloader 位置。
+
+    **实测结论：一律 mbr，UEFI 也是 mbr。**
+    真机（VM141，OVMF + 自带 /boot/efi 的自定义分区表）跑出来的是：
+        An error occurred during reading the kickstart file:
+        GRUB2 does not support installation to a partition.
+        The installer will now terminate.
+    `--location=partition` 是 syslinux/extlinux 时代的写法；RHEL 8+ 的 GRUB2 不接受。
+    UEFI 下写 `mbr` 时，anaconda 自己会把 grub2-efi/shim 装进 ESP —— 不需要（也不能）按固件分支。
+    """
+    return "mbr"
+
+
+def _rhel_ondisk(size) -> str:
+    """ks 里分区的尺寸参数：--size=<MB>，rest/100%FREE → --grow。"""
+    mb = _size_mb(size)
+    return "--grow" if mb is None else "--size=" + str(mb)
+
+
+def _rhel_lv_ondisk(size) -> str:
+    """ks 里 LVM 逻辑卷的尺寸参数：rest → `--size=1 --grow`（anaconda 要求给个基数）。"""
+    mb = _size_mb(size)
+    return "--size=1 --grow" if mb is None else "--size=" + str(mb)
+
+
+def _rhel_custom_lines(plan, disk) -> list:
+    """layout=custom 的 ks 行（规格 §3.3/§3.4）：part/volgroup/logvol/raid 全部 --ondisk=<disk>。"""
+    lines = ["ignoredisk --only-use=" + disk]
+    drives = [disk] + [d["name"] for d in plan["data_disks"] if d["wipe"]]
+    if plan["wipe"]:
+        lines.append("clearpart --drives=" + ",".join(drives) + " --all --initlabel")
+    else:
+        lines.append("# disk_config.wipe=false：不执行 clearpart（沿用磁盘上已有分区表）")
+    for d in plan["data_disks"]:
+        if not d["wipe"]:
+            # 生产红线：没确认就不动数据盘
+            lines.append("ignoredisk --drives=" + d["name"])
+
+    # PV / RAID 成员标识都按"出现顺序"从 01 起编号，与 §3.3 的 part.NN 同属一套
+    # "第 N 个分区"语义（输入侧的 part.NN 是位置编号，输出侧只出现我们自己算的标识）。
+    pv_of = {}
+    raid_members = {}
+    for p in plan["partitions"]:
+        if p["vg"]:
+            pv_of[p["index"]] = "pv.%02d" % (len(pv_of) + 1)
+    for r in plan["raid"]:
+        for i in sorted(r["member_indexes"]):
+            if i not in raid_members:
+                raid_members[i] = "raid.%02d" % (len(raid_members) + 1)
+
+    for p in plan["partitions"]:
+        ident = pv_of.get(p["index"]) or raid_members.get(p["index"]) or p["id_ks"]
+        is_pv = p["index"] in pv_of
+        is_raid = p["index"] in raid_members
+        opts = ["--ondisk=" + disk, _rhel_ondisk(p["size"])]
+        if not is_pv and not is_raid:
+            # PV / RAID 成员自身不建文件系统：fstype 属于 logvol / raid 那一行
+            if p["mount"] == "/boot/efi":
+                opts.insert(0, "--fstype=efi")
+            elif p["fstype"]:
+                opts.insert(0, "--fstype=" + p["fstype"])
+        lines.append("part " + (ident if (is_pv or is_raid) else (p["mount"] or ident))
+                     + " " + " ".join(opts))
+
+    for r in plan["raid"]:
+        devs = " ".join(raid_members[i] for i in r["member_indexes"])
+        tail = (" --fstype=" + r["fstype"]) if r["fstype"] else ""
+        lines.append("raid %s --level=%d --device=%s%s %s"
+                     % (r["mount"] or r["name"], r["level"], r["name"], tail, devs))
+
+    for vg in _plan_volgroups(plan):
+        pvs = " ".join(pv_of[p["index"]] for p in plan["partitions"] if p["vg"] == vg)
+        lines.append("volgroup " + vg + " " + pvs)
+    for p in plan["partitions"]:
+        if not p["vg"]:
+            continue
+        opts = ["--vgname=" + p["vg"], "--name=" + p["lv"], _rhel_lv_ondisk(p["size"])]
+        if p["fstype"]:
+            opts.append("--fstype=" + p["fstype"])
+        lines.append("logvol " + (p["mount"] or p["lv"]) + " " + " ".join(opts))
+
+    for d in plan["data_disks"]:
+        if d["wipe"] and d["mount"]:
+            lines.append("part %s --fstype=%s --size=1 --grow --ondisk=%s"
+                         % (d["mount"], d["fstype"] or "ext4", d["name"]))
+    return lines
+
+
+def _rhel_pick_target_lines(plan) -> list:
+    """%pre 里现场挑目标盘（规格 §3.1）：ks 没有"自动选盘"原语，只能脚本化。"""
+    lines = ["# 选出目标盘：非可移动、非光驱、容量 >= min_size_gb、按名排序取第一块"]
+    if plan["mode"] == "match":
+        key = plan["serial"] or plan["model"]
+        lines.append(
+            "target=$(lsblk -dn -o NAME,SERIAL,MODEL | awk -v s='%s' "
+            "'$2==s || $3==s {print $1}' | sort | head -1)" % key
+        )
+    elif plan["min_size_gb"]:
+        # 只有给了下限才用 -b（字节）比较，否则与规格原文的 lsblk -dn 保持一致
+        lines.append(
+            "target=$(lsblk -bdn -o NAME,TYPE,RM,TRAN,SIZE | awk "
+            "'$2==\"disk\" && $3==\"0\" && $4!=\"usb\" && $5>=%d {print $1}' | sort | head -1)"
+            % (int(plan["min_size_gb"]) * 1024 ** 3)
+        )
+    else:
+        lines.append(
+            "target=$(lsblk -dn -o NAME,TYPE,RM,TRAN,SIZE | awk "
+            "'$2==\"disk\" && $3==\"0\" && $4!=\"usb\" {print $1}' | sort | head -1)"
+        )
+    lines.append("if [ -z \"$target\" ]; then "
+                 "echo 'PXE: 未找到可用的目标磁盘，装机中止' >&2; exit 1; fi")
+    return lines
+
+
+def _rhel_disk_block(plan, use_pre) -> list:
+    """结构化配置下的磁盘行。
+
+    use_pre=True（auto/match）：clearpart/part/volgroup/logvol/bootloader **全部**
+    移进 %pre 生成的 /tmp/disk.ks，主体里不再出现（规格 §3.1，否则重复声明）。
+    """
+    custom = plan["layout"] == "custom"
+    disk = "$target" if use_pre else plan["name"]
+
+    if custom:
+        body = _rhel_custom_lines(plan, disk)
+        if use_pre:
+            boot = "bootloader --location=mbr --boot-drive=$target"
+        else:
+            boot = ("bootloader --location=" + _rhel_boot_location(plan)
+                    + " --boot-drive=" + disk)
+    else:
+        body = _rhel_layout_lines(plan["layout"], disk).rstrip("\n").split("\n")
+        boot = "bootloader --location=mbr --boot-drive=" + disk
+
+    if not use_pre:
+        # 显式盘名：Python 侧直接输出，但要钉死只用这块盘（否则 part /boot/efi 那类
+        # 不带 --ondisk 的行可能落到别的盘上）；custom 的行里已经有这行了。
+        if custom:
+            return body + [boot]
+        return ["ignoredisk --only-use=" + disk] + body + [boot]
+
+    if not custom:
+        # 规格 §3.1 的片段首行：先钉死目标盘，再 clearpart
+        body = ["ignoredisk --only-use=$target"] + body
+    lines = ["%pre --interpreter=/bin/bash --log=/tmp/pre-disk.log"]
+    lines += _rhel_pick_target_lines(plan)
+    # 注意：**不要**按固件分支成 `--location=partition` —— RHEL 8+ 的 GRUB2 不支持，
+    # anaconda 会直接："GRUB2 does not support installation to a partition." 然后终止装机
+    # （VM141 / OVMF 真机实证）。UEFI 也用 mbr，anaconda 自会把 EFI 引导装进 ESP。
+    lines.append("cat > /tmp/disk.ks <<EOF")
+    lines += body
+    lines.append(boot)
+    lines.append("EOF")
+    lines.append("%end")
+    lines.append("%include /tmp/disk.ks")
+    return lines
+
+
 # ===== Ubuntu autoinstall =====
 def _ubuntu_user_data(c):
     dc = c.disk_config or {}
@@ -205,15 +794,24 @@ def _ubuntu_user_data(c):
     # 主防线是 schemas.py 的用户名白名单，这里是 defense-in-depth 兜底。
     hn = _safe_hostname(c.hostname)
     admin = _safe_username(c.admin_user)
-    disk = dc.get("disk")
-
-    scheme = c.disk_scheme
-    if scheme not in ("lvm", "direct", "zfs"):
-        scheme = "lvm"
-    cfg = {"name": scheme}
-    if disk is not None:
-        cfg["match"] = {"path": "/dev/" + disk}
-    storage = json.dumps({"layout": cfg})
+    plan = _disk_plan(c, dc)
+    if plan is None:
+        # ── 既有路径：disk_config 为空/只有历史键 "disk" ──
+        # 回归红线 §5.1：输出必须与改造前逐字一致。历史键 disk 唯一的变化是先过一遍
+        # _safe_line（只拦控制字符/换行）—— 它会被拼进 ks 的 --drives=<disk>，
+        # 从这里注入一整行是既有漏洞；合法盘名（sda/nvme0n1/…）恒等，不受影响。
+        disk = dc.get("disk")
+        if disk is not None:
+            disk = _safe_line(disk, "disk_config.disk")
+        scheme = c.disk_scheme
+        if scheme not in ("lvm", "direct", "zfs"):
+            scheme = "lvm"
+        cfg = {"name": scheme}
+        if disk is not None:
+            cfg["match"] = {"path": "/dev/" + disk}
+        storage = json.dumps({"layout": cfg})
+    else:
+        storage = json.dumps(_ubuntu_storage_obj(plan))
 
     if c.net_mode == "static":
         iface = nc.get("interface", "ens33")
@@ -282,24 +880,20 @@ def _rhel_ks(c):
     # %post 以 root 执行，admin_user 必须收敛到安全字符集
     admin = _safe_username(c.admin_user)
 
-    if c.disk_scheme == "direct":
-        parts = (
-            "clearpart --drives=" + disk + " --all --initlabel\n"
-            "part /boot/efi --fstype=efi --size=512\n"
-            "part / --fstype=ext4 --ondisk=" + disk + " --grow\n"
-            "part swap --size=8192\n"
-        )
+    plan = _disk_plan(c, dc)
+    if plan is None:
+        # ── 既有路径（回归红线 §5.1）：逐字保持不变 ──
+        # 历史键 disk 先过 _safe_line：它直接进 --drives=/--ondisk=/--boot-drive=，
+        # 含换行即可往 ks 里注入一整行。合法盘名恒等，故输出不变。
+        disk = _safe_line(disk, "disk_config.disk") if disk is not None else "sda"
+        parts = _rhel_layout_lines(c.disk_scheme, disk)
+        disk_lines = [parts.rstrip(), "bootloader --location=mbr --boot-drive=" + disk]
     else:
-        parts = (
-            "clearpart --drives=" + disk + " --all --initlabel\n"
-            "part /boot/efi --fstype=efi --size=512\n"
-            "part /boot --fstype=ext4 --size=1024\n"
-            "part pv.01 --size=1 --grow\n"
-            "volgroup vg0 pv.01\n"
-            "logvol / --vgname=vg0 --name=root --size=20480 --fstype=ext4\n"
-            "logvol swap --vgname=vg0 --name=swap --size=8192\n"
-            "logvol /home --vgname=vg0 --name=home --size=10240 --fstype=ext4\n"
-        )
+        # 结构化配置：auto/match 走 %pre + %include（ks 没有自动选盘原语）；
+        # 显式 name 直接由 Python 侧输出。两条路径下 clearpart/part/volgroup/logvol/
+        # bootloader 只会出现一次，绝不重复声明。
+        use_pre = plan["mode"] in ("auto", "match")
+        disk_lines = _rhel_disk_block(plan, use_pre)
 
     if c.net_mode == "static":
         net = ("network --bootproto=static --device=" + nc.get("interface", "ens33") +
@@ -346,8 +940,7 @@ def _rhel_ks(c):
         # 于是管理员账号永远无法用预期口令登录。rootpw 那行本来就有 --iscrypted。
         "user --name=" + admin + " --iscrypted --password=" + _hash_pw(c.admin_password or c.root_password) + " --gecos=" + chr(34) + admin + chr(34) + " --groups=wheel",
         "",
-        parts.rstrip(),
-        "bootloader --location=mbr --boot-drive=" + disk,
+        *disk_lines,
         "selinux --permissive",
         "firewall --enabled --ssh",
         "services --enabled=sshd,NetworkManager",

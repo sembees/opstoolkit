@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_serializer
+from pydantic import BaseModel, ConfigDict, field_validator, model_serializer, model_validator
 
 
 class ORMBase(BaseModel):
@@ -280,6 +280,292 @@ class InspectionTemplateOut(ORMBase):
     created_at: Optional[datetime] = None
 
 
+# ---------- PXE 装机：磁盘与分区（方案 C）输入校验 ----------
+# 规格 docs/PARTITION.md §2/§4。这里是第 2 层（HTTP 入口），生成器里还有第 3 层兜底。
+# 白名单与 generator 的同名常量必须一致 —— 有测试锁住不漂移（同 _OS_TYPE_ALLOWED 的做法）。
+_DISK_SIZE_PATTERN = r"^[0-9]+(\.[0-9]+)?[MGTP]$|^rest$|^100%FREE$"
+_DISK_SIZE_RE = re.compile(_DISK_SIZE_PATTERN)
+_DISK_MOUNT_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
+_DISK_FSTYPE_ALLOWED = ("ext4", "xfs", "btrfs", "fat32", "vfat", "swap")
+_DISK_LAYOUT_ALLOWED = ("lvm", "direct", "zfs", "custom")
+_DISK_MODE_ALLOWED = ("auto", "name", "match")
+_RAID_LEVEL_ALLOWED = (0, 1, 5, 6, 10)
+_GROW_SIZE_TOKENS = ("rest", "100%FREE")
+# raid.devices 里的分区标识：规范写法 part.01（1 起），另兼容 part0（0 起）与 sda4 这类
+# "盘名+分区号"写法（规格 §2 示例），三种都按"第 N 个分区"折算。
+_RAID_PART_DOT_RE = re.compile(r"^part\.0*([0-9]+)$")
+_RAID_PART_RE = re.compile(r"^part([0-9]+)$")
+_RAID_DEV_RE = re.compile(
+    r"^(?:(?:sd|vd|hd|xvd)[a-z]|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)p?([0-9]+)$"
+)
+
+
+def _disk_size_check(v, field: str) -> str:
+    s = str(v if v is not None else "").strip()
+    if not _DISK_SIZE_RE.fullmatch(s):
+        raise ValueError(
+            field + " 非法 " + repr(v) + "：只允许 <数字>[MGTP] / rest / 100%FREE"
+        )
+    return s
+
+
+def _disk_mount_check(v, field: str) -> str:
+    s = str(v if v is not None else "").strip()
+    if s in ("", "swap"):
+        return s
+    if not _DISK_MOUNT_RE.fullmatch(s) or ".." in s:
+        raise ValueError(
+            field + " 非法 " + repr(v)
+            + "：必须是 / 开头的绝对路径（只允许 [A-Za-z0-9._/-]），且不含 .."
+        )
+    return s
+
+
+def _disk_fstype_check(v, field: str, mount: str) -> str:
+    s = str(v if v is not None else "").strip().lower()
+    if mount == "/boot/efi":
+        return "fat32"          # UEFI 必需，强制
+    if mount == "swap":
+        return "swap"
+    if s == "":
+        return ""
+    if s not in _DISK_FSTYPE_ALLOWED:
+        raise ValueError(
+            field + " 非法 " + repr(v) + "：白名单 " + "|".join(_DISK_FSTYPE_ALLOWED)
+        )
+    return s
+
+
+def _disk_ident_check(v, field: str, allow_space: bool = False) -> str:
+    """vg/lv/name/serial 之类会被拼进 ks 与 YAML 的值：只允许 [A-Za-z0-9._-]。
+
+    serial/model 允许空格（"INTEL SSDSC2KB480G8" 这种型号名本来就带空格），
+    盘名与 vg/lv 不允许 —— 它们会变成设备路径与 ks 标识。
+    """
+    s = str(v if v is not None else "")
+    ok = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    if allow_space:
+        ok += " "
+    bad = sorted({ch for ch in s if ch not in ok})
+    if bad:
+        raise ValueError(field + " 含不允许的字符 " + repr("".join(bad)))
+    return s.strip()
+
+
+def _raid_member_index(tok, count: int, field: str):
+    """把 raid.devices 的标识折算成 partitions 下标；折算不出来就报错（含字段位置）。"""
+    s = _disk_ident_check(tok, field)
+    m = _RAID_PART_DOT_RE.fullmatch(s)
+    if m:
+        idx = int(m.group(1)) - 1
+    else:
+        m = _RAID_PART_RE.fullmatch(s)
+        if m:
+            idx = int(m.group(1))
+        else:
+            m = _RAID_DEV_RE.fullmatch(s)
+            idx = int(m.group(1)) - 1 if m else None
+    if idx is None or not 0 <= idx < count:
+        raise ValueError(
+            field + " 引用了未定义的分区标识 " + repr(tok)
+            + "：本次共 " + str(count) + " 个分区，标识形如 part.01"
+        )
+    return idx
+
+
+class PxePartitionIn(BaseModel):
+    """一个分区（或一个 LVM 逻辑卷）的输入。"""
+    model_config = ConfigDict(extra="allow")
+    mount: str = ""       # "" = 只建分区不挂载；swap = 交换分区
+    size: str = ""        # 512M / 20G / rest / 100%FREE
+    fstype: str = ""
+    vg: str = ""          # vg/lv 同时给出 = 该分区进 LVM
+    lv: str = ""
+
+
+class PxeRaidIn(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    name: str = ""
+    level: int = 1
+    devices: list[str] = []
+    mount: str = ""
+    fstype: str = ""
+
+
+class PxeDataDiskIn(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    name: str
+    mount: str = ""
+    fstype: str = ""
+    wipe: bool = False    # 生产红线：数据盘默认不碰
+
+
+class PxeDiskTargetIn(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    mode: str = ""        # auto(默认) / name / match
+    name: str = ""
+    serial: str = ""
+    model: str = ""
+    min_size_gb: int = 0
+
+
+class PxeDiskConfigIn(BaseModel):
+    """disk_config 的结构化模型（规格 §2）。
+
+    extra="allow"：历史键 "disk"（前端一直只发 {disk: <盘名>}）以及将来新增的键都要能存下来，
+    不能因为模型不认识就被静默丢掉。
+    """
+    model_config = ConfigDict(extra="allow")
+
+    disk: str = ""
+    target: PxeDiskTargetIn = PxeDiskTargetIn()
+    wipe: bool = True
+    layout: str = ""
+    partitions: list[PxePartitionIn] = []
+    raid: list[PxeRaidIn] = []
+    data_disks: list[PxeDataDiskIn] = []
+
+
+    @field_validator("disk")
+    @classmethod
+    def _check_legacy_disk(cls, v: str) -> str:
+        """历史键 disk 会被拼进 ks 的 --drives=/--ondisk=/--boot-drive=：含换行即注入一整行。"""
+        s = str(v if v is not None else "")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in s):
+            raise ValueError("disk 不允许包含换行或控制字符（会造成 kickstart 配置注入）")
+        return s
+
+
+    @field_validator("layout")
+    @classmethod
+    def _check_layout(cls, v: str) -> str:
+        s = (v or "").strip().lower()
+        if s and s not in _DISK_LAYOUT_ALLOWED:
+            raise ValueError(
+                f"layout 非法 {v!r}：只允许 " + "|".join(_DISK_LAYOUT_ALLOWED)
+            )
+        return s
+
+
+    @field_validator("target")
+    @classmethod
+    def _check_target(cls, v):
+        """只校验、不回写：回写会把 name/serial/model 标成"已设置"，
+        于是 model_dump(exclude_unset=True) 会往库里塞一堆空串（生成器其实不看它们）。"""
+        mode = (v.mode or "").strip().lower()
+        if mode and mode not in _DISK_MODE_ALLOWED:
+            raise ValueError(
+                f"target.mode 非法 {v.mode!r}：只允许 " + "|".join(_DISK_MODE_ALLOWED)
+            )
+        for f in ("name", "serial", "model"):
+            _disk_ident_check(getattr(v, f), "target." + f, allow_space=(f != "name"))
+        if v.min_size_gb is None or isinstance(v.min_size_gb, bool) or v.min_size_gb < 0:
+            raise ValueError("target.min_size_gb 必须是非负整数")
+        return v
+
+
+    @field_validator("partitions", mode="before")
+    @classmethod
+    def _check_partitions(cls, v):
+        """逐条白名单，报错必须点名第几个分区（前端要直接显示给运维）。"""
+        if not isinstance(v, list):
+            raise ValueError("partitions 必须是数组")
+        for i, p in enumerate(v):
+            if not isinstance(p, dict):
+                raise ValueError(f"partitions[{i}] 必须是对象")
+            mount = _disk_mount_check(p.get("mount", ""), f"partitions[{i}].mount")
+            size = _disk_size_check(p.get("size", ""), f"partitions[{i}].size")
+            vg = _disk_ident_check(p.get("vg", ""), f"partitions[{i}].vg")
+            lv = _disk_ident_check(p.get("lv", ""), f"partitions[{i}].lv")
+            if bool(vg) != bool(lv):
+                raise ValueError(
+                    f"partitions[{i}]：vg 与 lv 必须同时给出（只给其一是非法配置）"
+                )
+            if not size and not (vg and lv):
+                raise ValueError(f"partitions[{i}].size 不能为空")
+            _disk_fstype_check(p.get("fstype", ""), f"partitions[{i}].fstype", mount)
+        return v
+
+
+    @field_validator("raid", mode="before")
+    @classmethod
+    def _check_raid(cls, v):
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("raid 必须是数组")
+        for i, r in enumerate(v):
+            if not isinstance(r, dict):
+                raise ValueError(f"raid[{i}] 必须是对象")
+            lvl = r.get("level", 1)
+            if isinstance(lvl, bool) or not isinstance(lvl, int):
+                raise ValueError(f"raid[{i}].level 必须是整数 0/1/5/6/10")
+            if lvl not in _RAID_LEVEL_ALLOWED:
+                raise ValueError(
+                    f"raid[{i}].level 非法 {lvl!r}：只允许 0/1/5/6/10"
+                )
+            mount = _disk_mount_check(r.get("mount", ""), f"raid[{i}].mount")
+            _disk_fstype_check(r.get("fstype", ""), f"raid[{i}].fstype", mount)
+            _disk_ident_check(r.get("name", ""), f"raid[{i}].name")
+            if not r.get("devices"):
+                raise ValueError(f"raid[{i}].devices 不能为空")
+        return v
+
+
+    @field_validator("data_disks", mode="before")
+    @classmethod
+    def _check_data_disks(cls, v):
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("data_disks 必须是数组")
+        for i, d in enumerate(v):
+            if not isinstance(d, dict):
+                raise ValueError(f"data_disks[{i}] 必须是对象")
+            if not _disk_ident_check(d.get("name", ""), f"data_disks[{i}].name"):
+                raise ValueError(f"data_disks[{i}].name 不能为空")
+            mount = _disk_mount_check(d.get("mount", ""), f"data_disks[{i}].mount")
+            _disk_fstype_check(d.get("fstype", ""), f"data_disks[{i}].fstype", mount)
+        return v
+
+
+    @model_validator(mode="after")
+    def _check_combinations(self):
+        """跨字段规则（规格 §4）：rest 位置、efi/root、VG 内 rest 唯一、raid 引用、数据盘重名。"""
+        parts = self.partitions
+        mounts = [p.mount for p in parts]
+        for i, p in enumerate(parts):
+            if p.size in _GROW_SIZE_TOKENS and i != len(parts) - 1:
+                raise ValueError(
+                    f"partitions[{i}].size={p.size} 只能出现在最后一个分区"
+                )
+        if len([m for m in mounts if m == "/boot/efi"]) > 1:
+            raise ValueError("partitions：/boot/efi 只能有 0 或 1 个")
+        if "/boot/efi" in mounts and "/" not in mounts:
+            raise ValueError("partitions：有 /boot/efi 却没有 / 分区（系统起不来）")
+        vgs: dict = {}
+        for i, p in enumerate(parts):
+            if p.vg:
+                vgs.setdefault(p.vg, []).append(i)
+        for vg, idxs in vgs.items():
+            grows = [i for i in idxs if parts[i].size in _GROW_SIZE_TOKENS]
+            if len(grows) > 1:
+                raise ValueError(
+                    f"partitions[{grows[1]}].size：同一 VG({vg}) 内只能有一个 lv 用 rest/100%FREE"
+                )
+        for i, r in enumerate(self.raid):
+            for d in r.devices:
+                _raid_member_index(d, len(parts), f"raid[{i}].devices")
+        tname = (self.target.name or "").strip()
+        if tname:
+            for i, d in enumerate(self.data_disks):
+                if (d.name or "").strip() == tname:
+                    raise ValueError(
+                        f"data_disks[{i}].name 不能与目标盘同名 {tname!r}"
+                    )
+        return self
+
+
 # ---------- PXE 装机 ----------
 class PxeProfileIn(BaseModel):
     name: str
@@ -310,7 +596,20 @@ class PxeProfileIn(BaseModel):
     root_password: Optional[str] = None
     ssh_keys: list[str] = []
     disk_scheme: str = "lvm"      # lvm / direct
+    # 结构化磁盘配置（方案 C）。校验走 PxeDiskConfigIn（第 2 层），但**返回普通 dict**：
+    # 它会原样存进 models.PxeProfile.disk_config(JSON) 并传给 generator.PxeConfig，
+    # 换成 pydantic 对象会让 SQLAlchemy 落库与生成器 dc.get() 全部失效。
+    # 只回填"用户真正给过的键"（exclude_unset）：只有历史键 {disk: x} 时，生成器仍然
+    # 走既有路径 —— 这是回归红线 §5.1 的前提。
     disk_config: dict[str, Any] = {}
+
+
+    @field_validator("disk_config")
+    @classmethod
+    def _check_disk_config(cls, v):
+        if not v:
+            return {}
+        return PxeDiskConfigIn.model_validate(v).model_dump(exclude_unset=True)
     net_mode: str = "dhcp"        # dhcp / static
     net_config: dict[str, Any] = {}
     mirror: str = ""

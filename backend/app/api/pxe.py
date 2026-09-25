@@ -464,6 +464,16 @@ async def list_isos(_user=Depends(get_current_user)):
     return pxe_server.list_isos()
 
 
+@router.get("/media/list")
+async def list_media(_user=Depends(get_current_user)):
+    """GET /api/it/pxe/media/list — 列出已提取好的引导介质（os_type/os_version）。
+
+    UI 的"版本"下拉用它取值：介质路径是按 os_type+os_version 拼的，版本填错
+    生成出来的 kernel URL 必然是 404（iPXE 只报 Could not boot image）。
+    """
+    return pxe_server.media_list()
+
+
 @router.post("/iso/{iso_name}/extract")
 async def extract_iso(iso_name: str, body: dict = None, _user=Depends(get_current_user)):
     """从 ISO 提取 PXE 引导文件 (vmlinuz/initrd/squashfs)。"""

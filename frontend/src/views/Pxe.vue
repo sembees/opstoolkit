@@ -136,7 +136,18 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8"><el-form-item label="版本"><el-input v-model="form.os_version" /></el-form-item></el-col>
+          <el-col :span="8">
+            <el-form-item label="版本">
+              <el-select v-model="form.os_version" filterable allow-create default-first-option
+                         style="width: 100%" placeholder="选一个已提取介质的版本">
+                <el-option v-for="v in versionOptions" :key="v.value" :label="v.label" :value="v.value" />
+              </el-select>
+              <div v-if="form.os_version && !mediaReady"
+                   style="margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--el-color-warning)">
+                没有 {{ form.os_type }}/{{ form.os_version }}/ 的引导介质，装机时 iPXE 会报 "Could not boot image"
+              </div>
+            </el-form-item>
+          </el-col>
         </el-row>
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="时区"><el-input v-model="form.timezone" /></el-form-item></el-col>
@@ -147,7 +158,16 @@
         <el-divider content-position="left">账号</el-divider>
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="管理员"><el-input v-model="form.admin_user" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="管理员密码"><el-input v-model="form.admin_password" type="password" show-password placeholder="留空不修改" /></el-form-item></el-col>
+          <el-col :span="8">
+            <el-form-item label="管理员密码">
+              <el-input v-model="form.admin_password" type="password" show-password
+                        :placeholder="editingId ? '留空不修改' : '新建必填'" />
+              <div v-if="!editingId && !form.admin_password"
+                   style="margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--el-color-warning)">
+                新建时必填：这是裸机 root 口令，后端不允许留空，也不会代填任何默认值
+              </div>
+            </el-form-item>
+          </el-col>
           <el-col :span="8"><el-form-item label="root密码" v-if="form.os_type === 'rhel'"><el-input v-model="form.root_password" type="password" show-password /></el-form-item></el-col>
         </el-row>
         <el-form-item label="SSH公钥">
@@ -159,12 +179,169 @@
           <el-col :span="8">
             <el-form-item label="分区方案">
               <el-select v-model="form.disk_scheme">
-                <el-option label="LVM (推荐)" value="lvm" /><el-option label="直通分区" value="direct" />
+                <el-option label="LVM (推荐)" value="lvm" />
+                <el-option label="直通分区" value="direct" />
+                <el-option label="ZFS" value="zfs" />
+                <el-option label="自定义分区表" value="custom" />
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8"><el-form-item label="磁盘名"><el-input v-model="form.disk_name" placeholder="sda / nvme0n1" /></el-form-item></el-col>
+          <el-col :span="8">
+            <el-form-item label="目标磁盘">
+              <el-select v-model="form.disk_target_mode">
+                <el-option label="自动（选最大的盘）" value="auto" />
+                <el-option label="按盘名指定" value="name" />
+                <el-option label="按序列号/型号匹配" value="match" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8" v-if="form.disk_target_mode === 'name'">
+            <el-form-item label="磁盘名">
+              <el-input v-model="form.disk_name" placeholder="sda / vda / nvme0n1" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8" v-if="form.disk_target_mode === 'match'">
+            <el-form-item label="序列号">
+              <el-input v-model="form.disk_serial" placeholder="序列号最稳，如 S3Z1NB0K123456" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8" v-if="form.disk_target_mode === 'match'">
+            <el-form-item label="型号（序列号为空时用）">
+              <el-input v-model="form.disk_model" placeholder="如 INTEL SSDSC2KB480G8" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="忽略小于(GB)">
+              <el-input-number v-model="form.disk_min_size_gb" :min="0" :max="100000"
+                               controls-position="right" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="清空目标盘">
+              <el-switch v-model="form.disk_wipe" />
+              <span style="margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary)">
+                只清空"目标磁盘"，其它盘一律不碰
+              </span>
+            </el-form-item>
+          </el-col>
         </el-row>
+        <el-alert v-if="form.disk_target_mode === 'auto'" type="info" :closable="false"
+                  style="margin-bottom: 12px"
+                  title="自动选盘：换硬件不用改模板" />
+        <div v-if="form.disk_target_mode === 'auto'" style="margin: -8px 0 12px; font-size: 12px; line-height: 1.6; color: var(--el-text-color-secondary)">
+          Ubuntu 交给 subiquity 的"最大盘"规则；RHEL 系（anaconda 没有现成的自动选盘原语）
+          在 <code>%pre</code> 里按"非可移动、非光驱、容量达标、按盘名排序取第一块"选出目标盘，
+          再 <code>%include</code> 生成出来的分区片段。盘名不再写死，NVMe(<code>nvme0n1</code>) /
+          virtio-blk(<code>vda</code>) 都能装。
+        </div>
+
+        <template v-if="form.disk_scheme === 'custom'">
+          <el-divider content-position="left">自定义分区表</el-divider>
+          <div style="margin-bottom: 6px; font-size: 12px; color: var(--el-text-color-secondary)">
+            大小为 <code>512M</code>/<code>20G</code>/<code>rest</code>（<code>rest</code> 只能放在最后一行，表示用掉剩余空间）；
+            挂载点留空 = 只建分区不挂载；填了 VG 与 LV 才是 LVM 逻辑卷。
+          </div>
+          <el-table :data="form.partitions" size="small" style="margin-bottom: 6px">
+            <el-table-column label="挂载点" width="140">
+              <template #default="{ row }"><el-input v-model="row.mount" placeholder="/ 或 swap" /></template>
+            </el-table-column>
+            <el-table-column label="大小" width="120">
+              <template #default="{ row }"><el-input v-model="row.size" placeholder="20G / rest" /></template>
+            </el-table-column>
+            <el-table-column label="文件系统" width="130">
+              <template #default="{ row }">
+                <el-select v-model="row.fstype" clearable placeholder="自动">
+                  <el-option v-for="f in FSTYPES" :key="f" :label="f" :value="f" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="卷组 VG" width="120">
+              <template #default="{ row }"><el-input v-model="row.vg" placeholder="留空=普通分区" /></template>
+            </el-table-column>
+            <el-table-column label="逻辑卷 LV" width="120">
+              <template #default="{ row }"><el-input v-model="row.lv" placeholder="留空=普通分区" /></template>
+            </el-table-column>
+            <el-table-column label="操作" width="70">
+              <template #default="scope">
+                <el-button link type="danger" @click="form.partitions.splice(scope.$index, 1)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div style="margin-bottom: 12px">
+            <el-button size="small" @click="addPartition()">+ 加一个分区</el-button>
+            <el-button size="small" @click="applyPreset()">套用：EFI + boot + swap + LVM(/)</el-button>
+          </div>
+
+          <el-divider content-position="left">其它数据盘（默认<b>不格式化</b>）</el-divider>
+          <div style="margin-bottom: 6px; font-size: 12px; color: var(--el-text-color-secondary)">
+            这里只做"挂载"。要格式化别的盘必须显式打开下面的开关 —— 生产上默认不动数据盘。
+          </div>
+          <el-table :data="form.data_disks" size="small" style="margin-bottom: 6px">
+            <el-table-column label="盘名" width="140">
+              <template #default="{ row }"><el-input v-model="row.name" placeholder="sdb" /></template>
+            </el-table-column>
+            <el-table-column label="挂载点" width="160">
+              <template #default="{ row }"><el-input v-model="row.mount" placeholder="/data" /></template>
+            </el-table-column>
+            <el-table-column label="文件系统" width="130">
+              <template #default="{ row }">
+                <el-select v-model="row.fstype" clearable>
+                  <el-option v-for="f in FSTYPES" :key="f" :label="f" :value="f" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="格式化" width="100">
+              <template #default="{ row }"><el-switch v-model="row.wipe" /></template>
+            </el-table-column>
+            <el-table-column label="操作" width="70">
+              <template #default="scope">
+                <el-button link type="danger" @click="form.data_disks.splice(scope.$index, 1)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div style="margin-bottom: 12px">
+            <el-button size="small" @click="form.data_disks.push({ name: '', mount: '', fstype: 'xfs', wipe: false })">
+              + 加一块数据盘
+            </el-button>
+          </div>
+
+          <el-divider content-position="left">RAID（可选）</el-divider>
+          <el-table :data="form.raid" size="small" style="margin-bottom: 6px">
+            <el-table-column label="名称" width="110">
+              <template #default="{ row }"><el-input v-model="row.name" placeholder="md0" /></template>
+            </el-table-column>
+            <el-table-column label="级别" width="110">
+              <template #default="{ row }">
+                <el-select v-model="row.level">
+                  <el-option v-for="l in [0, 1, 5, 6, 10]" :key="l" :label="'RAID' + l" :value="l" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="成员（上面第几个分区，逗号分隔）">
+              <template #default="{ row }"><el-input v-model="row.devices" placeholder="例如 3,4" /></template>
+            </el-table-column>
+            <el-table-column label="挂载点" width="130">
+              <template #default="{ row }"><el-input v-model="row.mount" placeholder="/data" /></template>
+            </el-table-column>
+            <el-table-column label="文件系统" width="120">
+              <template #default="{ row }">
+                <el-select v-model="row.fstype" clearable>
+                  <el-option v-for="f in FSTYPES" :key="f" :label="f" :value="f" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="70">
+              <template #default="scope">
+                <el-button link type="danger" @click="form.raid.splice(scope.$index, 1)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div style="margin-bottom: 12px">
+            <el-button size="small" @click="form.raid.push({ name: 'md0', level: 1, devices: '', mount: '', fstype: 'xfs' })">
+              + 加一个 RAID
+            </el-button>
+          </div>
+        </template>
 
         <el-divider content-position="left">网络</el-divider>
         <el-row :gutter="12">
@@ -278,6 +455,9 @@ const deployDialog = ref(false)
 const deployRow = ref(null)
 const deployForm = reactive({ deploy_mode: "proxy", server_ip: "" })
 const isoList = ref({ supported: false, isos: [] })
+// 已提取的引导介质（os_type/os_version）。"版本"必须从这里选：生成出来的 kernel URL
+// 是按 os_type+os_version 拼的，版本对不上就是 404（iPXE 只会报 Could not boot image）。
+const mediaList = ref({ supported: true, media: [] })
 const extractLog = ref([])
 
 async function loadServerStatus() {
@@ -317,6 +497,9 @@ async function confirmDeploy() {
 async function loadIsos() {
   try { isoList.value = await http.get("/it/pxe/iso/list") } catch(e) {}
 }
+async function loadMedia() {
+  try { mediaList.value = await http.get("/it/pxe/media/list") } catch(e) {}
+}
 async function extractIso(row) {
   row._extracting = true
   extractLog.value = []
@@ -338,12 +521,18 @@ async function delIso(name) {
 }
 
 
+const FSTYPES = ["ext4", "xfs", "btrfs", "vfat", "fat32", "swap"]
 const emptyForm = () => ({
   name: "", os_type: "rhel", os_version: "9.3",
   timezone: "Asia/Shanghai", locale: "en_US.UTF-8", keyboard: "us",
   admin_user: "ops", admin_password: "", root_password: "",
   ssh_keys_text: "",
-  disk_scheme: "lvm", disk_name: "sda",
+  // 磁盘：默认"自动选盘"。以前这里默认 sda，等于把盘名写死 ——
+  // 在 NVMe(nvme0n1) / virtio-blk(vda) 的机器上必然装不上。
+  disk_scheme: "lvm",
+  disk_target_mode: "auto", disk_name: "sda", disk_serial: "", disk_model: "",
+  disk_min_size_gb: 0, disk_wipe: true,
+  partitions: [], data_disks: [], raid: [],
   net_mode: "dhcp", net_interface: "ens33", net_ip: "", net_netmask: "255.255.255.0", net_gateway: "", net_dns: "",
   mirror: "", extra_packages_text: "", post_script: "",
 })
@@ -355,9 +544,85 @@ function osLabel(row) { return row.os_type + " " + row.os_version }
 function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", failed: "danger" }[s] || "info" }
 function statusLabel(s) { return { pending: "待装机", booting: "引导中", installing: "安装中", done: "完成", failed: "失败" }[s] || s }
 
+function versionsFor(osType) {
+  const seen = new Set()
+  const out = []
+  for (const m of (mediaList.value.media || [])) {
+    if (m.os_type !== osType || seen.has(m.os_version)) continue
+    seen.add(m.os_version)
+    out.push({ value: m.os_version, label: m.os_version + (m.complete ? "" : "（介质不完整）") })
+  }
+  return out
+}
+const versionOptions = computed(() => {
+  const out = versionsFor(form.os_type)
+  // 当前值即使没有介质也要留在下拉里，否则 el-select 会把输入框显示成空的
+  if (form.os_version && !out.some(o => o.value === form.os_version)) {
+    out.push({ value: form.os_version, label: form.os_version + "（无介质）" })
+  }
+  return out
+})
+const mediaReady = computed(() => (mediaList.value.media || []).some(
+  m => m.os_type === form.os_type && m.os_version === form.os_version && m.complete))
+
+function defaultVersion(osType) {
+  const ready = (mediaList.value.media || []).filter(m => m.os_type === osType && m.complete)
+  if (ready.length) return ready[0].os_version
+  return osType === "ubuntu" ? "22.04" : "9.3"   // 没有介质时的历史占位值
+}
+
 function onOsChange() {
-  if (form.os_type === "ubuntu") form.os_version = "22.04"
-  else form.os_version = "9.3"
+  form.os_version = defaultVersion(form.os_type)
+}
+
+function addPartition(p) {
+  form.partitions.push(p || { mount: "", size: "", fstype: "", vg: "", lv: "" })
+}
+// 规格里的标准布局：EFI + boot + swap + LVM 吃掉剩余空间
+function applyPreset() {
+  form.partitions = [
+    { mount: "/boot/efi", size: "512M", fstype: "fat32", vg: "", lv: "" },
+    { mount: "/boot", size: "1G", fstype: "ext4", vg: "", lv: "" },
+    { mount: "swap", size: "8G", fstype: "swap", vg: "", lv: "" },
+    { mount: "/", size: "rest", fstype: "ext4", vg: "vg0", lv: "root" },
+  ]
+}
+
+function buildDiskConfig() {
+  const t = { mode: form.disk_target_mode }
+  // mode=auto 时后端会忽略 name —— 这里干脆不发，避免"以为自动其实写死"
+  if (form.disk_target_mode === "name" && form.disk_name) t.name = form.disk_name
+  if (form.disk_target_mode === "match") {
+    if (form.disk_serial) t.serial = form.disk_serial
+    else if (form.disk_model) t.model = form.disk_model
+  }
+  if (form.disk_min_size_gb) t.min_size_gb = form.disk_min_size_gb
+  const dc = { target: t, wipe: !!form.disk_wipe, layout: form.disk_scheme }
+  if (form.disk_scheme !== "custom") return dc
+  const parts = form.partitions
+    .filter(p => p.mount || p.size || p.vg || p.lv)
+    .map(p => {
+      const o = {}
+      if (p.mount) o.mount = p.mount
+      if (p.size) o.size = p.size
+      if (p.fstype) o.fstype = p.fstype
+      if (p.vg || p.lv) { o.vg = p.vg; o.lv = p.lv }   // 后端要求两者同时出现，否则 422
+      return o
+    })
+  if (parts.length) dc.partitions = parts
+  const dd = form.data_disks
+    .filter(d => d.name)
+    .map(d => ({ name: d.name, mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe }))
+  if (dd.length) dc.data_disks = dd
+  const rd = form.raid
+    .filter(r => r.name && r.devices)
+    .map(r => ({
+      name: r.name, level: r.level,
+      devices: String(r.devices).split(",").map(s => s.trim()).filter(Boolean).map(n => "part." + String(n).padStart(2, "0")),
+      mount: r.mount || "", fstype: r.fstype || "xfs",
+    }))
+  if (rd.length) dc.raid = rd
+  return dc
 }
 
 function buildPayload() {
@@ -369,7 +634,7 @@ function buildPayload() {
     root_password: form.root_password || null,
     ssh_keys: form.ssh_keys_text.split("\n").map(k => k.trim()).filter(Boolean),
     disk_scheme: form.disk_scheme,
-    disk_config: { disk: form.disk_name },
+    disk_config: buildDiskConfig(),
     net_mode: form.net_mode,
     net_config: form.net_mode === "static" ? {
       interface: form.net_interface, ip: form.net_ip,
@@ -388,8 +653,30 @@ function fillForm(p) {
   form.timezone = p.timezone; form.locale = p.locale; form.keyboard = p.keyboard
   form.admin_user = p.admin_user
   form.ssh_keys_text = (p.ssh_keys || []).join("\n")
-  form.disk_scheme = p.disk_scheme
-  form.disk_name = (p.disk_config || {}).disk || "sda"
+  form.disk_scheme = p.disk_scheme || "lvm"
+  const dc = p.disk_config || {}
+  const dt = dc.target || {}
+  if (dt.mode) form.disk_target_mode = dt.mode
+  else if (dc.disk) form.disk_target_mode = "name"   // 老模板只存 {"disk":"sda"}，语义等价
+  else form.disk_target_mode = "auto"
+  form.disk_name = dt.name || dc.disk || "sda"
+  form.disk_serial = dt.serial || ""
+  form.disk_model = dt.model || ""
+  form.disk_min_size_gb = dt.min_size_gb || 0
+  form.disk_wipe = dc.wipe !== false
+  form.partitions = (dc.partitions || []).map(q => ({
+    mount: q.mount || "", size: q.size || "", fstype: q.fstype || "",
+    vg: q.vg || "", lv: q.lv || "",
+  }))
+  form.data_disks = (dc.data_disks || []).map(d => ({
+    name: d.name || "", mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe,
+  }))
+  form.raid = (dc.raid || []).map(r => ({
+    name: r.name || "", level: r.level || 1,
+    // 后端用 part.01 这种标识；界面上让运维填"第几个分区"更好懂
+    devices: (r.devices || []).map(x => String(x).replace(/^part\.0*/, "")).join(","),
+    mount: r.mount || "", fstype: r.fstype || "xfs",
+  }))
   form.net_mode = p.net_mode
   const nc = p.net_config || {}
   form.net_interface = nc.interface || "ens33"; form.net_ip = nc.ip || ""
@@ -404,11 +691,21 @@ function openProfileDialog(row) {
   Object.assign(form, emptyForm())
   editingId.value = null
   if (row) { fillForm(row); editingId.value = row.id }
+  // 新建时把版本对齐到真正已提取的介质，避免默认值（9.3）与实际目录（rhel/9）不一致 → 404
+  else form.os_version = defaultVersion(form.os_type)
   profileDialog.value = true
 }
 
 async function saveProfile() {
   if (!form.name) { ElMessage.warning("请输入模板名"); return }
+  // 新建时管理员密码必填 —— 后端 POST 走 _require_admin_password（422：不允许留空，
+  // 也不代填默认口令）。以前这里一律发 null，于是**新建模板永远失败**，
+  // 而后端只在响应体里说明原因，界面上只看到"失败了"。
+  // 编辑（PUT）时留空 = 不修改，是允许的，所以只在新建时拦。
+  if (!editingId.value && !form.admin_password) {
+    ElMessage.warning("新建模板必须填写管理员密码（裸机 root 口令，不允许留空）")
+    return
+  }
   saving.value = true
   try {
     const payload = buildPayload()
@@ -506,5 +803,5 @@ function startInstallPolling() {
 
 let serverPollTimer = null
 onBeforeUnmount(() => { clearTimeout(installTimer); clearTimeout(serverPollTimer) })
-onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); startInstallPolling(); serverPollTimer = setTimeout(loadServerStatus, 5000) })
+onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); loadMedia(); startInstallPolling(); serverPollTimer = setTimeout(loadServerStatus, 5000) })
 </script>
