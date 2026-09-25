@@ -441,11 +441,8 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
             + "。请在前端显式填写 server_ip，或修复主机名解析 /etc/hosts",
         )
 
-    # http_root 强制为本机静态服务地址，并**按模板隔离**到 profiles/<pid>/。
-    # 不隔离的话所有模板的 boot.ipxe / user-data / ks.cfg 都是同名文件、落在同一目录，
-    # 并发部署会互相覆盖 —— 已实测：机器抓到的 boot.ipxe 与 user-data 来自不同模板，
-    # 直接装错系统且两边都不报错。前缀必须与 deploy_files 的落盘前缀一致。
-    body.http_root = ("http://" + body.server_ip + ":8000/pxe/serve/profiles/" + pid)
+    # http_root 强制为本机静态服务地址（app/main.py 挂载在 /pxe/serve，见 H5）
+    body.http_root = "http://" + body.server_ip + ":8000/pxe/serve"
 
     payload = body.model_dump(exclude_none=True)
     # 合并 net_config：以 detect_network() 为底，调用方显式传入的键覆盖它。

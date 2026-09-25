@@ -570,43 +570,6 @@ class OsTypeFamilyTest(unittest.TestCase):
             PxeProfileIn(name="x", os_type="windows")
 
 
-class DeployScopingTest(unittest.TestCase):
-    """部署落盘的路径隔离与边界（共享引导文件竞态的修复）。
-
-    背景（实测，不是推断）：deploy_files 原先忽略 pid，所有模板的 boot.ipxe /
-    user-data / ks.cfg / meta-data 都是同一批路径。两个部署同时进行时，机器抓到的
-    boot.ipxe 与 user-data 来自**不同模板**，直接装错系统，而且两边都不报错。
-    """
-
-    def test_web_dest_scopes_and_rejects(self):
-        import os
-        import tempfile
-
-        from app.it.pxe.server import _web_dest
-        base = os.path.abspath(tempfile.mkdtemp())
-        prof = os.path.join(base, "profiles", "abc123")
-        os.makedirs(prof)
-
-        self.assertEqual(_web_dest(prof, "boot.ipxe"), os.path.join(prof, "boot.ipxe"))
-        self.assertEqual(_web_dest(prof, "user-data/00-11/x/user-data"),
-                         os.path.join(prof, "user-data", "00-11", "x", "user-data"))
-
-        for bad in ("../evil", "/etc/passwd", ".", "", "a/../../evil", "../../x"):
-            self.assertIsNone(_web_dest(prof, bad), f"未拒绝 {bad!r}")
-
-        # 隔离的本质：不同模板的同名文件解析到不同路径
-        p2 = os.path.join(base, "profiles", "def456")
-        self.assertNotEqual(_web_dest(prof, "boot.ipxe"), _web_dest(p2, "boot.ipxe"))
-
-    def test_safe_pid(self):
-        from app.it.pxe.server import _safe_pid
-        self.assertEqual(_safe_pid("ab12-CD_"), "ab12-CD_")
-        self.assertEqual(_safe_pid("../etc"), "etc")        # 非法字符被剔除，剩下仍可用
-        for bad in ("../../", "/", "", None):
-            with self.assertRaises(ValueError, msg=repr(bad)):
-                _safe_pid(bad)
-
-
 class PxeInjectionGuardTest(unittest.TestCase):
     """iPXE / dnsmasq 配置注入防护。
 

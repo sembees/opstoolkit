@@ -429,45 +429,9 @@ def prepare_firmware() -> list:
 
 # ── Deploy ──
 
-def _safe_pid(pid) -> str:
-    """模板 id 会变成目录名，必须做白名单（防 ../ 之类拼进路径）。"""
-    s = "".join(ch for ch in str(pid or "") if ch.isalnum() or ch in "-_")
-    if not s:
-        raise ValueError("illegal pid")
-    return s
-
-
-def _web_dest(base_abs: str, name: str):
-    """把一个生成物键解析成落盘的绝对路径；非法或越界返回 None。
-
-    单独抽出来是为了可单测：路径拼接/越界判断是典型的"看着对、边界会错"的地方。
-    """
-    s = str(name)
-    # 绝对路径直接拒（原先 lstrip("/") 后再判绝对路径是死代码 —— 永远判不出来）
-    if s.startswith(("/", "\\")):
-        return None
-    rel = os.path.normpath(s)
-    if not rel or rel == "." or rel.startswith(".."):
-        return None
-    dst = os.path.abspath(os.path.join(base_abs, rel))
-    if os.path.commonpath([dst, base_abs]) != base_abs:
-        return None
-    return dst
-
-
 def deploy_files(files, pid="") -> dict:
     """Write configs to host: dnsmasq.conf via shared DHCP module, response
-       files to TFTP/HTTP, then restart dnsmasq.
-
-    pid 非空时，HTTP 侧文件落到 WEB_ROOT/profiles/<pid>/ 下 —— 这是**必须**的：
-    boot.ipxe / user-data / ks.cfg / meta-data 对每个模板都是同名，落在同一个目录里
-    会互相覆盖。这不是理论问题：实测过一次两个部署同时进行，机器抓到的 boot.ipxe 与
-    user-data 来自**不同模板**，直接装错系统（而且当时两边都没报错）。
-    URL 侧必须由调用方把 http_root 指到同一个 `profiles/<pid>` 前缀，两边保持一致
-    （见 api/pxe.py 的 deploy_to_host）。
-    注意 dnsmasq 配置仍是**单份**（/etc/dnsmasq.d/opstk-pxe.conf）：一个接口上只能有
-    一个 DHCP 权威，所以"两个模板同时接管 DHCP"本就是后部署者胜，这是策略问题不是竞态。
-    """
+       files to TFTP/HTTP, then restart dnsmasq."""
     if not _dhcp.is_linux():
         return {
             "ok": False,
@@ -488,28 +452,25 @@ def deploy_files(files, pid="") -> dict:
         else:
             log.append("FAILED: write dnsmasq config")
 
-    # Write response files to HTTP directory（按模板隔离 + 原子落盘）
+    # Write response files to HTTP directory
     web_root_abs = os.path.abspath(WEB_ROOT)
-    base_abs = web_root_abs
-    if pid:
-        base_abs = os.path.abspath(os.path.join(web_root_abs, "profiles", _safe_pid(pid)))
-        os.makedirs(base_abs, exist_ok=True)
     for name, content in files.items():
         if name == "dnsmasq.conf":
             continue
-        dst = _web_dest(base_abs, name)
-        if dst is None:
-            log.append("Skip illegal path: " + str(name))
+        rel = os.path.normpath(name.lstrip("/"))
+        if rel == "." or rel.startswith(".."):
+            log.append("Skip illegal path: " + name)
+            continue
+        dst = os.path.abspath(os.path.join(web_root_abs, rel))
+        if os.path.commonpath([dst, web_root_abs]) != web_root_abs:
+            log.append("Skip boundary path: " + name)
             continue
         parent = os.path.dirname(dst)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        # 原子替换：装机中的机器随时可能在取这些文件，不能让它读到写了一半的内容
-        tmp = dst + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(dst, "w", encoding="utf-8") as f:
             f.write(content)
-        os.replace(tmp, dst)
-        log.append("Deployed: " + os.path.relpath(dst, web_root_abs).replace(os.sep, "/"))
+        log.append("Deployed: " + rel)
 
     # Restart dnsmasq via shared module
     svc = _dhcp.dhcp_control("restart")
