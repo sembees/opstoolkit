@@ -102,11 +102,86 @@ def _iso_size_mb(iso_url):
         return 0
 
 
+SERVE_MARK = "/pxe/serve/"
+WEB_ROOT = "/srv/opstk/pxe-web"
+
+
+def _local_served_path(url):
+    """把本机发布的 URL 映射回真实目录（只认 /pxe/serve/ 前缀，防路径穿越）。"""
+    if not url or SERVE_MARK not in url:
+        return ""
+    rel = str(url).split(SERVE_MARK, 1)[1].strip("/")
+    if not rel or ".." in rel:
+        return ""
+    return os.path.join(WEB_ROOT, rel)
+
+
+def _serve_url(path, server_ip):
+    rel = os.path.relpath(path, WEB_ROOT).replace(os.sep, "/")
+    return "http://" + (server_ip or "192.168.1.100") + ":8000" + SERVE_MARK + rel + "/"
+
+
+def _detect_rhel_media(mirror, server_ip):
+    """从本机发布的目录树里自动推断 RHEL 系的 inst.repo / inst.stage2 / 额外仓库。
+
+    为什么需要（都是真机串口实证）：把 DVD ISO 树挂出来当安装源时，结构是
+      <root>/{BaseOS,AppStream}/repodata/... 以及 <root>/images/install.img
+    只给 `inst.repo=<root>/BaseOS/` 会有两个坑：
+      · 找不到 stage2 → dracut "Could not boot / /dev/root does not exist"；
+      · 装完包后在认证步骤崩 → SecurityInstallationError: /usr/sbin/authconfig is missing
+        （authconfig 在 AppStream，而 kickstart 用的是 auth --enableshadow）。
+    所以这里探测出 stage2（往上找含 images/ 的那一层）与同级仓库（AppStream）。
+    探不到（例如 mirror 指向远端官方镜像，那种镜像本身就是完整仓库树）就原样返回，不猜。
+    """
+    base = _local_served_path(mirror)
+    if not base or not os.path.isdir(base):
+        return mirror, "", []
+    repo_url, base_dir = mirror, os.path.normpath(base)
+    if not os.path.isfile(os.path.join(base_dir, "repodata", "repomd.xml")):
+        # 给的是树根：取第一个含 repodata 的子目录当主仓库
+        subs = [d for d in sorted(os.listdir(base_dir))
+                if os.path.isfile(os.path.join(base_dir, d, "repodata", "repomd.xml"))]
+        if not subs:
+            return mirror, "", []
+        base_dir = os.path.join(base_dir, subs[0])
+        repo_url = _serve_url(base_dir, server_ip)
+    stage2 = ""
+    cur = base_dir
+    for _ in range(3):
+        if os.path.isdir(os.path.join(cur, "images")):
+            stage2 = _serve_url(cur, server_ip)
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    extra = []
+    parent = os.path.dirname(base_dir)
+    if os.path.isdir(parent):
+        for sib in sorted(os.listdir(parent)):
+            sp = os.path.normpath(os.path.join(parent, sib))
+            # 用 normpath 比较而不是字符串相等：rel 里带的是 '/'，os.path.join 在
+            # Windows 下会给出 '\'，直接比会把主仓库自己也算成"额外仓库"。
+            if sp == base_dir or not os.path.isdir(sp):
+                continue
+            if os.path.isfile(os.path.join(sp, "repodata", "repomd.xml")):
+                extra.append({"name": sib, "url": _serve_url(sp, server_ip)})
+    return repo_url, stage2, extra
+
+
 def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
                   kernel_path="", initrd_path="", squashfs_path="",
-                  deploy_mode="standalone", iso_url="", kernel_console="") -> PxeConfig:
+                  deploy_mode="standalone", iso_url="", kernel_console="",
+                  stage2="", extra_repos=None) -> PxeConfig:
     _dk, _di, _ds = _default_media(p)
     _iso = _iso_url_for(p, server_ip, iso_url)
+    _repo, _stage2, _extra = (p.mirror or ""), "", []
+    if (p.os_type or "").lower() == "rhel":
+        _repo, _stage2, _extra = _detect_rhel_media(p.mirror or "", server_ip)
+    if stage2:
+        _stage2 = stage2
+    if extra_repos:
+        _extra = extra_repos
     return PxeConfig(
         os_type=p.os_type, os_version=p.os_version,
         hostname="default", timezone=p.timezone, locale=p.locale, keyboard=p.keyboard,
@@ -116,12 +191,14 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
         ssh_keys=p.ssh_keys or [],
         disk_scheme=p.disk_scheme, disk_config=p.disk_config or {},
         net_mode=p.net_mode, net_config=p.net_config or {},
-        mirror=p.mirror, extra_packages=p.extra_packages or [],
+        mirror=_repo, stage2=_stage2, extra_repos=_extra,
+        extra_packages=p.extra_packages or [],
         post_script=p.post_script,
         server_ip=server_ip or "192.168.1.100",
         # H5: 静态服务实际挂载在 :8000/pxe/serve（见 app/main.py），兜底路径必须带 /serve
         http_root=http_root or ("http://" + (server_ip or "192.168.1.100") + ":8000/pxe/serve"),
-        kernel_path=kernel_path or _dk, initrd_path=initrd_path or _di, squashfs_path=squashfs_path or _ds,
+        kernel_path=kernel_path or _dk, initrd_path=initrd_path or _di,
+        squashfs_path=squashfs_path or _ds,
         # Ubuntu 必须给出可挂载介质（casper 的 url=），否则必失败：
         # 显式 iso_url 优先，其次按 os_type/os_version 自动匹配 /srv/opstk/iso
         iso_url=_iso,
@@ -281,6 +358,8 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
         squashfs_path=body.get("squashfs_path", ""),
         iso_url=body.get("iso_url", ""),
         kernel_console=body.get("kernel_console", ""),
+        stage2=body.get("stage2", ""),
+        extra_repos=body.get("extra_repos", []),
         deploy_mode=body.get("deploy_mode", "standalone"),
     )
     cfg.hostname = body.get("hostname", "default")

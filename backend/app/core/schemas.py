@@ -463,6 +463,10 @@ class PxeGenerateIn(BaseModel):
     iso_url: str = ""
     # 内核控制台：留空则用后端默认值（带串口，便于无显示器机器的装机排障）
     kernel_console: str = ""
+    # RHEL 系：stage2（含 images/ 的那一层）与额外仓库（如 AppStream）。
+    # 留空时后端会按 mirror 指向的本机发布目录自动探测。
+    stage2: str = ""
+    extra_repos: list = []
     deploy_mode: str = "standalone"    # standalone / proxy / relay
     net_config: PxeNetConfigIn = PxeNetConfigIn()
     installs: list[PxeInstallItem] = []

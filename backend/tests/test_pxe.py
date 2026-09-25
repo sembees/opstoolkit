@@ -439,6 +439,94 @@ class PxeGeneratorTest(unittest.TestCase):
         self.assertEqual(pick_iso([], "ubuntu", "22.04"), "")
 
 
+    def test_rhel_emits_stage2_and_extra_repos(self):
+        """RHEL 系必须能把 stage2 与额外仓库（AppStream）传下去。
+
+        真机串口实证：只给 `inst.repo=<BaseOS/>` 时，
+          · 找不到 stage2 → dracut "Could not boot / /dev/root does not exist"；
+          · 装完 326 个包后 → SecurityInstallationError: /usr/sbin/authconfig is missing
+            （authconfig 在 AppStream，而 kickstart 里有 auth --enableshadow）。
+        """
+        cfg = _cfg(os_type="rhel", os_version="9", initrd_path="rhel/9/initrd.img",
+                   mirror="http://10.0.0.1:8000/pxe/serve/repo/rocky-9.4/BaseOS/",
+                   stage2="http://10.0.0.1:8000/pxe/serve/repo/rocky-9.4/",
+                   extra_repos=[{"name": "AppStream",
+                                 "url": "http://10.0.0.1:8000/pxe/serve/repo/rocky-9.4/AppStream/"}])
+        files = generate_all(cfg)
+        k = [l for l in files["boot.ipxe"].splitlines() if l.startswith("kernel")][0]
+        self.assertIn("inst.stage2=http://10.0.0.1:8000/pxe/serve/repo/rocky-9.4/", k)
+        self.assertIn("inst.repo=http://10.0.0.1:8000/pxe/serve/repo/rocky-9.4/BaseOS/", k)
+        self.assertIn("inst.addrepo=AppStream,http://10.0.0.1:8000/pxe/serve/repo/rocky-9.4/AppStream/", k)
+        ks = files["ks.cfg"]
+        self.assertIn('url --url="http://10.0.0.1:8000/pxe/serve/repo/rocky-9.4/BaseOS/"', ks)
+        self.assertIn('repo --name="AppStream" --baseurl="http://10.0.0.1:8000/pxe/serve/repo/rocky-9.4/AppStream/"', ks)
+
+    def test_extra_repo_name_with_comma_is_rejected(self):
+        """逗号是 inst.addrepo 的分隔符：出现在名字/URL 里就必须拒绝，否则语法被改写。"""
+        with self.assertRaises(ValueError):
+            generate_all(_cfg(os_type="rhel", os_version="9", mirror="http://m/BaseOS/",
+                              extra_repos=[{"name": "App,Stream", "url": "http://m/AppStream/"}]))
+
+    def test_url_tokens_are_single_line_only(self):
+        """URL 里塞引号/空格也要被拒（会改变 kickstart 的语法结构）。"""
+        with self.assertRaises(ValueError):
+            generate_all(_cfg(os_type="rhel", os_version="9",
+                              mirror='http://m/BaseOS/"x'))
+
+
+class RhelMediaDetectTest(unittest.TestCase):
+    """api 层的自动探测：运维只填一个 mirror，stage2 与 AppStream 由目录树推出来。"""
+
+    def _tree(self, tmp):
+        import os
+        root = os.path.join(tmp, "rocky-9.4")
+        for d in ("BaseOS", "AppStream"):
+            os.makedirs(os.path.join(root, d, "repodata"))
+            open(os.path.join(root, d, "repodata", "repomd.xml"), "w").write("x")
+        os.makedirs(os.path.join(root, "images"))
+        open(os.path.join(root, "images", "install.img"), "w").write("x")
+        return root
+
+    def test_detects_from_repo_dir(self):
+        import tempfile
+        from unittest import mock
+
+        from app.api import pxe as api_pxe
+        with tempfile.TemporaryDirectory() as tmp:
+            self._tree(tmp)
+            with mock.patch.object(api_pxe, "WEB_ROOT", tmp):
+                repo, stage2, extra = api_pxe._detect_rhel_media(
+                    "http://10.0.0.1:8000/pxe/serve/rocky-9.4/BaseOS/", "10.0.0.1")
+        # mirror 本身就是一个 repo 时**原样保留**（不替运维改写他已给出的地址）
+        self.assertEqual(repo, "http://10.0.0.1:8000/pxe/serve/rocky-9.4/BaseOS/")
+        self.assertEqual(stage2, "http://10.0.0.1:8000/pxe/serve/rocky-9.4/")
+        self.assertEqual([e["name"] for e in extra], ["AppStream"])
+
+    def test_tree_root_also_works(self):
+        """直接给树根也应可用：自动选一个含 repodata 的子目录当主仓库。"""
+        import tempfile
+        from unittest import mock
+
+        from app.api import pxe as api_pxe
+        with tempfile.TemporaryDirectory() as tmp:
+            self._tree(tmp)
+            with mock.patch.object(api_pxe, "WEB_ROOT", tmp):
+                repo, stage2, extra = api_pxe._detect_rhel_media(
+                    "http://10.0.0.1:8000/pxe/serve/rocky-9.4/", "10.0.0.1")
+        self.assertEqual(repo, "http://10.0.0.1:8000/pxe/serve/rocky-9.4/AppStream/")
+        self.assertEqual(stage2, "http://10.0.0.1:8000/pxe/serve/rocky-9.4/")
+        self.assertEqual([e["name"] for e in extra], ["BaseOS"])
+
+    def test_remote_mirror_is_left_alone(self):
+        """远端官方镜像本身就是完整仓库树：不要乱加 stage2/addrepo。"""
+        from app.api import pxe as api_pxe
+        repo, stage2, extra = api_pxe._detect_rhel_media(
+            "https://mirror.example/rocky/9/BaseOS/x86_64/os/", "10.0.0.1")
+        self.assertEqual(repo, "https://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        self.assertEqual(stage2, "")
+        self.assertEqual(extra, [])
+
+
 class PxeInjectionGuardTest(unittest.TestCase):
     """iPXE / dnsmasq 配置注入防护。
 

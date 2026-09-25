@@ -83,6 +83,16 @@ class PxeConfig:
     net_mode: str = "dhcp"
     net_config: dict = None
     mirror: str = ""
+    # RHEL 系：stage2（含 images/install.img 的那一层 URL）与额外仓库。
+    # 为什么必须分开：把 DVD ISO 树挂出来当安装源时，包仓库是 **BaseOS/** 与 **AppStream/**
+    # 两个子目录，而 `images/install.img` 在**树根**。只给 `inst.repo=<BaseOS/>` 时：
+    #   · anaconda 找不到 stage2 → dracut "Could not boot / /dev/root does not exist"；
+    #   · 装完包后在认证步骤崩 → SecurityInstallationError: /usr/sbin/authconfig is missing
+    #     （authconfig 在 AppStream 里，而贴出的 kickstart 有 auth --enableshadow）。
+    # 两者都有真机串口实证。api 层会在 mirror 是本机发布目录时自动探测这两项，
+    # 运维通常只需填 mirror。
+    stage2: str = ""
+    extra_repos: list = None    # [{"name": "AppStream", "url": "http://.../AppStream/"}]
     extra_packages: list = None
     post_script: str = ""
     server_ip: str = "192.168.1.100"
@@ -289,8 +299,19 @@ def _rhel_ks(c):
     else:
         net = "network --bootproto=dhcp --hostname=" + c.hostname + " --activate"
 
-    repo = ("url --url=" + chr(34) + c.mirror + chr(34) + "\n"
-            if c.mirror else "# url --url=" + chr(34) + "http://mirror/rocky/9/BaseOS/x86_64/os/" + chr(34) + "\n")
+    q = chr(34)
+    _mirror = _safe_ident(c.mirror, "mirror", extra=":/?&=%+")
+    repo = ("url --url=" + q + _mirror + q + "\n"
+            if _mirror else "# url --url=" + q + "http://mirror/rocky/9/BaseOS/x86_64/os/" + q + "\n")
+    # 额外仓库（如 AppStream）必须在 **kickstart 里也声明**：inst.addrepo 只作用于安装器
+    # 命令行，kickstart 安装期间的包解析用的是 ks 自己的 repo 列表。
+    # 实测教训：只给 BaseOS 时，装完 326 个包后死在
+    #   SecurityInstallationError: /usr/sbin/authconfig is missing（authconfig 在 AppStream）。
+    for _r in (c.extra_repos or []):
+        _n = _safe_ident((_r or {}).get("name", ""), "extra_repos[].name")
+        _u = _safe_ident((_r or {}).get("url", ""), "extra_repos[].url", extra=":/?&=%+")
+        if _n and _u:
+            repo += "repo --name=" + q + _n + q + " --baseurl=" + q + _u + q + "\n"
 
     pkgs = c.extra_packages or ["vim", "net-tools", "bash-completion", "tar", "wget", "curl"]
 
@@ -359,6 +380,33 @@ def _safe_line(v, field="字段") -> str:
                 field + " 不允许包含换行或控制字符（会造成 iPXE/dnsmasq 配置注入）"
             )
     return s
+
+
+def _safe_ident(v, field, extra="") -> str:
+    """比 _safe_line 更严：只允许 [A-Za-z0-9._-] 以及调用方指定的额外字符。
+
+    这些值会以 `--name="X"` / `inst.addrepo=Name,URL` 的形式进入 kickstart 与内核
+    命令行 —— 引号、逗号、空格会改变**语法结构**，不只是控制字符那类问题。
+    """
+    s = _safe_line(v, field)
+    if not s:
+        return ""
+    ok = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") | set(extra)
+    bad = sorted({ch for ch in s if ch not in ok})
+    if bad:
+        raise ValueError(field + " 含不允许的字符 " + repr("".join(bad)))
+    return s
+
+
+def _extra_repo_args(repos) -> str:
+    """把额外仓库拼成 `inst.addrepo=Name,URL`（逗号是 anaconda 的分隔符，值里不能有）。"""
+    out = ""
+    for r in repos or []:
+        name = _safe_ident((r or {}).get("name", ""), "extra_repos[].name")
+        url = _safe_ident((r or {}).get("url", ""), "extra_repos[].url", extra=":/?&=%+")
+        if name and url:
+            out += " inst.addrepo=" + name + "," + url
+    return out
 
 
 # ===== iPXE 菜单 =====
@@ -434,10 +482,15 @@ def _ipxe_menu(c, mac="", answer_url=""):
                 "无法为 inst.repo 提供内容。请填写模板的 mirror，或先自行发布安装源。"
             )
         answer = _safe_line(answer_url, "answer_url") or (http_root + "/ks.cfg")
-        L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")",
-             "kernel " + kernel + " initrd=" + initrd_name + " inst.ks=" + answer
-             + " inst.repo=" + mirror + " ip=dhcp"
-             + (" " + kernel_console if kernel_console else ""),
+        stage2 = _safe_line(c.stage2, "stage2")
+        args = ("kernel " + kernel + " initrd=" + initrd_name + " inst.ks=" + answer)
+        if stage2:
+            args += " inst.stage2=" + stage2
+        args += " inst.repo=" + mirror
+        if c.extra_repos:
+            args += _extra_repo_args(c.extra_repos)
+        args += " ip=dhcp" + (" " + kernel_console if kernel_console else "")
+        L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")", args,
              "initrd " + initrd, "boot"]
     return "\n".join(L) + "\n"
 
