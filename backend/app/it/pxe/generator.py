@@ -98,6 +98,18 @@ class PxeConfig:
     post_script: str = ""
     server_ip: str = "192.168.1.100"
     http_root: str = "http://192.168.1.100:8000/pxe/serve"
+    # 应答文件 / 引导脚本（user-data、ks.cfg、iPXE 菜单）的 URL 根，**可以与 http_root 不同**。
+    #
+    # 为什么必须分开（E1 修复的核心约束）：http_root 是**媒体根** ——
+    # kernel_path / initrd_path / iso_url 都拼它，而介质只存在于
+    # /srv/opstk/pxe-web/<os_type>/<os_version>/ 这些**扁平**路径上。
+    # 上一版"按模板隔离"把整个 http_root 指到 profiles/<pid>/，媒体 URL 于是变成
+    # profiles/<pid>/ubuntu/22.04/vmlinuz（文件根本不在那儿）→ iPXE 报
+    # "Could not boot image"，生产 PXE 被打断，因此被回退（190c1f8）。
+    # 结论：只能隔离**应答/引导脚本**，媒体必须留在原地。
+    #
+    # 留空 = 与 http_root 逐字相同（完全等同于改造前的行为；/generate 与 /download 走这条）。
+    answer_root: str = ""
     kernel_path: str = "ubuntu/22.04/vmlinuz"
     initrd_path: str = "ubuntu/22.04/initrd"
     squashfs_path: str = "ubuntu/22.04/installer.squashfs"
@@ -216,8 +228,22 @@ _SIZE_UNIT = {"M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4, "P": 1024 ** 5}
 _GROW_SIZES = ("rest", "100%FREE")
 # /boot/efi 与 /boot 在 GPT 上的分区标志（规格 §3.4）
 _PART_FLAGS = {"/boot/efi": "esp", "/boot": "boot"}
-# kickstart 里 raid 成员/物理卷的标识形式；与 §3.3 的 part.NN 同属一套"第 N 个分区"语义
-_RAID_DEV_RE = re.compile(r"^(?:(?:sd|vd|hd|xvd)[a-z]|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)p?([0-9]+)$")
+# kickstart 里 raid 成员/物理卷的标识形式；与 §3.3 的 part.NN 同属一套"第 N 个分区"语义。
+# 两个捕获组：组 1 = 盘名，组 2 = 分区号。
+_RAID_DEV_RE = re.compile(
+    r"^((?:sd|vd|hd|xvd)[a-z]|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)p?([0-9]+)$"
+)
+# raid.devices 的三种写法 + 各自的**编号基准**，写成显式表而不是散在 if/else 里。
+# 基准不同是刻意的（三种写法各自对着一套既有标识），因此"同一个分区"的等价写法是：
+#   第 3 个分区 == part.03（1 起）== part2（0 起）== sda3（1 起）
+# 三者必须换算到**同一个下标**：换算一旦漂移，校验层放行的 RAID 成员在生成物里会指到
+# 另一个分区上（= 把那块分区上的数据做成 RAID 成员并抹掉）。有测试逐写法断言。
+# 表尾的 True = "盘名前缀只用于校验，不改变分区归属"（见 _raid_part_ref）。
+_RAID_ID_FORMS = (
+    (re.compile(r"^part\.0*([0-9]+)$"), 1, False),   # ks 规范写法，1 起
+    (re.compile(r"^part([0-9]+)$"), 0, False),       # subiquity 的 id，0 起（part0 = 第 1 个）
+    (_RAID_DEV_RE, 1, True),                         # 盘名+分区号，1 起
+)
 
 
 def _as_bool(v, field, default=False) -> bool:
@@ -303,39 +329,49 @@ def _disk_config_active(dc) -> bool:
     return any(k != "disk" for k in dc)
 
 
-def _raid_member_index(tok, partitions, field):
-    """把 raid.devices 里的分区标识解析成 partitions 的下标。
+def _raid_part_ref(tok, field):
+    """raid.devices 里的分区标识 → (partitions 下标, 盘名前缀)。
 
-    规格 §3.3 的规范写法是 `part.01`（1 起）；同时接受 `part0`（subiquity 侧 0 起）
-    与 §2 示例里的 `sda4`（盘名+分区号，按 1 起算）—— 三种写法都映射到同一套
-    "第 N 个分区" 语义，生成物里永远只出现我们自己算出的标识。
+    **本函数是唯一的分区标识换算实现**：schemas 层（HTTP 入口）直接 import 它，两层
+    共用一份基准。旧实现两层各抄一份正则，基准一旦漂移，同一个 RAID 成员会在校验层与
+    生成层指到**不同的分区**（校验通过、生成物却把另一块分区做成了 RAID 成员）。
+
+    三种写法见 _RAID_ID_FORMS。盘名前缀（sda3 → "sda"）只用于校验（它是不是被声明成
+    数据盘），**不改变分区归属**：§2 要求 auto 忽略写死的盘名，这里与之一致 ——
+    `sda3` 就是"第 3 个分区"。返回下标 None 表示标识无法解析，由调用方按自己的措辞报错。
     """
     s = _safe_ident(tok, field)
+    for pattern, base, disk_qualified in _RAID_ID_FORMS:
+        m = pattern.fullmatch(s)
+        if not m:
+            continue
+        if disk_qualified:
+            return int(m.group(2)) - 1, m.group(1)
+        return int(m.group(1)) - base, ""
+    return None, ""
+
+
+def _raid_member_ref(tok, partitions, field):
+    """第 3 层：分区标识 → (下标, 盘名前缀)；越界/无法解析一律报错并列出本次可用标识。"""
     avail = ", ".join(p["id_ks"] for p in partitions) or "(partitions 为空)"
-    idx = None
-    m = re.fullmatch(r"part\.0*([0-9]+)", s)
-    if m:
-        idx = int(m.group(1)) - 1
-    else:
-        m = re.fullmatch(r"part([0-9]+)", s)
-        if m:
-            idx = int(m.group(1))
-        else:
-            m = _RAID_DEV_RE.fullmatch(s)
-            if m:
-                idx = int(m.group(1)) - 1
+    idx, disk = _raid_part_ref(tok, field)
     if idx is None or not 0 <= idx < len(partitions):
         raise ValueError(
             field + " 引用了未定义的分区标识 " + repr(tok) + "；本次可用标识：" + avail
         )
-    return idx
+    return idx, disk
 
 
 def _disk_plan(c, dc):
     """把 disk_config 归一化为内部结构；返回 None 表示走【既有路径】（逐字不变）。
 
     这里做第 3 层校验（第 2 层在 schemas.PxeDiskConfigIn）：白名单、rest 只能一次且在最后、
-    /boot/efi 与 / 的搭配、vg/lv 必须成对、raid 引用必须已定义、data_disks 不得与目标盘同名。
+    /boot/efi 与 / 的搭配、custom 必须有 /、挂载点/RAID 名/data_disks 名的唯一性、
+    vg/lv 必须成对、raid 引用必须已定义、data_disks 不得与目标盘同名。
+
+    另一条硬规则：**用户给的值绝不允许被静默丢弃**。非 custom 布局下 partitions/raid
+    完全不会出现在产物里，所以给了就拒绝（只有 data_disks 的 wipe=false+无 mount 例外，
+    它有真实语义 —— "别碰这块盘"，RHEL 侧靠 %pre 的候选排除集落地）。
     """
     if not _disk_config_active(dc):
         return None
@@ -393,9 +429,31 @@ def _disk_plan(c, dc):
                 "disk_config.layout 非法 " + repr(raw_layout) + "：只允许 lvm|direct|zfs|custom"
             )
 
+    custom = layout == "custom"
     parts_in = dc.get("partitions") or []
     if not isinstance(parts_in, list):
         raise ValueError("disk_config.partitions 必须是数组")
+    if not custom:
+        # layout 简写（lvm/direct/zfs）把分区工作整体交给 anaconda/subiquity，我们的产物里
+        # 不会出现 partitions/raid 的任何一行 —— 给了就必须拒绝，绝不静默丢弃运维的配置。
+        if parts_in:
+            raise ValueError(
+                "disk_config.partitions：layout=" + layout
+                + " 的分区由安装器自动完成，不能同时给自定义分区表；要自定义请设 layout=custom"
+            )
+        if dc.get("raid"):
+            raise ValueError(
+                "disk_config.raid：layout=" + layout
+                + " 不生成 RAID（只支持 layout=custom），该配置会被丢弃，故拒绝"
+            )
+    # Ubuntu 的非 custom 布局只有 subiquity 的 layout.match（size: largest / path / serial /
+    # model），**没有任何排除语法** —— 机器上"小系统盘 + 大数据盘"时 largest 正好会选中数据盘，
+    # 随后 wipe 把它抹掉（本缺陷的 Ubuntu 侧）。表达不出来就不能猜，必须拒绝。
+    if (not custom) and mode == "auto" and dc.get("data_disks") and not is_rhel_family(c.os_type):
+        raise ValueError(
+            "disk_config.data_disks：Ubuntu 的非 custom 布局没有排除语法（layout.match 只能选最大盘），"
+            "target.mode=auto 时可能选中并抹掉数据盘；请把 target.mode 设为 name 或 match，或改用 layout=custom"
+        )
     partitions = []
     for i, p in enumerate(parts_in):
         if not isinstance(p, dict):
@@ -435,8 +493,40 @@ def _disk_plan(c, dc):
         raise ValueError("disk_config.partitions：/boot/efi 只能有 0 或 1 个")
     if "/boot/efi" in mounts and "/" not in mounts:
         raise ValueError("disk_config.partitions：有 /boot/efi 却没有 / 分区（系统起不来）")
+    # 挂载点唯一性：同一个挂载点建两遍，anaconda/subiquity 都会在安装中途报错
+    # （subiquity 直接拒绝重复 mount path），甚至把两块分区反复格式化。
+    seen_mount = {}
+    for p in partitions:
+        if not p["mount"]:
+            continue                      # 空挂载点（只建分区）不参与唯一性
+        if p["mount"] in seen_mount:
+            raise ValueError(
+                "disk_config.partitions[%d].mount：挂载点 %s 与 disk_config.partitions[%d] 重复"
+                % (p["index"], p["mount"], seen_mount[p["mount"]])
+            )
+        seen_mount[p["mount"]] = p["index"]
+    # custom 布局必须自己给出 /：安装器不会替你补，装完的系统起不来（规格 §4）。
+    if custom and "/" not in mounts:
+        raise ValueError(
+            "disk_config.partitions：layout=custom 必须有一个 / 分区（没有 / 的系统起不来）"
+        )
+    # 同一个 (vg, lv) 只能出现一次：重复的 logvol 名会让 anaconda 报 "logical volume ... "
+    # 或者把两个分区叠在同一个 LV 上。
+    seen_lv = {}
+    for p in partitions:
+        if not p["vg"]:
+            continue
+        key = (p["vg"], p["lv"])
+        if key in seen_lv:
+            raise ValueError(
+                "disk_config.partitions[%d].lv：%s/%s 与 disk_config.partitions[%d] 重复"
+                % (p["index"], p["vg"], p["lv"], seen_lv[key])
+            )
+        seen_lv[key] = p["index"]
 
     raid_out = []
+    raid_member_indexes = set()
+    raid_disk_specs = []          # [(field, 用户写的标识, 盘名前缀)] —— 用于 data_disks 交叉检查
     for j, r in enumerate(dc.get("raid") or []):
         if not isinstance(r, dict):
             raise ValueError("disk_config.raid[%d] 必须是对象" % j)
@@ -454,8 +544,14 @@ def _disk_plan(c, dc):
         devs = r.get("devices") or []
         if not isinstance(devs, list) or not devs:
             raise ValueError(f + ".devices 不能为空")
-        idxs = [_raid_member_index(d, partitions, f + ".devices") for d in devs]
+        idxs = []
+        for d in devs:
+            idx, disk_prefix = _raid_member_ref(d, partitions, f + ".devices")
+            if disk_prefix:
+                raid_disk_specs.append((f + ".devices", d, disk_prefix))
+            idxs.append(idx)
         rmount = _safe_mount(r.get("mount", ""), f + ".mount")
+        raid_member_indexes.update(idxs)
         raid_out.append({
             "name": _safe_ident(r.get("name", ""), f + ".name") or ("md%d" % j),
             "level": level,
@@ -464,8 +560,23 @@ def _disk_plan(c, dc):
             "fstype": _safe_fstype(r.get("fstype", ""), f + ".fstype", rmount),
             "id_sub": "md%d" % j,
         })
+    raid_names = [x["name"] for x in raid_out]
+    if len(set(raid_names)) != len(raid_names):
+        dup = [n for n in raid_names if raid_names.count(n) > 1][0]
+        raise ValueError(
+            "disk_config.raid[].name：" + repr(dup) + " 重复（RAID 设备名必须唯一）"
+        )
+    # 同一个分区不能既当 LVM PV 又当 RAID 成员：anaconda 会把它同时塞进 volgroup 与
+    # mdadm，结果是"先建 PV 再被 RAID 元数据覆盖"或直接安装失败 —— 用户配错了，必须点名拒绝。
+    for p in partitions:
+        if p["vg"] and p["index"] in raid_member_indexes:
+            raise ValueError(
+                "disk_config.partitions[%d]：同一个分区不能既是 LVM PV（.vg/.lv 已给）"
+                "又是 RAID 成员（disk_config.raid[].devices 引用了它）" % p["index"]
+            )
 
     data = []
+    data_names = []
     for k, d in enumerate(dc.get("data_disks") or []):
         if not isinstance(d, dict):
             raise ValueError("disk_config.data_disks[%d] 必须是对象" % k)
@@ -473,15 +584,49 @@ def _disk_plan(c, dc):
         dname = _safe_ident(d.get("name", ""), f + ".name")
         if not dname:
             raise ValueError(f + ".name 不能为空")
-        if name and dname == name:
+        if dname in data_names:
+            raise ValueError(f + ".name：数据盘 " + repr(dname) + " 重复声明")
+        data_names.append(dname)
+        # 缺陷 #1 的 schema 侧交叉检查：mode=name 时 target.name 与数据盘同名是自相矛盾
+        # （同一块盘既当系统盘又当"别碰"的数据盘）。auto/match 下 name 不参与选盘，不做要求。
+        if mode == "name" and name and dname == name:
             raise ValueError(f + ".name 不能与目标盘同名 " + repr(dname))
         dmount = _safe_mount(d.get("mount", ""), f + ".mount")
+        dwipe = _as_bool(d.get("wipe"), f + ".wipe", default=False)
+        if not custom:
+            # 非 custom 布局下我们不给数据盘生成任何一行，所以这两个值一定会被丢掉。
+            if dmount:
+                raise ValueError(
+                    f + ".mount：layout=" + layout
+                    + " 不生成数据盘分区/挂载点（只有 layout=custom 才生成），该值会被丢弃，故拒绝"
+                )
+            if dwipe:
+                raise ValueError(
+                    f + ".wipe=true：layout=" + layout
+                    + " 不清数据盘（只有 layout=custom 才生成 clearpart），该值会被丢弃，故拒绝"
+                )
+        elif dmount and not dwipe:
+            # custom 布局：wipe=false 表示"不碰这块盘的既有分区表"，那就没有地方可以安全地
+            # 新建并挂载一个分区（挂载盘上既有文件系统我们表达不出来）—— mount 会被丢掉。
+            raise ValueError(
+                f + ".mount：wipe=false 时不会给数据盘建分区/格式化，挂载点会被丢弃，故拒绝；"
+                "要建分区并挂载请设 wipe=true（或去掉 mount）"
+            )
         data.append({
             "name": dname, "mount": dmount,
             "fstype": _safe_fstype(d.get("fstype", ""), f + ".fstype", dmount),
             # 生产红线：数据盘默认不碰，必须显式 wipe=true 才动（规格 §2）
-            "wipe": _as_bool(d.get("wipe"), f + ".wipe", default=False),
+            "wipe": dwipe,
         })
+
+    # RAID 成员的"盘名前缀"与数据盘同名 = 用户想在这块盘上做 RAID，又声明它是"别碰"的数据盘。
+    # 两者的语义在本规格里不可能同时成立（RAID 成员是**目标盘**上的分区），必须拒绝而不是猜。
+    for f, tok, disk_prefix in raid_disk_specs:
+        if disk_prefix in data_names:
+            raise ValueError(
+                f + " 的 " + repr(tok) + " 把 " + repr(disk_prefix)
+                + " 当作 RAID 成员，但该盘在 disk_config.data_disks 里声明为数据盘 —— 二者矛盾"
+            )
 
     return {
         "mode": mode, "name": name, "serial": serial, "model": model,
@@ -592,6 +737,21 @@ def _ubuntu_storage_obj(plan):
         if p["mount"] and p["mount"] != "swap":
             mounts.append((fid, p["mount"]))
 
+    # 数据盘（规格 §2/§3.4）：只有 wipe=true 才动 —— 默认 wipe=false 时产物里一个字都不出现
+    # （生产红线：没确认就不碰数据盘）。写法与 disk0 完全同构，只是挂载点由用户给。
+    # _disk_plan 已经保证：走到这里的数据盘若给了 mount，wipe 必然是 true。
+    for n, d in enumerate(plan["data_disks"]):
+        if not d["wipe"]:
+            continue
+        did = "data%d" % n
+        cfg.append({"type": "disk", "id": did, "path": "/dev/" + d["name"], "wipe": True})
+        if not d["mount"]:
+            continue                      # 只清盘不建分区（与 RHEL 侧 clearpart 的语义一致）
+        pid = "datap%d" % n
+        cfg.append({"type": "partition", "id": pid, "device": did, "size": "rest"})
+        fid = _format(pid, d["fstype"] or "ext4")
+        mounts.append((fid, d["mount"]))
+
     for dev, path in mounts:
         cfg.append({"type": "mount", "id": "mnt%d" % mnt_n[0], "device": dev, "path": path})
         mnt_n[0] += 1
@@ -652,17 +812,37 @@ def _rhel_lv_ondisk(size) -> str:
 
 
 def _rhel_custom_lines(plan, disk) -> list:
-    """layout=custom 的 ks 行（规格 §3.3/§3.4）：part/volgroup/logvol/raid 全部 --ondisk=<disk>。"""
-    lines = ["ignoredisk --only-use=" + disk]
-    drives = [disk] + [d["name"] for d in plan["data_disks"] if d["wipe"]]
+    """layout=custom 的 ks 行（规格 §3.3/§3.4）：part/volgroup/logvol/raid 全部 --ondisk=<disk>。
+
+    **ignoredisk 只能有一条**（本次修复的实测结论）：pykickstart 的 F8_IgnoreDisk.parse 在
+    --drives 与 --only-use 同时被置上时直接抛
+
+        KickstartParseError: One of --drives or --only-use must be specified for ignoredisk command.
+
+    实测 pykickstart 3.78 / RHEL9：先 `ignoredisk --only-use=sda` 再 `ignoredisk --drives=sdc`，
+    **第二行即解析失败**，整份 ks 读不进去（anaconda 会停在 "An error occurred during reading
+    the kickstart file"）。旧实现正是这个形状（wipe=false 的数据盘会再发一条 --drives=sdc），
+    而 wipe=false 又是数据盘的默认值 —— 也就是说"配了数据盘"的 RHEL custom 模板生成出来的
+    ks 根本装不了。现在只发一条 --only-use：
+      · 要用的盘（目标盘 + 显式 wipe=true 的数据盘）全部列进去；
+      · 不用的盘（wipe=false 的数据盘）**不列** —— --only-use 的语义就是"只有列出的盘可用"，
+        没列出的盘 anaconda 一概不碰（pykickstart: "only disks listed here will be used
+        during installation"），比"--drives= 再声明一次"更强也更省事。
+    """
+    used = [disk] + [d["name"] for d in plan["data_disks"] if d["wipe"]]
+    lines = ["ignoredisk --only-use=" + ",".join(used)]
     if plan["wipe"]:
-        lines.append("clearpart --drives=" + ",".join(drives) + " --all --initlabel")
+        lines.append("clearpart --drives=" + ",".join(used) + " --all --initlabel")
     else:
         lines.append("# disk_config.wipe=false：不执行 clearpart（沿用磁盘上已有分区表）")
     for d in plan["data_disks"]:
         if not d["wipe"]:
-            # 生产红线：没确认就不动数据盘
-            lines.append("ignoredisk --drives=" + d["name"])
+            # 生产红线：没确认就不动数据盘。
+            # 这里**故意不再发 `ignoredisk --drives=<d>`**：第二条 ignoredisk 会让 pykickstart
+            # 直接报 "One of --drives or --only-use must be specified"（见函数开头），
+            # 而"没被 --only-use 列出的盘一律不碰"已经覆盖了这条语义。
+            lines.append("# 数据盘 " + d["name"] + " (disk_config.wipe=false)：只声明不碰，"
+                         "已由上面的 ignoredisk --only-use 排除")
 
     # PV / RAID 成员标识都按"出现顺序"从 01 起编号，与 §3.3 的 part.NN 同属一套
     # "第 N 个分区"语义（输入侧的 part.NN 是位置编号，输出侧只出现我们自己算的标识）。
@@ -680,6 +860,19 @@ def _rhel_custom_lines(plan, disk) -> list:
         ident = pv_of.get(p["index"]) or raid_members.get(p["index"]) or p["id_ks"]
         is_pv = p["index"] in pv_of
         is_raid = p["index"] in raid_members
+        if not is_pv and not is_raid and not p["mount"]:
+            # kickstart 的 `part` 行首字段是 <mntpoint>，anaconda/pykickstart 只认
+            #   /<path> | swap | raid.<id> | pv.<id> | btrfs.<id> | biosboot
+            # （pykickstart/commands/partition.py 的 mntpoint 帮助文本；pykickstart/options.py
+            #  的 mountpoint() 只对 "/" 开头的值做 normpath，其余原样透传 —— 它不做任何校验，
+            #  所以 `part part.01 ...` 能过解析、却会在格式化/挂载阶段出问题）。
+            # part.01 是**我们自己的**下标标识，anaconda 既不认识它、也不会把它当"无挂载点"。
+            # 因此这种分区在 kickstart 里无法安全表达 —— 拒绝，绝不发一条我们不确定的 ks 行。
+            raise ValueError(
+                "disk_config.partitions[%d].mount：没有挂载点、又不是 PV(vg/lv)、也不是 RAID 成员的"
+                "分区无法用 kickstart 表达（anaconda 只接受 /<path>|swap|raid.<id>|pv.<id>|btrfs.<id>|biosboot）；"
+                "请给它挂载点，或把它配成 PV / RAID 成员" % p["index"]
+            )
         opts = ["--ondisk=" + disk, _rhel_ondisk(p["size"])]
         if not is_pv and not is_raid:
             # PV / RAID 成员自身不建文件系统：fstype 属于 logvol / raid 那一行
@@ -687,7 +880,7 @@ def _rhel_custom_lines(plan, disk) -> list:
                 opts.insert(0, "--fstype=efi")
             elif p["fstype"]:
                 opts.insert(0, "--fstype=" + p["fstype"])
-        lines.append("part " + (ident if (is_pv or is_raid) else (p["mount"] or ident))
+        lines.append("part " + (ident if (is_pv or is_raid) else p["mount"])
                      + " " + " ".join(opts))
 
     for r in plan["raid"]:
@@ -714,27 +907,77 @@ def _rhel_custom_lines(plan, disk) -> list:
     return lines
 
 
+def _rhel_excluded_disks(plan) -> list:
+    """%pre 选盘时必须排除的盘。
+
+    数据盘必须排在候选之外：真机上"小系统盘 + 大数据盘"时，按容量/名字挑出来的正好是数据盘，
+    紧接着 `clearpart --drives=$target --all --initlabel` 就把它抹了（本缺陷的数据丢失面）。
+
+    RAID 成员不在这里：本规格里 raid[].devices 引用的是**目标盘上的分区**（见 _raid_part_ref），
+    不存在"另一块被当 RAID 成员的盘"。写 sdc3 时盘名前缀只用于"它是不是被声明成 data_disks"
+    的交叉校验（见 _disk_plan），不改变分区归属 —— 若把盘名前缀也塞进排除集，等于把目标盘
+    自己排除掉（sda3 的盘名前缀就是 sda），反而会装不上。
+    """
+    out = []
+    for d in plan["data_disks"]:
+        if d["name"] not in out:
+            out.append(d["name"])
+    return out
+
+
+# ── %pre 里解析 lsblk 的 awk 前置段 ──
+# 为什么不能用 `lsblk -dn -o NAME,TYPE,RM,TRAN,SIZE | awk '$2=="disk" && $3=="0" && $4!="usb" ...'`
+# （旧实现）：那是**按列位置**取值，任何一列为空都会让后面的列整体左移。TRAN 为空时
+# （virtio-blk 实测就是空）$4 变成 SIZE、$5 变空，`$5>=<字节>` 恒为假 → 一块盘也选不出来
+# （装机直接中止）；反过来 SIZE 为空时 $5 会取到别的字段，可能选中**错误**的盘然后 clearpart。
+# 现在改用 `-P/--pairs`（每行 KEY="value"，空值也保留成 KEY=""），用 gv() 按 key 取值，
+# 与列位置/空列彻底无关。gv 用 index() 找 ` KEY="`，所以带空格的 MODEL 也能完整取出。
+_LSBLK_AWK_PRELUDE = (
+    "function gv(l, k,   p, q) {"
+    " p = index(l, \" \" k \"=\\\"\"); if (p == 0) return \"\";"
+    " p += length(k) + 3; q = index(substr(l, p), \"\\\"\");"
+    " return (q == 0) ? \"\" : substr(l, p, q - 1) } "
+    "BEGIN { nx = split(excl, ex, \",\") } "
+    "function excluded(nm,   i) {"
+    " for (i = 1; i <= nx; i++) if (ex[i] == nm) return 1; return 0 } "
+)
+# 选盘主体：只认整盘、非可移动、非 usb、容量达标、且不在排除集里。
+_AWK_PICK_BY_SIZE = (
+    "{ L = \" \" $0;"
+    " if (gv(L, \"TYPE\") != \"disk\") next;"
+    " if (gv(L, \"RM\") != \"0\") next;"
+    " if (gv(L, \"TRAN\") == \"usb\") next;"
+    " nm = gv(L, \"NAME\");"
+    " if (nm == \"\" || excluded(nm)) next;"
+    " if (min > 0 && gv(L, \"SIZE\") + 0 < min) next;"
+    " print nm }"
+)
+# match 模式：按 SERIAL / MODEL 精确命中。
+_AWK_PICK_BY_KEY = (
+    "{ L = \" \" $0;"
+    " if (gv(L, \"SERIAL\") == s || gv(L, \"MODEL\") == s) {"
+    " nm = gv(L, \"NAME\");"
+    " if (nm != \"\" && !excluded(nm)) print nm } }"
+)
+
+
 def _rhel_pick_target_lines(plan) -> list:
     """%pre 里现场挑目标盘（规格 §3.1）：ks 没有"自动选盘"原语，只能脚本化。"""
-    lines = ["# 选出目标盘：非可移动、非光驱、容量 >= min_size_gb、按名排序取第一块"]
+    excl = ",".join(_rhel_excluded_disks(plan))
+    lines = ["# 选出目标盘：非可移动、非光驱、容量 >= min_size_gb、按名排序取第一块",
+             "# data_disks 里声明过的盘**先从候选里排除**：否则容量最大/名字最小的数据盘会被选中，"
+             "随后的 clearpart 直接把它抹掉（本缺陷的数据丢失面）。"
+             "lsblk 用 -P/--pairs 输出，按 key 取值，不依赖列位置。"]
     if plan["mode"] == "match":
         key = plan["serial"] or plan["model"]
-        lines.append(
-            "target=$(lsblk -dn -o NAME,SERIAL,MODEL | awk -v s='%s' "
-            "'$2==s || $3==s {print $1}' | sort | head -1)" % key
-        )
-    elif plan["min_size_gb"]:
-        # 只有给了下限才用 -b（字节）比较，否则与规格原文的 lsblk -dn 保持一致
-        lines.append(
-            "target=$(lsblk -bdn -o NAME,TYPE,RM,TRAN,SIZE | awk "
-            "'$2==\"disk\" && $3==\"0\" && $4!=\"usb\" && $5>=%d {print $1}' | sort | head -1)"
-            % (int(plan["min_size_gb"]) * 1024 ** 3)
-        )
+        lines.append("target=$(lsblk -dnP -o NAME,SERIAL,MODEL | "
+                     "awk -v s='%s' -v excl='%s' '" % (key, excl))
+        lines.append(_LSBLK_AWK_PRELUDE + _AWK_PICK_BY_KEY + "' | sort | head -1)")
     else:
-        lines.append(
-            "target=$(lsblk -dn -o NAME,TYPE,RM,TRAN,SIZE | awk "
-            "'$2==\"disk\" && $3==\"0\" && $4!=\"usb\" {print $1}' | sort | head -1)"
-        )
+        # 恒用 -b（字节）比较：未给下限时 min=0，等价于"只看是不是整盘/可移动/usb"。
+        lines.append("target=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE | "
+                     "awk -v min=%d -v excl='%s' '" % (int(plan["min_size_gb"]) * 1024 ** 3, excl))
+        lines.append(_LSBLK_AWK_PRELUDE + _AWK_PICK_BY_SIZE + "' | sort | head -1)")
     lines.append("if [ -z \"$target\" ]; then "
                  "echo 'PXE: 未找到可用的目标磁盘，装机中止' >&2; exit 1; fi")
     return lines
@@ -797,12 +1040,14 @@ def _ubuntu_user_data(c):
     plan = _disk_plan(c, dc)
     if plan is None:
         # ── 既有路径：disk_config 为空/只有历史键 "disk" ──
-        # 回归红线 §5.1：输出必须与改造前逐字一致。历史键 disk 唯一的变化是先过一遍
-        # _safe_line（只拦控制字符/换行）—— 它会被拼进 ks 的 --drives=<disk>，
-        # 从这里注入一整行是既有漏洞；合法盘名（sda/nvme0n1/…）恒等，不受影响。
+        # 回归红线 §5.1：合法盘名的输出必须与改造前逐字一致。历史键 disk 会被拼进
+        # ks 的 --drives=<disk>（`clearpart --drives=` 是**逗号分隔的多盘**语法），
+        # 所以这里必须用盘名白名单 _safe_ident，而不是只拦控制字符的 _safe_line：
+        #   disk="sda,sdb" 在旧实现下生成 `clearpart --drives=sda,sdb --all --initlabel`
+        #   → 把第二块（数据）盘一起抹掉。合法盘名（sda/nvme0n1/…）恒等，输出不变。
         disk = dc.get("disk")
         if disk is not None:
-            disk = _safe_line(disk, "disk_config.disk")
+            disk = _safe_ident(disk, "disk_config.disk")
         scheme = c.disk_scheme
         if scheme not in ("lvm", "direct", "zfs"):
             scheme = "lvm"
@@ -883,9 +1128,11 @@ def _rhel_ks(c):
     plan = _disk_plan(c, dc)
     if plan is None:
         # ── 既有路径（回归红线 §5.1）：逐字保持不变 ──
-        # 历史键 disk 先过 _safe_line：它直接进 --drives=/--ondisk=/--boot-drive=，
-        # 含换行即可往 ks 里注入一整行。合法盘名恒等，故输出不变。
-        disk = _safe_line(disk, "disk_config.disk") if disk is not None else "sda"
+        # 历史键 disk 先过 _safe_ident（盘名白名单）：它直接进 --drives=/--ondisk=/
+        # --boot-drive=，而 --drives= 是**逗号分隔的多盘**语法 —— 旧实现只拦控制字符，
+        # disk="sda,sdb" 会生成 `clearpart --drives=sda,sdb --all --initlabel`，
+        # 把数据盘 sdb 也抹掉。合法盘名恒等，故输出不变。
+        disk = _safe_ident(disk, "disk_config.disk") if disk is not None else "sda"
         parts = _rhel_layout_lines(c.disk_scheme, disk)
         disk_lines = [parts.rstrip(), "bootloader --location=mbr --boot-drive=" + disk]
     else:
@@ -1015,6 +1262,59 @@ def _extra_repo_args(repos) -> str:
 
 
 # ===== iPXE 菜单 =====
+
+def _answer_base(c) -> str:
+    """应答/引导脚本的 URL 根：answer_root 优先，留空则回落到 http_root（=改造前行为）。
+
+    **媒体绝不能走这里**：kernel_path / initrd_path / iso_url 拼的是 http_root
+    （扁平路径 /srv/opstk/pxe-web/<os>/<ver>/），本函数只用于
+    user-data / ks.cfg / iPXE 菜单这些"每个模板都同名、需要按模板隔离"的产物。
+    历史教训见 PxeConfig.answer_root 的注释（把 http_root 整体隔离 → 媒体 404 → 回退）。
+    """
+    base = _safe_line(c.answer_root, "answer_root").strip()
+    if not base:
+        base = _safe_line(c.http_root, "http_root")
+    return base.rstrip("/")
+
+
+# 未登记机器默认菜单的标记行。单测靠它钉住"默认菜单不是某次部署的装机菜单"。
+UNREGISTERED_DEFAULT_MARK = "# opstk-unregistered-default"
+
+
+def _unregistered_default_menu() -> str:
+    """没有被任何模板认领的机器拿到的默认菜单：**绝不自动安装**。
+
+    背景（实测，不是推断）：默认 dhcp-boot 原先指向的就是各模板生成的那份
+    `boot.ipxe`，而它是**单份共享文件** —— 于是"任何 PXE 起来、又没显式登记的机器，
+    都会被按**最后一次部署的模板**装机"，实测出现过不需要装机的机器被重新分区。
+
+    现在的分工：
+      · 已登记 MAC：dnsmasq 的第二阶段 dhcp-boot 直接指向它自己的
+        `<answer_root>/boot/<mac>.ipxe`（见 _dnsmasq），与全局文件无关；
+      · 未登记 MAC：只能落到本文件。本菜单不装任何系统，打印提示后 `exit`
+        把控制权交回固件（固件通常接着从本地硬盘引导）。
+    `exit` 而不是 `chain` 本地盘：iPXE 里没有可移植的"从本地盘启动"原语
+    （BIOS/UEFI 各不相同），`exit` 是唯一两条固件都认的做法。
+
+    本函数**不接收 PxeConfig**：内容与模板无关，因此任何模板部署出来的默认菜单都是
+    逐字节相同的 —— 不存在"后部署的模板把默认菜单改写成另一种行为"这回事。
+    """
+    return "\n".join([
+        "#!ipxe",
+        UNREGISTERED_DEFAULT_MARK,
+        "# 未登记的机器：本菜单不执行任何安装 / 分区操作。",
+        "# 已登记机器不会被带到这里 —— 它们的第二阶段引导由 dnsmasq 按 MAC 指向",
+        "# <answer_root>/boot/<mac>.ipxe（每个模板一套，互不覆盖）。",
+        "# echo 一律用 ASCII：装机机的 VGA/串口基本都是 ASCII，中文会显示成乱码。",
+        "echo OpsToolkit: this machine is not registered; refusing to auto-install.",
+        "echo Register its MAC in OpsToolkit (install records) and deploy again.",
+        "echo Returning to firmware / local disk in 5 seconds...",
+        "sleep 5",
+        "exit",
+        "",
+    ])
+
+
 def _ipxe_menu(c, mac="", answer_url=""):
     # 第 3 层兜底：统一先净化再拼接（见 _safe_line 的说明）
     http_root = _safe_line(c.http_root, "http_root")
@@ -1026,6 +1326,10 @@ def _ipxe_menu(c, mac="", answer_url=""):
 
     kernel = http_root + "/" + kernel_path
     initrd = http_root + "/" + initrd_path
+    # 媒体（kernel/initrd/ISO）**只**拼 http_root —— 见 _answer_base 的说明。
+    # 应答文件（user-data / ks.cfg）走 answer_root：它按模板隔离，
+    # 而媒体不能隔离（介质只存在于扁平路径）。
+    answer_base = _answer_base(c)
     # UEFI 必须在内核命令行上给出 initrd 的名字，且要与 iPXE `initrd` 命令注册的名字一致
     # （即该 URL 的 basename，可用 iPXE 的 imgstat 看到）。**BIOS 下这是 NO-OP**，
     # 所以两种固件统一带上，不需要分支。
@@ -1039,7 +1343,7 @@ def _ipxe_menu(c, mac="", answer_url=""):
     hn = _safe_hostname(c.hostname)
     mac_s = _safe_mac(mac) or "auto"
     if (c.os_type or "").strip().lower() == "ubuntu":
-        seed = _safe_line(answer_url, "answer_url") or (http_root + "/")
+        seed = _safe_line(answer_url, "answer_url") or (answer_base + "/")
         if not seed.endswith("/"):
             seed += "/"
         # Ubuntu 装机链路的两条**实测定案**（在 PVE 真机跑出来过，证据在内核串口里）：
@@ -1086,7 +1390,7 @@ def _ipxe_menu(c, mac="", answer_url=""):
                 "RHEL 系装机必须提供可用的安装源 mirror：本机未发布 ISO 仓库树，"
                 "无法为 inst.repo 提供内容。请填写模板的 mirror，或先自行发布安装源。"
             )
-        answer = _safe_line(answer_url, "answer_url") or (http_root + "/ks.cfg")
+        answer = _safe_line(answer_url, "answer_url") or (answer_base + "/ks.cfg")
         stage2 = _safe_line(c.stage2, "stage2")
         args = ("kernel " + kernel + " initrd=" + initrd_name + " inst.ks=" + answer)
         if stage2:
@@ -1117,6 +1421,12 @@ def _dnsmasq(c, installs=None):
     iface = nc.get("interface", "eth0")
     gateway = nc.get("gateway", "192.168.1.1")
     mode = c.deploy_mode or "standalone"
+    # 每台【已登记】机器的第二阶段引导脚本放在 answer_root 下（按模板隔离）。
+    # 未登记机器的默认引导脚本仍然是**扁平**的 <http_root>/boot.ipxe：
+    # 它是全局唯一、内容由 generator 定死的"拒绝自动安装"菜单（有装机记录时），
+    # 见 _unregistered_default_menu()。默认菜单**不能**指向 answer_root，
+    # 否则又变成"谁最后部署谁决定未登记机器装什么"。
+    answer_base = _answer_base(c)
 
     L = [
         "# dnsmasq PXE 配置 (OpsToolkit 生成)",
@@ -1158,9 +1468,10 @@ def _dnsmasq(c, installs=None):
         L.append("# （boot/<mac>.ipxe，里面才是各自的 hostname 与应答文件路径）不会被自动下发。")
         L.append("# 需要按 MAC 定制时，让外部 DHCP 直接把 option 67 下发成该机器的 URL")
         L.append("# （iPXE 客户端支持 URL，MAC 用短横线形式）：")
-        L.append("#   option 67 = " + c.http_root + "/boot/<mac>.ipxe   例如 " + c.http_root
+        L.append("#   option 67 = <answer_root>/boot/<mac>.ipxe   例如 " + answer_base
                  + "/boot/" + (_mac_tag(reg[0][0]) if reg else "aa-bb-cc-dd-ee-ff") + ".ipxe")
-        L.append("# 否则机器只会被带到通用 boot.ipxe，按 MAC 定制的 hostname 不会生效。")
+        L.append("# 否则机器只会被带到通用 boot.ipxe（未登记的默认菜单），"
+                 "按 MAC 定制的 hostname 不会生效。")
         L.append("")
         L.append("enable-tftp")
         L.append("tftp-root=/srv/tftp")
@@ -1223,10 +1534,13 @@ def _dnsmasq(c, installs=None):
     L.append("# 按 MAC 指定 iPXE 菜单 (tag 方式, 避免 URL 被当作 hostname)")
     for mac, tag in reg:
         L.append("tag-if=set:fw-menu-" + tag + ",tag:fw-menu,tag:pxe_" + tag)
-        L.append("dhcp-boot=tag:fw-menu-" + tag + "," + c.http_root + "/boot/" + tag + ".ipxe")
-    # 默认菜单对**所有**已登记 MAC 取反，从而与上面每台机的专属菜单互斥
+        L.append("dhcp-boot=tag:fw-menu-" + tag + "," + answer_base + "/boot/" + tag + ".ipxe")
+    # 默认菜单对**所有**已登记 MAC 取反，从而与上面每台机的专属菜单互斥。
+    # 它指向扁平的 <http_root>/boot.ipxe（全局唯一），内容见 _unregistered_default_menu()：
+    # 有装机记录时那是一份"拒绝自动安装"的安全菜单，不会把没登记的机器重新分区。
     neg = "".join(",tag:!pxe_" + t for _, t in reg)
     L.append("tag-if=set:fw-menu-def,tag:fw-menu" + neg)
+    L.append("# 未登记机器的默认菜单：扁平全局文件（不是 profiles/<pid>/ 下的那份）")
     L.append("dhcp-boot=tag:fw-menu-def," + c.http_root + "/boot.ipxe")
     L.append("")
     return "\n".join(L) + "\n"
@@ -1243,9 +1557,28 @@ def _mode_label(mode):
 
 
 
-def _readme(c):
+def _readme(c, has_registered=False):
     iso_mb = int(c.iso_size_mb or 0)
     ram_mb = (iso_mb + 1536) if iso_mb else 0
+    if has_registered:
+        unreg = (
+            "未登记的机器（默认菜单 <http_root>/boot.ipxe）\n"
+            "------------------------------------------\n"
+            "本模板有已登记的装机记录，所以默认菜单是【拒绝自动安装】的安全菜单：\n"
+            "未登记的机器 PXE 起来后只会被打回固件/本地硬盘，不会被重新分区。\n"
+            "要装一台新机器，请先在 OpsToolkit 里为它的 MAC 建装机记录并重新部署。\n"
+            "已登记机器各自的菜单在同目录的 boot/<mac>.ipxe，互相不覆盖。\n\n"
+        )
+    else:
+        unreg = (
+            "未登记的机器（默认菜单 <http_root>/boot.ipxe）\n"
+            "------------------------------------------\n"
+            "本模板**没有**任何已登记装机记录，因此默认菜单就是本模板的装机菜单\n"
+            "（向后兼容：单模板部署的既有行为不变）。\n"
+            "注意：默认菜单是全局唯一的一份文件，同一引导网段里再部署另一个\n"
+            "同样没有装机记录的模板，会把它覆盖成那个模板 —— 多模板请为机器\n"
+            "建装机记录（每个 MAC 会拿到自己的 boot/<mac>.ipxe）。\n\n"
+        )
     return (
         "OpsToolkit PXE 部署说明\n"
         "========================\n\n"
@@ -1280,6 +1613,7 @@ def _readme(c):
         "----------\n"
         "本次参数: " + (c.kernel_console or "(未设置)") + "\n"
         "无显示器的机器请接串口(115200)看装机过程与失败原因。\n\n"
+        + unreg +
         "部署步骤\n"
         "--------\n"
         "1. dnsmasq.conf 放到 /etc/dnsmasq.conf；\n"
@@ -1323,16 +1657,26 @@ def _validate_lines(c):
 
 def generate_all(c, installs=None):
     _validate_lines(c)
+    answer_base = _answer_base(c)
     files = {}
     if (c.os_type or "").strip().lower() == "ubuntu":
         files["user-data"] = _ubuntu_user_data(c)
         files["meta-data"] = "local-hostname: " + _safe_hostname(c.hostname) + "\n"
     else:
         files["ks.cfg"] = _rhel_ks(c)
-    files["boot.ipxe"] = _ipxe_menu(c)
+    # 默认菜单（= dnsmasq 里 tag:fw-menu-def 指向的那份扁平 boot.ipxe）取什么内容：
+    #   · 本模板**有**已登记装机记录 → "拒绝自动安装"的安全菜单。未登记的机器不再
+    #     按"最后一次部署的模板"装系统（实测发生过不该装的机器被重新分区）；
+    #   · 本模板**没有**任何装机记录 → 仍是本模板自己的菜单：这是既有行为，
+    #     单模板部署（前端"部署"按钮就是发 installs:[]）靠它才能装机，不能破。
+    # 两种内容都是**显式定义**的，且安全菜单与模板无关（逐字节相同），
+    # 因此多模板场景下不存在"后部署者把默认行为改写成另一种"。
+    has_registered = any(_safe_mac(i.get("mac")) for i in (installs or []) if isinstance(i, dict))
+    files["boot.ipxe"] = _unregistered_default_menu() if has_registered else _ipxe_menu(c)
     files["dnsmasq.conf"] = _dnsmasq(c, installs)
-    files["README.txt"] = _readme(c)
-    # 每台装机记录生成独立菜单与应答文件，使 hostname 生效
+    files["README.txt"] = _readme(c, has_registered=has_registered)
+    # 每台装机记录生成独立菜单与应答文件，使 hostname 生效。
+    # 应答文件与菜单都落在 answer_base（= 部署时的 profiles/<pid>，按模板隔离）之下。
     for inst in installs or []:
         # D7 第 3 层：mac 会变成【文件名】与 dhcp-host 的值，必须是合法 MAC
         mac = _safe_mac(inst.get("mac"))
@@ -1342,12 +1686,12 @@ def generate_all(c, installs=None):
         hostname = _safe_hostname(inst.get("hostname"), "") or _safe_hostname(c.hostname)
         ic = replace(c, hostname=hostname)
         if (c.os_type or "").strip().lower() == "ubuntu":
-            seed = c.http_root + "/user-data/" + tag + "/"
+            seed = answer_base + "/user-data/" + tag + "/"
             files["user-data/" + tag + "/user-data"] = _ubuntu_user_data(ic)
             files["user-data/" + tag + "/meta-data"] = "local-hostname: " + hostname + "\n"
             answer = seed
         else:
-            answer = c.http_root + "/ks/" + tag + "/ks.cfg"
+            answer = answer_base + "/ks/" + tag + "/ks.cfg"
             files["ks/" + tag + "/ks.cfg"] = _rhel_ks(ic)
         files["boot/" + tag + ".ipxe"] = _ipxe_menu(ic, mac=mac, answer_url=answer)
     return files

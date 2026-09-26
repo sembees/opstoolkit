@@ -1036,9 +1036,12 @@ class PxeAutoDiskTest(unittest.TestCase):
         self.assertNotIn("sda", ks)
 
     def test_min_size_gb_is_used_in_pre(self):
+        """下限走 awk 的 -v min=<字节>（不再按列位置 $5 取 SIZE，见 PxeAutoDiskTest 的
+        test_lsblk_is_parsed_by_key_not_by_column：空列会让位置取值整体左移）。"""
         ks = generate_all(self._rhel(
             {"target": {"mode": "auto", "min_size_gb": 20}}))["ks.cfg"]
-        self.assertIn("$5>=21474836480", ks)
+        self.assertIn("-v min=21474836480", ks)
+        self.assertIn('gv(L, "SIZE") + 0 < min', ks)
 
 
 class PxeRaidAndDataDiskTest(unittest.TestCase):
@@ -1056,7 +1059,7 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
         ],
         "raid": [{"name": "md0", "level": 1, "devices": ["part.03", "part.04"],
                   "mount": "/data", "fstype": "xfs"}],
-        "data_disks": [{"name": "sdc", "mount": "/backup", "fstype": "xfs"}],
+        "data_disks": [{"name": "sdc", "fstype": "xfs"}],
     }
 
     def _rhel(self, dc, **kw):
@@ -1088,8 +1091,12 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
         self.assertIn("raid /data --level=1 --device=md0 --fstype=xfs raid.01 raid.02", fragment)
         self.assertIn("part raid.01 --ondisk=$target --size=10240", fragment)
         self.assertIn("part raid.02 --ondisk=$target --size=10240", fragment)
-        # 数据盘默认 wipe=false ⇒ 只声明"别碰它"，绝无 clearpart/part
-        self.assertIn("ignoredisk --drives=sdc", fragment)
+        # 数据盘默认 wipe=false ⇒ 只声明"别碰它"，绝无 clearpart/part。
+        # 声明方式是"不被 --only-use 列出"，而**不是**再发一条 ignoredisk --drives=sdc：
+        # 两条 ignoredisk 会让 pykickstart 直接报
+        #   "One of --drives or --only-use must be specified"（见 test_exactly_one_ignoredisk_line）。
+        self.assertIn("ignoredisk --only-use=$target", fragment)
+        self.assertFalse([l for l in fragment if l.startswith("ignoredisk") and "sdc" in l], fragment)
         self.assertNotIn("clearpart --drives=$target,sdc", fragment)
         self.assertNotIn("part /backup", fragment)
         # 主体里没有磁盘行（磁盘行只在 %pre 片段里）
@@ -1102,7 +1109,7 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
         from app.it.pxe.generator import _disk_plan
         plan = _disk_plan(_cfg(disk_config=self.RAID_DC), self.RAID_DC)
         self.assertEqual(plan["data_disks"], [
-            {"name": "sdc", "mount": "/backup", "fstype": "xfs", "wipe": False}])
+            {"name": "sdc", "mount": "", "fstype": "xfs", "wipe": False}])
         # target 的 wipe 缺省是 true（装系统的盘本来就要清）
         self.assertTrue(plan["wipe"])
 
@@ -1123,16 +1130,428 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
             self.assertFalse(line.startswith("clearpart"), line)
         self.assertIn("wipe=false", ks)
 
+    def test_exactly_one_ignoredisk_line(self):
+        """一份 ks 里只能有一条 ignoredisk —— 否则 anaconda 直接读不进去。
+
+        实测（pykickstart 3.78 / RHEL9，本地真解析）：`ignoredisk --only-use=sda` 之后再写
+        `ignoredisk --drives=sdc`，第二行抛
+            KickstartParseError: One of --drives or --only-use must be specified for ignoredisk command.
+        （F8_IgnoreDisk.parse 累积两条状态后 howmany != 1）。旧实现在"数据盘默认 wipe=false"时
+        就会发第二条，也就是**配了数据盘的 RHEL custom 模板生成出来的 ks 装不了**。
+        """
+        cases = [
+            self.RAID_DC,                                        # 数据盘 wipe 缺省 false
+            dict(self.RAID_DC, data_disks=[{"name": "sdc", "mount": "/backup",
+                                            "fstype": "xfs", "wipe": True}]),
+            dict(self.RAID_DC, layout="custom", target={"mode": "name", "name": "sda"}),
+        ]
+        for dc in cases:
+            with self.subTest(dc=dc):
+                ks = generate_all(self._rhel(dc))["ks.cfg"]
+                found = [l for l in ks.splitlines() if l.startswith("ignoredisk")]
+                self.assertEqual(len(found), 1, found)
+                self.assertTrue(found[0].startswith("ignoredisk --only-use="), found[0])
+        # wipe=true 的数据盘必须在 --only-use 里（它要被 clearpart 并建分区）
+        ks = generate_all(self._rhel(cases[1]))["ks.cfg"]
+        self.assertIn("ignoredisk --only-use=$target,sdc", ks)
+
     def test_raid_devices_accept_three_id_spellings(self):
-        """§3.3 的 part.01、subiquity 的 part0、§2 示例的 sda4 都折算到同一套"第 N 个分区"。"""
+        """§3.3 的 part.01、subiquity 的 part0、§2 示例的 sdaN 都折算到同一套"第 N 个分区"。
+
+        注意用 sdb3 而不是 sdc3：sdc 在本用例里是数据盘，把某个 RAID 成员的盘名前缀写成
+        数据盘是自相矛盾（有 test_raid_member_disk_prefix_must_not_be_a_data_disk 钉住）。
+        """
         from app.it.pxe.generator import _disk_plan
-        for spelling in ("part.03", "part2", "sdc3"):
+        for spelling in ("part.03", "part2", "sdb3"):
             with self.subTest(spelling=spelling):
                 dc = dict(self.RAID_DC)
                 dc["raid"] = [{"name": "md0", "level": 1, "devices": [spelling, "part.04"],
                                "mount": "/data", "fstype": "xfs"}]
                 plan = _disk_plan(_cfg(disk_config=dc), dc)
                 self.assertEqual(plan["raid"][0]["member_indexes"], [2, 3])
+
+
+def _assert_disk_config_rejected(case, dc, needle, os_type="ubuntu"):
+    """两层都必须拒绝，且错误文本里点名到字段路径。
+
+    第 2 层 = schemas（HTTP 入口 → 422）；第 3 层 = generator._disk_plan（绕过 HTTP 直接调用）。
+    """
+    from pydantic import ValidationError
+
+    from app.core.schemas import PxeProfileIn
+    with case.assertRaises(ValidationError) as cm:
+        PxeProfileIn(name="x", os_type=os_type, disk_config=dc)
+    errs = cm.exception.errors()
+    blob = " | ".join(e["msg"] for e in errs) + " " + " ".join(
+        ".".join(str(x) for x in e["loc"]) for e in errs)
+    case.assertIn(needle, blob, "schemas 层没点名字段：" + blob)
+    from app.it.pxe.generator import _disk_plan
+    with case.assertRaises(ValueError) as cm2:
+        _disk_plan(_cfg(os_type=os_type), dc)
+    case.assertIn(needle, str(cm2.exception), "generator 层没点名字段")
+
+
+class PxeAutoTargetExclusionTest(unittest.TestCase):
+    """缺陷 #1：auto 选盘必须先排除 data_disks —— 否则"小系统盘 + 大数据盘"会选中数据盘并抹掉它。"""
+
+    def _rhel(self, dc, **kw):
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        kw.setdefault("mirror", "http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        return _cfg(disk_config=dc, **kw)
+
+    def test_rhel_auto_excludes_data_disks_and_hardcodes_no_target(self):
+        dc = {"target": {"mode": "auto"}, "layout": "custom",
+              "partitions": CUSTOM_PARTS,
+              "data_disks": [{"name": "sdb", "fstype": "xfs"}]}
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        # 排除集进了 %pre，且候选过滤真的被使用
+        self.assertIn("-v excl='sdb'", ks)
+        self.assertIn("excluded(nm)", ks)
+        # 目标盘依旧不写死（反向断言）
+        self.assertNotIn("sda", ks)
+        self.assertIn("clearpart --drives=$target --all --initlabel", ks)
+        # %pre 选不到盘时必须中止，绝不"随便挑一块"
+        self.assertIn("未找到可用的目标磁盘，装机中止", ks)
+
+    def test_exclusion_list_is_data_disks_only(self):
+        """排除集只能来自 data_disks；RAID 成员的盘名前缀**不能**进去。
+
+        RAID 成员在本规格里是**目标盘上的分区**（_raid_part_ref）：`sdb4` 只取"第 4 个分区"，
+        盘名前缀仅用于交叉校验。若把前缀也塞进排除集，`sda3` 的 `sda` 会把目标盘自己排除掉 ——
+        %pre 选不到盘，装机直接中止（比"选中数据盘"轻，但同样是故障）。
+        """
+        from app.it.pxe.generator import _disk_plan, _rhel_excluded_disks
+        dc = {"target": {"mode": "match", "serial": "S3Z1NB0K123456"},
+              "layout": "custom",
+              "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                             {"size": "10G", "fstype": "xfs"},
+                             {"size": "10G", "fstype": "xfs"},
+                             {"mount": "/", "size": "rest"}],
+              "raid": [{"name": "md0", "level": 1, "devices": ["sdb2", "sdb3"],
+                        "mount": "/data", "fstype": "xfs"}],
+              "data_disks": [{"name": "sdc", "fstype": "xfs"}]}
+        plan = _disk_plan(self._rhel(dc), dc)
+        self.assertEqual(plan["raid"][0]["member_indexes"], [1, 2])
+        self.assertEqual(_rhel_excluded_disks(plan), ["sdc"])   # 没有 sdb / sda
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        self.assertIn("-v excl='sdc'", ks)
+        self.assertNotIn("excl='sdb", ks)
+
+    def test_duplicate_data_disk_name_is_rejected_and_exclusion_dedups(self):
+        # 重名的数据盘现在是 422（见 PxeDataDiskTest），所以"去重"只剩纯函数层面可测
+        from app.it.pxe.generator import _rhel_excluded_disks
+        self.assertEqual(_rhel_excluded_disks(
+            {"data_disks": [{"name": "sdb"}, {"name": "sdb"}, {"name": "sdc"}]}),
+            ["sdb", "sdc"])
+
+    def test_lsblk_is_parsed_by_key_not_by_column(self):
+        """缺陷 #4：%pre 用 -P/--pairs 按 key 取值，不再按下标取列。
+
+        旧写法 `$2=="disk" && $3=="0" && $4!="usb" && $5>=N` 在任何一列为空时整体左移：
+        TRAN 为空（virtio-blk 实测）会让 $5 变成空串、下限比较恒假 → 一块盘都选不出来；
+        反过来 SIZE 为空时 $5 会取到别的字段，可能选中**错误**的盘再 clearpart。
+        """
+        ks = generate_all(self._rhel({"target": {"mode": "auto"}, "layout": "custom",
+                                      "partitions": CUSTOM_PARTS}))["ks.cfg"]
+        self.assertIn("lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE", ks)
+        for positional in ('$2==', '$3==', '$4!=', '$5>='):
+            self.assertNotIn(positional, ks)
+        self.assertIn('gv(L, "TYPE") != "disk"', ks)
+        self.assertIn('gv(L, "TRAN") == "usb"', ks)     # 空 TRAN 不再让列塌陷
+        self.assertIn('gv(L, "RM") != "0"', ks)
+        self.assertIn('gv(L, "SIZE") + 0 < min', ks)
+        # match 模式同样按 key 取值（MODEL 可能带空格，位置取值必然取错）
+        ks2 = generate_all(self._rhel({"target": {"mode": "match",
+                                                  "serial": "S3Z1NB0K123456"}}))["ks.cfg"]
+        self.assertIn("lsblk -dnP -o NAME,SERIAL,MODEL", ks2)
+        self.assertIn('gv(L, "SERIAL") == s', ks2)
+        self.assertNotIn('$2==s', ks2)
+
+    def test_ubuntu_noncustom_auto_with_data_disks_is_rejected(self):
+        """Ubuntu 的 layout.match 没有排除语法 → 必须拒绝，绝不猜一块盘然后 wipe 掉它。"""
+        _assert_disk_config_rejected(
+            self, {"target": {"mode": "auto"}, "layout": "lvm",
+                   "data_disks": [{"name": "sdc"}]}, "data_disks", os_type="ubuntu")
+        # RHEL 侧同一形状**不能**跟着报错：它的 %pre 能表达排除
+        ks = generate_all(self._rhel({"target": {"mode": "auto"}, "layout": "lvm",
+                                      "data_disks": [{"name": "sdc"}]}))["ks.cfg"]
+        self.assertIn("-v excl='sdc'", ks)
+
+
+class PxeDataDiskTest(unittest.TestCase):
+    """缺陷 #1/#5：data_disks 的每个字段都要么被生成、要么被 422 拒绝，绝不静默丢弃。"""
+
+    def _rhel(self, dc, **kw):
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        kw.setdefault("mirror", "http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        return _cfg(disk_config=dc, **kw)
+
+    WIPE_DD = {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+               "partitions": CUSTOM_PARTS,
+               "data_disks": [{"name": "sdc", "mount": "/backup", "fstype": "xfs",
+                               "wipe": True}]}
+
+    def test_ubuntu_custom_generates_data_disk(self):
+        """Ubuntu custom 侧原本完全不生成数据盘（mount 被静默丢掉）—— 现在真的生成。"""
+        cfg = yaml.safe_load(generate_all(_cfg(disk_config=self.WIPE_DD))["user-data"])[
+            "autoinstall"]["storage"]["config"]
+        self.assertEqual([c for c in cfg if c["type"] == "disk"], [
+            {"type": "disk", "id": "disk0", "path": "/dev/sda", "wipe": True},
+            {"type": "disk", "id": "data0", "path": "/dev/sdc", "wipe": True},
+        ])
+        self.assertIn({"type": "partition", "id": "datap0", "device": "data0",
+                       "size": "rest"}, cfg)
+        fmt = [c for c in cfg if c["type"] == "format" and c["volume"] == "datap0"]
+        self.assertEqual(len(fmt), 1)
+        self.assertEqual(fmt[0]["fstype"], "xfs")
+        self.assertEqual([(c["device"], c["path"]) for c in cfg if c["type"] == "mount"][-1],
+                         (fmt[0]["id"], "/backup"))
+
+    def test_rhel_custom_generates_data_disk(self):
+        """显式盘名（mode=name）时磁盘行直接输出在主体里，不在 %pre 片段中。"""
+        block = _ks_disk_block(generate_all(self._rhel(self.WIPE_DD))["ks.cfg"])
+        self.assertIn("clearpart --drives=sda,sdc --all --initlabel", block)
+        self.assertIn("part /backup --fstype=xfs --size=1 --grow --ondisk=sdc", block)
+
+    def test_data_disk_mount_without_wipe_is_rejected(self):
+        """wipe=false + mount：不会给"不许动"的盘建分区，挂载点兑现不了 → 拒绝（旧行为是静默丢弃）。"""
+        _assert_disk_config_rejected(
+            self, {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+                   "partitions": CUSTOM_PARTS,
+                   "data_disks": [{"name": "sdc", "mount": "/backup", "fstype": "xfs"}]},
+            "data_disks[0].mount")
+
+    def test_data_disk_mount_or_wipe_on_noncustom_layout_is_rejected(self):
+        for dd, needle in (({"name": "sdc", "mount": "/backup"}, "data_disks[0].mount"),
+                           ({"name": "sdc", "wipe": True}, "data_disks[0].wipe=true")):
+            with self.subTest(dd=dd):
+                _assert_disk_config_rejected(
+                    self, {"target": {"mode": "name", "name": "sda"}, "layout": "lvm",
+                           "data_disks": [dd]}, needle)
+
+    def test_partitions_on_noncustom_layout_is_rejected(self):
+        _assert_disk_config_rejected(
+            self, {"layout": "lvm", "partitions": [{"mount": "/", "size": "rest"}]},
+            "partitions")
+
+    def test_raid_on_noncustom_layout_is_rejected(self):
+        _assert_disk_config_rejected(
+            self, {"layout": "direct",
+                   "raid": [{"name": "md0", "level": 1, "devices": ["part.01"]}]},
+            "raid")
+
+    def test_partition_both_pv_and_raid_is_rejected(self):
+        _assert_disk_config_rejected(
+            self, {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+                   "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                                  {"mount": "swap", "size": "4G"},
+                                  {"vg": "vg0", "lv": "root", "mount": "/", "size": "rest"}],
+                   "raid": [{"name": "md0", "level": 1, "devices": ["part.03"],
+                             "mount": "/data", "fstype": "xfs"}]},
+            "partitions[2]")
+
+    def test_custom_layout_without_root_mount_is_rejected(self):
+        _assert_disk_config_rejected(
+            self, {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+                   "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                                  {"mount": "/boot", "size": "1G"}]},
+            "/boot/efi")
+
+    def test_duplicate_mount_is_rejected(self):
+        _assert_disk_config_rejected(
+            self, {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+                   "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                                  {"mount": "/data", "size": "10G"},
+                                  {"mount": "/data", "size": "20G"},
+                                  {"mount": "/", "size": "rest"}]},
+            "partitions[2].mount")
+
+    def test_duplicate_vg_lv_is_rejected(self):
+        _assert_disk_config_rejected(
+            self, {"layout": "custom",
+                   "partitions": [{"vg": "vg0", "lv": "root", "mount": "/", "size": "20G"},
+                                  {"vg": "vg0", "lv": "root", "mount": "/var", "size": "rest"}]},
+            "partitions[1].lv")
+
+    def test_duplicate_data_disk_name_is_rejected(self):
+        _assert_disk_config_rejected(
+            self, {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+                   "partitions": CUSTOM_PARTS,
+                   "data_disks": [{"name": "sdc"}, {"name": "sdc"}]},
+            "data_disks[1].name")
+
+    def test_duplicate_raid_name_is_rejected(self):
+        _assert_disk_config_rejected(
+            self, {"layout": "custom",
+                   "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                                  {"size": "1G", "fstype": "xfs"},
+                                  {"size": "1G", "fstype": "xfs"},
+                                  {"mount": "/", "size": "rest"}],
+                   "raid": [{"name": "md0", "level": 1, "devices": ["part.02"]},
+                            {"name": "md0", "level": 1, "devices": ["part.03"]}]},
+            "raid[].name")
+
+    def test_raid_member_disk_prefix_must_not_be_a_data_disk(self):
+        """`sdc3` 的 sdc 若同时被声明成数据盘 = 自相矛盾（想在这块盘上做 RAID，又说不许碰）。"""
+        _assert_disk_config_rejected(
+            self, {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+                   "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                                  {"size": "10G", "fstype": "xfs"},
+                                  {"mount": "/", "size": "rest"}],
+                   "raid": [{"name": "md0", "level": 1, "devices": ["sdc2"],
+                             "mount": "/data", "fstype": "xfs"}],
+                   "data_disks": [{"name": "sdc"}]},
+            "raid[0].devices")
+
+
+class PxeRaidIdSpellingTest(unittest.TestCase):
+    """缺陷 #3：三种 RAID 成员写法（part.NN 1 起 / partN 0 起 / 盘名N 1 起）的基准必须等价且单点化。"""
+
+    # (写法, 期望下标)；同一个分区可以有多种写法，它们必须落在同一个下标上
+    SAME_PARTITION = ("part.03", "part2", "sdb3", "nvme0n1p3", "mmcblk0p3")
+    EXPECTED_INDEX = 2
+
+    def test_each_spelling_resolves_to_the_same_partition(self):
+        from app.it.pxe.generator import _raid_part_ref
+        from app.core.schemas import _raid_member_index
+        for spelling in self.SAME_PARTITION:
+            with self.subTest(spelling=spelling):
+                idx, disk = _raid_part_ref(spelling, "raid[0].devices")
+                self.assertEqual(idx, self.EXPECTED_INDEX, spelling)
+                # 两层（schemas 直接复用同一实现）必须给出同一个下标
+                self.assertEqual(_raid_member_index(spelling, 5, "raid[0].devices"),
+                                 self.EXPECTED_INDEX, spelling)
+        # 盘名前缀只用于交叉校验，不改变归属
+        self.assertEqual(_raid_part_ref("sdb3", "f")[1], "sdb")
+        self.assertEqual(_raid_part_ref("nvme0n1p3", "f")[1], "nvme0n1")
+        self.assertEqual(_raid_part_ref("part.03", "f")[1], "")
+        self.assertEqual(_raid_part_ref("part2", "f")[1], "")
+
+    def test_bases_are_explicit_and_do_not_drift(self):
+        """同一套基准的边界：part.01/part0/sdb1 都是第 1 个分区；part1 是第 2 个（0 起）。"""
+        from app.it.pxe.generator import _raid_part_ref
+        for spelling in ("part.01", "part0", "sdb1", "sda1"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(_raid_part_ref(spelling, "f")[0], 0, spelling)
+        # partN 是 subiquity 的 0 起 id ⇒ part1 = 第 2 个分区（与 part.01 不是同一个！）
+        self.assertEqual(_raid_part_ref("part1", "f")[0], 1)
+        self.assertEqual(_raid_part_ref("part.02", "f")[0], 1)
+        self.assertEqual(_raid_part_ref("part.10", "f")[0], 9)   # 0 起 → 第 11 个
+        self.assertEqual(_raid_part_ref("part.10", "f")[0], 9)   # 1 起 → 第 10 个
+        self.assertEqual(_raid_part_ref("sdb10", "f")[0], 9)     # 1 起 → 第 10 个
+
+    def test_unparsable_spelling_is_rejected_in_both_layers(self):
+        _assert_disk_config_rejected(
+            self, {"layout": "custom",
+                   "partitions": [{"mount": "/", "size": "rest"}],
+                   "raid": [{"name": "md0", "level": 1, "devices": ["sdz"]}]},
+            "raid[0].devices")
+
+    def test_raid_member_reference_is_checked_at_both_layers(self):
+        """越界引用（第 9 个分区而只有 1 个）两层都要拒，且点名字段。"""
+        _assert_disk_config_rejected(
+            self, {"layout": "custom",
+                   "partitions": [{"mount": "/", "size": "rest"}],
+                   "raid": [{"name": "md0", "level": 1, "devices": ["part.09"]}]},
+            "raid[0].devices")
+
+
+class PxeUnmountedPartitionTest(unittest.TestCase):
+    """缺陷 #6：RHEL 侧"只建分区不挂载"原本会生成 `part part.01 ...`（anaconda 不认识）。"""
+
+    DC = {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+          "partitions": [{"mount": "/boot/efi", "size": "512M"},
+                         {"size": "10G", "fstype": "xfs"},       # 只建分区、不挂载
+                         {"mount": "/", "size": "rest"}]}
+
+    def test_rhel_rejects_it_with_field_path(self):
+        """anaconda/pykickstart 只接受 <mntpoint> ∈ /<path>|swap|raid.<id>|pv.<id>|btrfs.<id>|biosboot。
+
+        证据（本仓库外，源码级）：
+          pykickstart/pykickstart/options.py:  mountpoint(value) 只对 "/" 开头做 normpath，其余原样透传
+          pykickstart/pykickstart/commands/partition.py: 位置参数 mntpoint 的帮助文本枚举了上面这几种形式
+        所以 `part part.01` 不是"无挂载点"，而是把我们的内部标识当成了挂载点 —— 解析能过，
+        但 anaconda 会按挂载点处理它。这里直接拒绝，绝不发一条语义不确定的 ks 行。
+        """
+        with self.assertRaises(ValueError) as cm:
+            generate_all(_cfg(os_type="rhel", os_version="9", disk_config=self.DC,
+                              mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/"))
+        self.assertIn("disk_config.partitions[1].mount", str(cm.exception))
+        # PV / RAID 成员仍然照旧（`part pv.01` / `part raid.01` 是 anaconda 认的形式）
+        pv_dc = dict(self.DC, partitions=[{"vg": "vg0", "lv": "root", "mount": "/",
+                                           "size": "rest"}])
+        ks = generate_all(_cfg(os_type="rhel", os_version="9", disk_config=pv_dc,
+                               mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/"))["ks.cfg"]
+        self.assertIn("part pv.01 ", ks)
+        self.assertNotIn("part part.", ks)
+
+    def test_ubuntu_allows_it(self):
+        """subiquity 侧"没有挂载点的分区"是合法表达（可以只建分区/只格式化），不能跟着 RHEL 一起拒。"""
+        cfg = yaml.safe_load(generate_all(_cfg(disk_config=self.DC))["user-data"])[
+            "autoinstall"]["storage"]["config"]
+        self.assertIn({"type": "partition", "id": "part1", "device": "disk0",
+                       "size": 10737418240}, cfg)
+        # 该分区不会被挂载（没有 mount: 条目指向它）
+        self.assertEqual([c["path"] for c in cfg if c["type"] == "mount"], ["/boot/efi", "/"])
+
+
+class PxeDiskConfigApiTest(unittest.TestCase):
+    """新增校验在 HTTP 层必须是 422，且 detail 里带**字段路径**（运维/前端要能直接显示）。"""
+
+    @staticmethod
+    def _client():
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.api import pxe as pxe_api
+        from app.core.auth import get_current_user
+        from app.database import get_db
+        app = FastAPI()
+        app.include_router(pxe_api.router, prefix="/api/it/pxe")
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": "t", "username": "t", "display_name": "t", "role": "admin"}
+        # 请求体校验在进入端点函数之前完成，非法 payload 根本走不到 DB —— 这里给个空实现即可
+        app.dependency_overrides[get_db] = lambda: None
+        return TestClient(app)
+
+    def test_new_validations_return_422_with_field_path(self):
+        client = self._client()
+        cases = [
+            # 缺陷 #2：历史键 disk 是多盘语法的注入面
+            ("disk 多盘", {"disk": "sda,sdb"}, ["disk_config", "disk"]),
+            # 缺陷 #1：Ubuntu 非 custom + auto + 数据盘
+            ("ubuntu auto + data_disks",
+             {"target": {"mode": "auto"}, "layout": "lvm",
+              "data_disks": [{"name": "sdc"}]}, "data_disks"),
+            # 缺陷 #1：name 与数据盘同名
+            ("name 撞数据盘",
+             {"target": {"mode": "name", "name": "sda"}, "data_disks": [{"name": "sda"}]},
+             "data_disks[0].name"),
+            # 缺陷 #5：非 custom 给 partitions
+            ("非 custom 给 partitions",
+             {"layout": "lvm", "partitions": [{"mount": "/", "size": "rest"}]},
+             "partitions"),
+            # 缺陷 #5：同分区既是 PV 又是 RAID 成员
+            ("同分区 PV+RAID",
+             {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+              "partitions": [{"vg": "vg0", "lv": "root", "mount": "/", "size": "rest"}],
+              "raid": [{"name": "md0", "level": 1, "devices": ["part.01"]}]},
+             "partitions[0]"),
+        ]
+        for label, dc, needle in cases:
+            with self.subTest(case=label):
+                r = client.post("/api/it/pxe/profiles", json={
+                    "name": "x", "os_type": "ubuntu", "admin_password": "Test@123",
+                    "disk_config": dc})
+                self.assertEqual(r.status_code, 422, r.text)
+                detail = json.dumps(r.json()["detail"], ensure_ascii=False)
+                if isinstance(needle, list):
+                    self.assertIn(needle[0], detail, label)
+                    self.assertIn(needle[1], detail, label)
+                else:
+                    self.assertIn(needle, detail, label)
 
 
 class PxeDiskValidationTest(unittest.TestCase):
@@ -1243,6 +1662,33 @@ class PxeDiskValidationTest(unittest.TestCase):
                                disk_config={"disk": "vda"}))["ks.cfg"]
         self.assertIn("clearpart --drives=vda --all --initlabel", ks)
 
+    def test_legacy_disk_key_rejects_multi_disk_syntax(self):
+        """缺陷 #2：`--drives=` 是逗号分隔的多盘语法。
+
+        disk="sda,sdb" 旧行为会生成 `clearpart --drives=sda,sdb --all --initlabel`，
+        把第二块（数据）盘连同分区表一起抹掉。两层都必须拒，且点名字段。
+        """
+        from pydantic import ValidationError
+
+        from app.core.schemas import PxeProfileIn
+        with self.assertRaises(ValidationError) as cm:
+            PxeProfileIn(name="x", disk_config={"disk": "sda,sdb"})
+        errs = cm.exception.errors()
+        blob = " | ".join(e["msg"] for e in errs) + " " + " ".join(
+            ".".join(str(x) for x in e["loc"]) for e in errs)
+        self.assertIn("disk", blob, blob)
+        # 第 3 层：既有路径的校验在生成器里（_disk_plan 对"只有历史键 disk"的配置直接返回 None，
+        # 真正净化发生在 _rhel_ks / _ubuntu_user_data 的既有分支），所以这里必须走 generate_all。
+        for bad in ("sda,sdb", "sda sdb", "/dev/sda", "sda;sdb", "sda" + chr(10) + "sdb"):
+            with self.subTest(bad=bad):
+                for os_type, kw in (("ubuntu", {}), ("rhel", {"mirror": "http://m/rocky9/"})):
+                    with self.assertRaises(ValueError):
+                        generate_all(_cfg(os_type=os_type, disk_config={"disk": bad}, **kw))
+        # 合法盘名照旧（不误伤，输出逐字不变）
+        ks = generate_all(_cfg(os_type="rhel", mirror="http://m/rocky9/",
+                               disk_config={"disk": "vda"}))["ks.cfg"]
+        self.assertIn("clearpart --drives=vda --all --initlabel", ks)
+
     def test_schema_and_generator_whitelists_do_not_drift(self):
         """两层的白名单必须一致（同 _OS_TYPE_ALLOWED 的做法：有测试锁住）。"""
         from app.core import schemas
@@ -1274,6 +1720,535 @@ class PxeDiskValidationTest(unittest.TestCase):
                                mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/",
                                disk_config=dc))["ks.cfg"]
         self.assertEqual(_ks_disk_block(ks), LEGACY_KS_LVM)
+
+
+class DeployIsolationTest(unittest.TestCase):
+    """E1：部署按模板隔离 + 原子落盘（修掉"共享引导文件"的竞态）。
+
+    背景（实测，不是推断）：deploy_files 原先**忽略 pid**，所有模板的
+    boot.ipxe / user-data / ks.cfg / meta-data 都落在同一批扁平路径上。
+      · 两个部署同时进行 → 机器抓到的 boot.ipxe 与 user-data 来自**不同模板**
+        （实测 VM140 装成了 CentOS kickstart，而且两边都不报错）；
+      · 更糟的是"任何没登记的机器，都会被按**最后一次部署的模板**装机" ——
+        不该动的机器被重新分区。
+
+    这里不 mock 被测代码：路径拼接、原子替换、目录结构都是真的，
+    只把"需要 Linux + root"的副作用（is_linux / sudo_ok / ensure_dirs /
+    write_conf / dhcp_control）换掉。
+    """
+
+    ANSWER = "http://10.0.0.1:8000/pxe/serve"
+
+    def setUp(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        from app.it.pxe import server
+
+        self.os = os
+        self.mock = mock
+        self.server = server
+        self._tmp = tempfile.TemporaryDirectory()
+        self.web = os.path.join(self._tmp.name, "pxe-web")
+        self.tftp = os.path.join(self._tmp.name, "tftp")
+        os.makedirs(self.web)
+        os.makedirs(self.tftp)
+        self.write_conf = mock.Mock(return_value=True)
+        self.dhcp_control = mock.Mock(
+            return_value={"ok": True, "action": "restart", "msg": "ok", "running": True}
+        )
+        for target, attr, value in (
+            (server, "WEB_ROOT", self.web),
+            (server, "TFTP_ROOT", self.tftp),
+            (server._dhcp, "is_linux", lambda: True),
+            (server._dhcp, "sudo_ok", lambda: True),
+            (server._dhcp, "ensure_dirs", lambda dirs=None: []),
+            (server._dhcp, "write_conf", self.write_conf),
+            (server._dhcp, "dhcp_control", self.dhcp_control),
+        ):
+            p = mock.patch.object(target, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    # ── 辅助 ──
+
+    def _cfg(self, **kw):
+        kw.setdefault("admin_password", "Test@123")
+        kw.setdefault("iso_url", "http://10.0.0.1:8000/pxe/iso/test.iso")
+        kw.setdefault("http_root", self.ANSWER)
+        kw.setdefault("server_ip", "10.0.0.1")
+        return PxeConfig(**kw)
+
+    def _rhel_cfg(self, **kw):
+        kw.setdefault("kernel_path", "rhel/9/vmlinuz")
+        kw.setdefault("initrd_path", "rhel/9/initrd.img")
+        kw.setdefault("mirror", "http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        return self._cfg(**kw)
+
+    def _answer(self, pid):
+        return self.ANSWER + "/profiles/" + pid
+
+    def _install(self, mac, hostname="w"):
+        return [{"mac": mac, "hostname": hostname}]
+
+    def _path(self, *rel):
+        return self.os.path.join(self.web, *rel)
+
+    def _read(self, *rel):
+        with open(self._path(*rel), encoding="utf-8") as f:
+            return f.read()
+
+    def _make_media(self, os_type, version, initrd="initrd"):
+        """把 kernel/initrd 放到**扁平**媒体路径上（就像 extract_from_iso 做的那样）。"""
+        d = self._path(os_type, version)
+        self.os.makedirs(d, exist_ok=True)
+        for f in ("vmlinuz", initrd):
+            with open(self.os.path.join(d, f), "w", encoding="utf-8") as fh:
+                fh.write("media\n")
+
+    def _assert_served_urls_exist(self, text, min_urls=2):
+        """引导脚本里每个 /pxe/serve/ URL 都必须在磁盘上真实存在。
+
+        这是"隔离没有把媒体搬走"的机械复算：媒体只存在于扁平路径
+        (<web_root>/<os_type>/<version>/)，只要 URL 能解析到文件就说明没被隔离。
+        """
+        checked = 0
+        for url in re.findall(r"https?://[^\s\"']+", text):
+            if "/pxe/serve/" not in url:
+                continue          # /pxe/iso/ 是另一条挂载，不在本测试范围
+            rel = url.split("/pxe/serve/", 1)[1].rstrip("/")
+            self.assertTrue(
+                self.os.path.isfile(self.os.path.join(self.web, *rel.split("/"))),
+                "引导脚本引用了不存在的文件：" + url,
+            )
+            checked += 1
+        self.assertGreaterEqual(checked, min_urls, "没校验到 URL，测试是空的：" + text)
+
+    def _snapshot(self):
+        out = []
+        for root, _dirs, names in self.os.walk(self._tmp.name):
+            for n in names:
+                out.append(self.os.path.relpath(self.os.path.join(root, n), self._tmp.name))
+        return sorted(out)
+
+    # ── 1. 两个模板并发部署互不覆盖 ──
+
+    def test_two_templates_concurrent_do_not_clobber(self):
+        import threading
+
+        pid_a, pid_b = "a" * 32, "b" * 32
+        mac_a, mac_b = "00:11:22:33:44:55", "aa:bb:cc:dd:ee:ff"
+        self._make_media("ubuntu", "22.04", initrd="initrd")
+        self._make_media("rhel", "9", initrd="initrd.img")
+        files_a = generate_all(self._cfg(answer_root=self._answer(pid_a)), self._install(mac_a, "web-01"))
+        files_b = generate_all(self._rhel_cfg(answer_root=self._answer(pid_b)), self._install(mac_b, "db-01"))
+
+        res = {}
+
+        def _deploy(key, files, pid):
+            res[key] = self.server.deploy_files(files, pid)
+
+        ts = [threading.Thread(target=_deploy, args=("A", files_a, pid_a)),
+              threading.Thread(target=_deploy, args=("B", files_b, pid_b))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertTrue(res["A"]["ok"], res["A"])
+        self.assertTrue(res["B"]["ok"], res["B"])
+
+        a_boot = self._read("profiles", pid_a, "boot", "00-11-22-33-44-55.ipxe")
+        b_boot = self._read("profiles", pid_b, "boot", "aa-bb-cc-dd-ee-ff.ipxe")
+        # 各自指向**自己模板**的应答文件，且完全不含对方的任何前缀
+        self.assertIn("cloud-config-url=" + self._answer(pid_a)
+                      + "/user-data/00-11-22-33-44-55/user-data", a_boot)
+        self.assertIn("inst.ks=" + self._answer(pid_b) + "/ks/aa-bb-cc-dd-ee-ff/ks.cfg", b_boot)
+        self.assertNotIn(pid_b, a_boot)
+        self.assertNotIn(pid_a, b_boot)
+        # 应答文件内容也没被对方污染（Ubuntu autoinstall vs RHEL kickstart）
+        a_ud = self._read("profiles", pid_a, "user-data", "00-11-22-33-44-55", "user-data")
+        b_ks = self._read("profiles", pid_b, "ks", "aa-bb-cc-dd-ee-ff", "ks.cfg")
+        self.assertIn("autoinstall:", a_ud)
+        self.assertNotIn("kickstart", a_ud.lower())
+        self.assertIn("Kickstart", b_ks)
+        self.assertNotIn("autoinstall", b_ks)
+        # 媒体仍在扁平路径上，且引导脚本引用的文件都真实存在
+        self.assertIn("kernel " + self.ANSWER + "/ubuntu/22.04/vmlinuz", a_boot)
+        self.assertIn("kernel " + self.ANSWER + "/rhel/9/vmlinuz", b_boot)
+        self._assert_served_urls_exist(a_boot)
+        self._assert_served_urls_exist(b_boot)
+
+    def test_deploy_A_then_B_leaves_A_intact_and_bootable(self):
+        """先部署 A、再部署 B：A 的引导脚本逐字节不变，且仍指向有效媒体路径。"""
+        pid_a, pid_b = "1" * 32, "2" * 32
+        mac_a = "00:11:22:33:44:55"
+        self._make_media("ubuntu", "22.04", initrd="initrd")
+        self._make_media("centos", "9", initrd="initrd.img")
+        files_a = generate_all(self._cfg(answer_root=self._answer(pid_a)), self._install(mac_a, "web-01"))
+        files_b = generate_all(
+            self._rhel_cfg(os_type="centos", answer_root=self._answer(pid_b)),
+            self._install("aa:bb:cc:dd:ee:ff", "db-01"),
+        )
+        self.server.deploy_files(files_a, pid_a)
+        a_before = self._read("profiles", pid_a, "boot", "00-11-22-33-44-55.ipxe")
+        self.server.deploy_files(files_b, pid_b)
+        a_after = self._read("profiles", pid_a, "boot", "00-11-22-33-44-55.ipxe")
+        self.assertEqual(a_before, a_after, "B 的部署改动了 A 的引导脚本")
+        self.assertEqual(a_after, files_a["boot/00-11-22-33-44-55.ipxe"])
+        self._assert_served_urls_exist(a_after)
+        # A 的应答文件也在，且是 A 的内容
+        self.assertIn("autoinstall:", self._read("profiles", pid_a, "user-data",
+                                                 "00-11-22-33-44-55", "user-data"))
+
+    # ── 2. 隔离不改媒体 URL（上一版就是栽在这里） ──
+
+    def test_isolation_does_not_move_media_urls(self):
+        """只有应答文件的 URL 变；kernel/initrd/ISO 与改造前逐字一致。"""
+        flat = generate_all(self._cfg(), self._install("00:11:22:33:44:55"))
+        iso = generate_all(self._cfg(answer_root=self._answer("p1")),
+                           self._install("00:11:22:33:44:55"))
+        key = "boot/00-11-22-33-44-55.ipxe"
+        media_prefix = ("kernel " + self.ANSWER + "/ubuntu/22.04/vmlinuz"
+                        " root=/dev/ram0 initrd=initrd")
+        for files in (flat, iso):
+            menu = files[key]
+            k = [l for l in menu.splitlines() if l.startswith("kernel")][0]
+            self.assertTrue(k.startswith(media_prefix), k)
+            self.assertIn("url=http://10.0.0.1:8000/pxe/iso/test.iso", k)
+            self.assertIn("initrd " + self.ANSWER + "/ubuntu/22.04/initrd", menu)
+        # 差异**只**出现在应答文件的 URL 上
+        self.assertIn("cloud-config-url=" + self.ANSWER
+                      + "/user-data/00-11-22-33-44-55/user-data", flat[key])
+        self.assertIn("cloud-config-url=" + self._answer("p1")
+                      + "/user-data/00-11-22-33-44-55/user-data", iso[key])
+        self.assertNotEqual(flat["dnsmasq.conf"], iso["dnsmasq.conf"])
+        self.assertIn("dhcp-boot=tag:fw-menu-00-11-22-33-44-55," + self._answer("p1")
+                      + "/boot/00-11-22-33-44-55.ipxe", iso["dnsmasq.conf"])
+
+    def test_api_media_helpers_unaffected_by_isolation(self):
+        """api 层的媒体路径映射（_default_media / _serve_url / _local_served_path）不变。"""
+        from app.api import pxe as api_pxe
+
+        class _P:
+            os_type = "ubuntu"
+            os_version = "22.04"
+
+        self.assertEqual(
+            api_pxe._default_media(_P()),
+            ("ubuntu/22.04/vmlinuz", "ubuntu/22.04/initrd", "ubuntu/22.04/installer.squashfs"),
+        )
+        self.assertEqual(
+            api_pxe._serve_url(self.os.path.join(api_pxe.WEB_ROOT, "rocky-9.4", "BaseOS"), "10.0.0.1"),
+            "http://10.0.0.1:8000/pxe/serve/rocky-9.4/BaseOS/",
+        )
+        self.assertEqual(
+            self.os.path.normpath(api_pxe._local_served_path("http://10.0.0.1:8000/pxe/serve/rocky-9.4/BaseOS/")),
+            self.os.path.normpath(self.os.path.join(api_pxe.WEB_ROOT, "rocky-9.4", "BaseOS")),
+        )
+        # 路径穿越防护照旧
+        self.assertEqual(api_pxe._local_served_path("http://x/pxe/serve/../etc"), "")
+        self.assertEqual(
+            self.os.path.normpath(api_pxe._local_served_path(
+                "http://10.0.0.1:8000/pxe/serve/profiles/p1/user-data")),
+            self.os.path.normpath(self.os.path.join(api_pxe.WEB_ROOT, "profiles", "p1", "user-data")),
+        )
+
+    def test_answer_root_only_changes_answer_paths(self):
+        """api 层装配：answer_root 只影响 answer_root 字段，媒体路径一字不动。"""
+        from app.api import pxe as api_pxe
+        from app.core import models
+
+        p = models.PxeProfile(id="p1", name="t", os_type="ubuntu", os_version="22.04",
+                              admin_user="ops")
+        base = api_pxe._to_pxeconfig(p, server_ip="10.0.0.1", http_root=self.ANSWER)
+        iso = api_pxe._to_pxeconfig(p, server_ip="10.0.0.1", http_root=self.ANSWER,
+                                    answer_root=self._answer("p1"))
+        for attr in ("http_root", "kernel_path", "initrd_path", "squashfs_path",
+                     "iso_url", "mirror", "stage2", "server_ip"):
+            self.assertEqual(getattr(base, attr), getattr(iso, attr), attr)
+        self.assertEqual(base.answer_root, "")
+        self.assertEqual(iso.answer_root, self._answer("p1"))
+
+    # ── 3. pid / 文件名的路径校验 ──
+
+    def test_pid_traversal_absolute_and_junk_rejected(self):
+        """pid 里的 ../ 与绝对路径必须**被拒**（不是被静默脱敏成另一个目录）。"""
+        bad = ["../evil", "..", ".", "/etc", "/", "a/b", "a\\b", "..\\evil", "",
+               None, "a" + chr(10) + "b", "a;b", "a b", "a'b", "p1/../../etc", ".hidden"]
+        for pid in bad:
+            with self.subTest(pid=pid):
+                with self.assertRaises(ValueError):
+                    self.server.safe_pid(pid)
+        # 通过 deploy_files 也必须硬失败，且不产生任何副作用（连目录都不建）
+        before = self._snapshot()
+        res = self.server.deploy_files(generate_all(self._cfg()), "../evil")
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["errors"])
+        self.assertFalse(self.os.path.exists(self.os.path.join(self._tmp.name, "evil")))
+        self.assertEqual(self._snapshot(), before)
+        self.write_conf.assert_not_called()
+        # 合法 pid 照常（生成器白名单字符集）
+        self.assertEqual(self.server.safe_pid("Ab12-_"), "Ab12-_")
+
+    def test_web_dest_rejects_illegal_keys(self):
+        base = self._path("profiles", "p1")
+        self.assertEqual(self.server._web_dest(base, "boot/aa-bb.ipxe"),
+                         self.os.path.join(base, "boot", "aa-bb.ipxe"))
+        for bad in ("../evil", "/etc/passwd", "\\evil", "a\\b", ".", "", "..",
+                    "a/../../evil", "../../x", "boot/..", "a//b", "./x",
+                    "a" + chr(10) + "b", "a b", "a;b"):
+            with self.subTest(name=bad):
+                self.assertIsNone(self.server._web_dest(base, bad))
+
+    def test_illegal_file_key_fails_loudly(self):
+        """非法文件名 → 硬失败，且绝不更新/重启 dnsmasq（不留坏配置）。"""
+        files = dict(generate_all(self._cfg()))
+        files["../evil.ipxe"] = "chain http://evil/x\n"
+        res = self.server.deploy_files(files, "d" * 32)
+        self.assertFalse(res["ok"])
+        self.assertTrue(any("非法文件路径" in e for e in res["errors"]), res["errors"])
+        self.assertFalse(self.os.path.exists(self.os.path.join(self._tmp.name, "evil.ipxe")))
+        self.write_conf.assert_not_called()
+        self.dhcp_control.assert_not_called()
+
+    # ── 4. 失败可判定 + 原子落盘 ──
+
+    def test_atomic_replace_keeps_old_file_and_leaves_no_tmp(self):
+        """原子落盘：替换失败时旧文件必须完好，不留 .tmp 垃圾，且不动 dnsmasq。"""
+        self.assertTrue(self.server.deploy_files({"boot.ipxe": "OLD-CONTENT\n"}, "")["ok"])
+        old = self._read("boot.ipxe")
+        self.write_conf.reset_mock()
+        self.dhcp_control.reset_mock()
+        with self.mock.patch.object(self.os, "replace",
+                                    side_effect=OSError("simulated replace failure")):
+            res = self.server.deploy_files({"boot.ipxe": "NEW-CONTENT\n"}, "")
+        self.assertFalse(res["ok"])
+        self.assertTrue(any("写入失败" in e for e in res["errors"]), res["errors"])
+        self.assertEqual(self._read("boot.ipxe"), old, "旧文件必须原样保留")
+        self.assertEqual(
+            [f for f in self.os.listdir(self.web) if ".tmp." in f], [],
+            "临时文件必须被清掉",
+        )
+        self.write_conf.assert_not_called()
+        self.dhcp_control.assert_not_called()
+
+    def test_dnsmasq_write_failure_and_restart_failure_are_reported(self):
+        files = generate_all(self._cfg())
+        self.write_conf.return_value = False
+        res = self.server.deploy_files(files, "")
+        self.assertFalse(res["ok"])
+        self.assertTrue(any("dnsmasq config" in e for e in res["errors"]), res["errors"])
+        self.dhcp_control.assert_not_called()   # 配置都没写成，就不该再重启
+
+        self.write_conf.return_value = True
+        self.dhcp_control.return_value = {"ok": False, "action": "restart",
+                                          "msg": "unit failed", "running": False}
+        res2 = self.server.deploy_files(files, "")
+        self.assertFalse(res2["ok"])
+        self.assertTrue(any("重启失败" in e for e in res2["errors"]), res2["errors"])
+
+    # ── 5. 未登记机器的默认（显式、安全、与模板无关） ──
+
+    def test_unregistered_mac_gets_explicit_safe_default(self):
+        from app.it.pxe.generator import UNREGISTERED_DEFAULT_MARK
+
+        pid_a, pid_b = "a" * 32, "b" * 32
+        files_a = generate_all(self._cfg(answer_root=self._answer(pid_a)),
+                               self._install("00:11:22:33:44:55"))
+        files_b = generate_all(self._rhel_cfg(answer_root=self._answer(pid_b)),
+                               self._install("aa:bb:cc:dd:ee:ff"))
+        # 默认菜单与模板无关 → 逐字节相同，不存在"谁最后部署谁说了算"
+        self.assertEqual(files_a["boot.ipxe"], files_b["boot.ipxe"])
+        self.assertIn(UNREGISTERED_DEFAULT_MARK, files_a["boot.ipxe"])
+        self.assertNotIn("autoinstall", files_a["boot.ipxe"])
+        self.assertNotIn("inst.ks=", files_a["boot.ipxe"])
+        self.assertNotIn("kernel ", files_a["boot.ipxe"])
+        # dnsmasq：未登记的走扁平 boot.ipxe；已登记的各自指向本模板目录下的菜单
+        self.assertIn("dhcp-boot=tag:fw-menu-def," + self.ANSWER + "/boot.ipxe",
+                      files_a["dnsmasq.conf"])
+        self.assertIn("dhcp-boot=tag:fw-menu-00-11-22-33-44-55," + self._answer(pid_a)
+                      + "/boot/00-11-22-33-44-55.ipxe", files_a["dnsmasq.conf"])
+        # 落盘后：扁平默认菜单就是那份安全菜单（后部署的 B 没把它改成"按 B 装"）
+        self.assertTrue(self.server.deploy_files(files_a, pid_a)["ok"])
+        self.assertTrue(self.server.deploy_files(files_b, pid_b)["ok"])
+        self.assertEqual(self._read("boot.ipxe"), files_a["boot.ipxe"])
+        # 两个模板的菜单/应答文件都在，互不覆盖
+        self.assertTrue(self.os.path.isfile(self._path("profiles", pid_a, "boot",
+                                                       "00-11-22-33-44-55.ipxe")))
+        self.assertTrue(self.os.path.isfile(self._path("profiles", pid_b, "boot",
+                                                       "aa-bb-cc-dd-ee-ff.ipxe")))
+
+    def test_no_installs_keeps_legacy_flat_menu(self):
+        """向后兼容：模板**没有**装机记录时，默认菜单仍是本模板的装机菜单（既有行为）。"""
+        pid = "c" * 32
+        self._make_media("ubuntu", "22.04", initrd="initrd")
+        files = generate_all(self._cfg(answer_root=self._answer(pid)))
+        self.assertIn("autoinstall", files["boot.ipxe"])
+        self.assertIn("cloud-config-url=" + self._answer(pid) + "/user-data", files["boot.ipxe"])
+        res = self.server.deploy_files(files, pid)
+        self.assertTrue(res["ok"], res)
+        self.assertIn("autoinstall", self._read("boot.ipxe"))
+        self.assertEqual(self._read("boot.ipxe"), self._read("profiles", pid, "boot.ipxe"))
+        self._assert_served_urls_exist(self._read("boot.ipxe"))
+        # 显式告警（不是静默地让未登记机器按本模板装）
+        self.assertTrue(any("WARNING" in ln for ln in res["log"]), res["log"])
+        # 有装机记录时不再有这条告警（默认菜单已变成安全菜单）
+        res2 = self.server.deploy_files(
+            generate_all(self._cfg(answer_root=self._answer(pid)),
+                         self._install("00:11:22:33:44:55")), pid)
+        self.assertTrue(res2["ok"], res2)
+        self.assertFalse(any("WARNING" in ln for ln in res2["log"]), res2["log"])
+
+    def test_deploy_without_pid_keeps_flat_paths(self):
+        """pid="" 逐字保持既有扁平行为（老调用方 / 存量部署升级后不受影响）。"""
+        files = generate_all(self._cfg())
+        res = self.server.deploy_files(files)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["scope"], "")
+        for key in files:
+            if key == "dnsmasq.conf":
+                continue
+            self.assertTrue(
+                self.os.path.isfile(self.os.path.join(self.web, *key.split("/"))), key)
+        self.assertFalse(self.os.path.isdir(self._path("profiles")))
+        self.assertTrue(all("profiles" not in f for f in res["files_written"]))
+
+
+    def test_many_templates_concurrent_no_clobber_no_partial(self):
+        """8 个模板真并发（线程）各部署 3 轮：全部 ok、每个引导脚本逐字节等于自己那份。
+
+        这是"共享引导文件竞态"的直接回归测试：所有部署都要同时更新那份全局默认菜单
+        （扁平 boot.ipxe），而各自的 profiles/<pid>/ 必须互不干扰。
+        """
+        import threading
+
+        n = 8
+        pids = ["%032d" % i for i in range(n)]
+        mac = "00:11:22:33:44:55"
+        plan = []
+        for i, pid in enumerate(pids):
+            files = generate_all(self._cfg(answer_root=self._answer(pid)),
+                                 self._install(mac, "vm%02d" % i))
+            plan.append((pid, files))
+        results = {}
+
+        def _run(pid, files):
+            results[pid] = [self.server.deploy_files(files, pid)["ok"] for _ in range(3)]
+
+        ts = [threading.Thread(target=_run, args=(pid, files)) for pid, files in plan]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        for pid, files in plan:
+            self.assertTrue(all(results[pid]), (pid, results[pid]))
+            self.assertEqual(
+                self._read("profiles", pid, "boot", "00-11-22-33-44-55.ipxe"),
+                files["boot/00-11-22-33-44-55.ipxe"], pid,
+            )
+        # 全局默认菜单是"与模板无关"的安全菜单，谁最后写都一样
+        self.assertEqual(self._read("boot.ipxe"), plan[0][1]["boot.ipxe"])
+        self.assertEqual([f for f in self.os.listdir(self.web) if ".tmp." in f], [])
+
+    def test_deploy_to_host_wiring_and_loud_failure(self):
+        """api 层装配（deploy_to_host）：
+          · http_root 保持扁平 → 媒体 URL 不动；answer_root 指到 profiles/<pid>（与落盘前缀一致）；
+          · pid 含 ../ → 400；
+          · 部署 ok=False → 抛 500（不能把"指向不存在文件"的配置当成功返回）；
+          · 非 Linux（supported=False）保持既有的优雅降级（不抛错）。
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from app.api import pxe as api_pxe
+        from app.core import models
+        from app.core.schemas import PxeGenerateIn
+
+        pid = "e" * 32
+        p = models.PxeProfile(id=pid, name="t", os_type="ubuntu", os_version="22.04",
+                              admin_user="ops", admin_password_enc=None, root_password_enc=None,
+                              ssh_keys=[], disk_scheme="lvm", disk_config={}, net_mode="dhcp",
+                              net_config={}, mirror="", extra_packages=[], post_script="",
+                              remark="", timezone="Asia/Shanghai", locale="en_US.UTF-8",
+                              keyboard="us")
+        db = self.mock.AsyncMock()
+        db.get = self.mock.AsyncMock(return_value=p)
+        body_kw = dict(server_ip="10.0.0.1", iso_url="http://10.0.0.1:8000/pxe/iso/test.iso")
+
+        captured = {}
+
+        def _fake_deploy(files, pid=""):
+            captured["files"] = files
+            captured["pid"] = pid
+            return {"ok": True, "supported": True, "errors": [], "log": [], "scope": pid}
+
+        with self.mock.patch.object(self.server, "deploy_files", _fake_deploy), \
+                self.mock.patch.object(api_pxe, "_safe_decrypt", lambda enc: "Test@123"):
+            res = asyncio.run(api_pxe.deploy_to_host(pid, PxeGenerateIn(**body_kw), db))
+        self.assertTrue(res["ok"])
+        self.assertEqual(captured["pid"], pid)
+        menu = captured["files"]["boot.ipxe"]
+        # 媒体必须仍在扁平路径上（上一版就是把这里改成 profiles/<pid>/… 才打断生产的）
+        self.assertIn("kernel " + self.ANSWER + "/ubuntu/22.04/vmlinuz", menu)
+        self.assertIn("initrd " + self.ANSWER + "/ubuntu/22.04/initrd", menu)
+        self.assertIn("url=http://10.0.0.1:8000/pxe/iso/test.iso", menu)
+        # 应答文件被隔离到 profiles/<pid>（与 deploy_files 的落盘前缀一致）
+        self.assertIn("cloud-config-url=" + self._answer(pid) + "/user-data", menu)
+
+        # pid 穿越 / 注入：400，且根本不进生成/部署
+        for bad_pid in ("../evil", "/etc/passwd", "..", "p1/../../etc", "a" + chr(10) + "b",
+                        "a;b", "a b"):
+            with self.subTest(pid=bad_pid):
+                with self.mock.patch.object(api_pxe, "_safe_decrypt", lambda enc: "Test@123"):
+                    with self.assertRaises(HTTPException) as ctx:
+                        asyncio.run(api_pxe.deploy_to_host(bad_pid, PxeGenerateIn(**body_kw), db))
+                self.assertEqual(ctx.exception.status_code, 400)
+
+        # 部署失败：必须 500 + 明确原因
+        with self.mock.patch.object(
+                self.server, "deploy_files",
+                lambda files, pid="": {"ok": False, "supported": True,
+                                       "errors": ["disk full"], "log": []}), \
+                self.mock.patch.object(api_pxe, "_safe_decrypt", lambda enc: "Test@123"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(api_pxe.deploy_to_host(pid, PxeGenerateIn(**body_kw), db))
+        self.assertEqual(ctx.exception.status_code, 500)
+        self.assertIn("disk full", ctx.exception.detail)
+
+        # 非 Linux：保持优雅降级（ok=False + log，由前端提示去下载 ZIP）
+        with self.mock.patch.object(
+                self.server, "deploy_files",
+                lambda files, pid="": {"ok": False, "supported": False,
+                                       "errors": ["not linux"], "log": ["Linux only"]}), \
+                self.mock.patch.object(api_pxe, "_safe_decrypt", lambda enc: "Test@123"):
+            res2 = asyncio.run(api_pxe.deploy_to_host(pid, PxeGenerateIn(**body_kw), db))
+        self.assertFalse(res2["ok"])
+        self.assertIn("Linux only", res2["log"])
+
+    def test_layout_conflict_between_base_and_per_mac_answers(self):
+        """`user-data`（基准应答）与 `user-data/<mac>/…`（按 MAC 应答）不可能共存于同一路径。
+
+        旧代码在扁平布局下遇到这种键集合会直接抛异常（部署 500）。现在显式处理：
+        跳过基准文件（有装机记录时默认菜单已是不装系统的安全菜单，不再引用它），
+        保留 dnsmasq 真正下发给已登记机器的按 MAC 那份，并且整个过程 ok=True。
+        """
+        files = generate_all(self._cfg(), self._install("00:11:22:33:44:55"))
+        self.assertIn("user-data", files)                          # 生成器照旧产出（兼容 /generate）
+        self.assertIn("user-data/00-11-22-33-44-55/user-data", files)
+        res = self.server.deploy_files(files, "")
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(any("Skip: user-data" in ln for ln in res["log"]), res["log"])
+        self.assertTrue(self.os.path.isfile(self._path("user-data", "00-11-22-33-44-55", "user-data")))
+        # 反向迁移：先有"按 MAC 的目录"，再部署不含装机记录的模板（需要 user-data 是文件）
+        res2 = self.server.deploy_files(generate_all(self._cfg()), "")
+        self.assertTrue(res2["ok"], res2)
+        self.assertTrue(self.os.path.isfile(self._path("user-data")))
+        self.assertTrue(any("Migrated:" in ln for ln in res2["log"]), res2["log"])
 
 
 if __name__ == "__main__":

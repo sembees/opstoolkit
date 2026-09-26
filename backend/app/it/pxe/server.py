@@ -13,8 +13,14 @@ import platform
 import re
 import shutil
 import subprocess
+import threading
+import uuid
+from contextlib import nullcontext
 
 from app.core import dhcp as _dhcp
+# 路径/标识净化复用生成器里那套已经过审的白名单（_safe_line / _safe_ident），
+# 不另写一套更弱的检查：server.py 这边多一个入口，注入面就多一个，标准必须一致。
+from app.it.pxe.generator import _safe_ident, _safe_line
 
 TFTP_ROOT = "/srv/tftp"
 WEB_ROOT = "/srv/opstk/pxe-web"
@@ -429,53 +435,279 @@ def prepare_firmware() -> list:
 
 # ── Deploy ──
 
+# 按模板隔离的目录名。URL 侧必须用同一个前缀（api/pxe.py 的 answer_root，由
+# PROFILE_SCOPE_DIR 拼出来），否则落盘位置与 http_root 指的位置对不上 → iPXE 404。
+PROFILE_SCOPE_DIR = "profiles"
+
+# 未登记机器用的默认引导脚本：**扁平**（WEB_ROOT/boot.ipxe），
+# 与 generator._dnsmasq() 里 `dhcp-boot=tag:fw-menu-def,<http_root>/boot.ipxe` 对应。
+# 它全局唯一，内容由 generator 显式决定：有装机记录时是"拒绝自动安装"的安全菜单。
+FLAT_DEFAULT_BOOT = "boot.ipxe"
+
+# 扁平默认菜单是**全局唯一**的目标文件，同一进程里两个部署可能同时替换它
+# （两个模板并存时，所有人都要更新它）。Linux 上 rename(2) 本来就是原子的，
+# 读方不会看到半截内容；但 Windows 上"同一目标并发 os.replace"会抛共享冲突
+# （实测：8 线程并发部署时 7 个部署在写这个文件时报 PermissionError）。
+# 所以给这**一个**路径配一把进程内锁：各模板自己的 profiles/<pid>/ 仍然并行写。
+_FLAT_DEFAULT_LOCK = threading.Lock()
+
+# 生成器产出的**扁平文件键**（顶层）。只有它们可能需要"把同名目录迁移成文件"；
+# 媒体（<os_type>/<version>/）与仓库树（repo/）的名字不在这里 —— 迁移代码绝不碰它们。
+_GENERATED_FLAT_FILES = frozenset(
+    {"boot.ipxe", "user-data", "meta-data", "ks.cfg", "README.txt", "dnsmasq.conf"}
+)
+
+
+def safe_pid(pid) -> str:
+    """模板 id 会变成目录名与 URL 段；非法一律 raise（**不**静默改写）。
+
+    复用生成器的 _safe_ident（白名单 [A-Za-z0-9._-]）：`/`、`\\`、换行、控制字符
+    天然进不来；再显式拒掉 ""、"."、".."、以点开头的段（隐藏目录 / 相对路径段）。
+    绝对路径因此也在第一步就被拒（`/` 不在白名单里）。
+
+    为什么不学一下"把非法字符剔除后照用"：`../etc` 被剔成 `etc` 之后，调用方会以为
+    隔离生效了，实际却落进了另一个（可能已存在的）目录 —— 静默降级比报错危险。
+    """
+    s = _safe_ident(pid, "pid")
+    if not s or s in (".", "..") or s.startswith("."):
+        raise ValueError("illegal pid: " + repr(pid))
+    return s
+
+
+def _web_dest(base_abs: str, name):
+    """把一个生成物键解析成落盘的绝对路径；非法/越界返回 None。
+
+    单独抽出来是为了可单测：路径拼接与越界判断是典型的"看着对、边界会错"的地方
+    （老实现先 lstrip("/") 再判 os.path.isabs 是死代码，永远判不出来）。
+    逐段过 _safe_ident 白名单 + 拒空段/"."/".."，最后再用 os.path.commonpath 兜底：
+    这些键既是文件名又会拼进 URL，一个 `../` 或换行就能写到 web 根之外。
+    `\\` 一律拒（不让"换个平台就变成路径分隔符"这种事发生）。
+    非法一律返回 None（而不是抛异常），调用方据此记错误并整体失败。
+    """
+    try:
+        s = _safe_line(name, "web 文件名")
+    except ValueError:
+        return None
+    if not s or s.startswith(("/", "\\")) or "\\" in s:
+        return None
+    clean = []
+    for part in s.split("/"):
+        if part in ("", ".", ".."):
+            return None
+        try:
+            clean.append(_safe_ident(part, "web 文件名的路径段"))
+        except ValueError:
+            return None
+    base_abs = os.path.abspath(base_abs)
+    dst = os.path.abspath(os.path.join(base_abs, *clean))
+    if os.path.commonpath([dst, base_abs]) != base_abs:
+        return None
+    return dst
+
+
+def _atomic_write(dst: str, content: str) -> None:
+    """写临时文件 + os.replace：原子替换，读方永远看不到"写了一半"的文件。
+
+    装机中的机器随时可能在 GET 这些文件（iPXE 取 boot/<mac>.ipxe、casper 取
+    user-data），半截内容会让它装错或直接失败，而调用方完全看不出来。
+    临时文件放在**目标同目录**（同一文件系统），os.replace 才是原子的（Windows 亦然）。
+    临时名带 pid + 随机串：同一目标被两个并发部署写时，不会互相踩对方的临时文件。
+
+    统一用 LF：这些文件在 Linux 上被 iPXE / dnsmasq / cloud-init 读取，
+    在 Windows 上开发测试时也不该因为换行翻译而与实际落盘内容不一致。
+    """
+    tmp = "%s.tmp.%d.%s" % (dst, os.getpid(), uuid.uuid4().hex[:8])
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, dst)
+    except BaseException:
+        # 失败不许留下 .tmp 垃圾（也不能让半个文件被下一次部署/读方当成有效文件）
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _make_room(dst: str, base_abs: str, log) -> None:
+    """让 dst 与其父目录就位；挡住路的**旧布局残留**会被移除并记日志。
+
+    为什么必须做：生成物键里 `user-data`（基准应答文件）与
+    `user-data/<mac>/user-data`（按 MAC 的应答）在同一个命名空间里 —— 同一个路径
+    不可能既是文件又是目录。旧部署（尤其是扁平布局）会在这里留下文件或目录，
+    不清掉这次部署必然失败（旧代码是直接抛 FileExistsError → 500）。
+
+    清理**只发生在 base_abs 之内**（本模板自己的部署目录 / 扁平时的 web 根），
+    且每一处删除都写进日志，不做无声的破坏。
+    目录→文件的迁移只对生成器自己的扁平文件生效（_GENERATED_FLAT_FILES），
+    其它同名目录（媒体 <os_type>/<version>/、仓库 repo/）一律拒绝删除 —— 宁可报错。
+    """
+    parent = os.path.dirname(dst)
+    rel = os.path.relpath(parent, base_abs)
+    cur = base_abs
+    for part in ([] if rel == "." else rel.split(os.sep)):
+        cur = os.path.join(cur, part)
+        if os.path.exists(cur) and not os.path.isdir(cur):
+            os.remove(cur)
+            log.append("Migrated: 删除旧文件 " + cur + "（本次需要它是目录）")
+    os.makedirs(parent, exist_ok=True)
+    if os.path.isdir(dst):
+        if os.path.relpath(dst, base_abs) not in _GENERATED_FLAT_FILES:
+            raise OSError("目标已存在且是目录，拒绝删除（不是生成器产出的扁平文件）：" + dst)
+        shutil.rmtree(dst)
+        log.append("Migrated: 删除旧目录 " + dst + "（本次需要它是文件）")
+
+
+def _deploy_fail(log, errors, scope="", written=None):
+    """部署失败的统一返回结构（ok=False + 可读的 errors，调用方必须据此报错）。"""
+    return {
+        "ok": False,
+        "supported": True,
+        "errors": list(errors),
+        "log": log,
+        "scope": scope,
+        "files_written": list(written or []),
+        "tftp_root": TFTP_ROOT,
+        "web_root": WEB_ROOT,
+    }
+
+
 def deploy_files(files, pid="") -> dict:
-    """Write configs to host: dnsmasq.conf via shared DHCP module, response
-       files to TFTP/HTTP, then restart dnsmasq."""
+    """把配置写到本机：应答/引导文件落盘 + dnsmasq 配置 + 重启 dnsmasq。
+
+    返回值 {"ok", "supported", "errors", "log", "scope", "files_written", ...}。
+    **ok=False 是硬失败**：调用方（api/pxe.py::deploy_to_host）必须据此报错，
+    绝不能让"配置指向不存在的文件"这种坏状态被当成部署成功。
+
+    按模板隔离（修掉共享引导文件的竞态）：
+      · pid 非空 → user-data / ks.cfg / iPXE 菜单落到 WEB_ROOT/profiles/<pid>/；
+        URL 侧由调用方把生成器的 answer_root 指到同一个前缀（profiles/<pid>）。
+      · 媒体（vmlinuz / initrd / ISO）**保持扁平路径不动**。介质只存在于
+        WEB_ROOT/<os_type>/<os_version>/ 下，把它一起隔离正是上一版把生产 PXE 打断的
+        原因（媒体 URL 变成 profiles/<pid>/ubuntu/22.04/vmlinuz → iPXE
+        "Could not boot image"），见 generator.PxeConfig.answer_root 的说明。
+      · 未登记的机器走扁平的 WEB_ROOT/boot.ipxe，它**始终同步更新**（dnsmasq 的默认
+        dhcp-boot 指着它），内容由 generator 显式决定：有装机记录时 = 拒绝自动安装的
+        安全菜单；没有装机记录时 = 本模板自己的菜单（既有行为，向后兼容）。
+
+    pid 为空 = 老的扁平行为，逐字不变（老调用方 / 已升级的存量部署不受影响）。
+    """
     if not _dhcp.is_linux():
         return {
             "ok": False,
+            "supported": False,
             "platform": platform.system(),
+            "errors": ["not linux"],
             "log": ["Linux only; use Download ZIP on non-Linux"],
         }
+
+    # pid 校验放在任何副作用之前：非法 pid 不该先把目录/固件准备好再报错
+    scope = ""
+    base_abs = os.path.abspath(WEB_ROOT)
+    web_root_abs = base_abs
+    if pid:
+        try:
+            scope = safe_pid(pid)
+        except ValueError as e:
+            msg = "非法 pid，拒绝部署：" + str(e)
+            return _deploy_fail([msg], [msg])
+        base_abs = os.path.abspath(os.path.join(web_root_abs, PROFILE_SCOPE_DIR, scope))
+        if os.path.commonpath([base_abs, web_root_abs]) != web_root_abs:
+            return _deploy_fail(
+                ["非法作用域，拒绝部署：" + base_abs], ["非法作用域，拒绝部署：" + base_abs]
+            )
+
     log = list(prepare_dirs())
     log += prepare_firmware()
+    errors = []
     if not _dhcp.sudo_ok():
         log.append("WARNING: no sudo; dnsmasq config and restart will fail")
 
-    # Write dnsmasq config via shared module
+    # 1) 先写 HTTP 侧文件，**全部成功才碰 dnsmasq**：顺序本身就是"不留下坏配置"的保证 ——
+    #    任一文件写失败就直接返回，绝不写/重启 dnsmasq，DHCP 不会指向不存在的菜单。
+    names = [n for n in files if n != "dnsmasq.conf"]
+    # 命名空间冲突：`user-data` 是基准应答文件，`user-data/<mac>/user-data` 是按 MAC 的应答
+    # —— 同一路径不能既是文件又是目录。冲突时保留**被实际引用的那份**：
+    # 有装机记录时默认菜单已经是"拒绝自动安装"的安全菜单，不再引用基准应答文件，
+    # 而每台已登记机器的 seed 指向 user-data/<mac>/user-data（dnsmasq 下发的那份）。
+    # 旧代码在扁平布局下遇到这种情况会直接抛异常（部署 500），这里显式处理并记日志。
+    blocked = {n for n in names if any(o != n and o.startswith(n + "/") for o in names)}
+    if blocked:
+        log.append("Skip: " + ", ".join(sorted(blocked))
+                   + "（与按 MAC 的应答目录同名冲突，已被按 MAC 的那份取代）")
+
+    written = []
+    # 全局唯一的那份默认菜单（未登记机器用）的绝对路径：只有它需要串行化，见 _FLAT_DEFAULT_LOCK
+    flat_default = _web_dest(web_root_abs, FLAT_DEFAULT_BOOT)
+    for name, content in files.items():
+        if name == "dnsmasq.conf" or name in blocked:
+            continue
+        try:
+            dst = _web_dest(base_abs, name)
+        except Exception as e:  # noqa: BLE001  防御性：非法键绝不能让异常冒出去
+            errors.append("非法文件路径，已拒绝：" + repr(name) + "（" + str(e)[:60] + "）")
+            continue
+        if dst is None:
+            errors.append("非法文件路径，已拒绝：" + repr(name))
+            continue
+        dests = [dst]
+        if pid and name == FLAT_DEFAULT_BOOT:
+            # 未登记机器的默认菜单是扁平全局文件：隔离目录里那份也要写（便于按 pid 归档），
+            # 但 dnsmasq 的默认 dhcp-boot 指向的是**扁平**那份，所以必须同步更新。
+            if flat_default is not None and flat_default not in dests:
+                dests.append(flat_default)
+        for d in dests:
+            rel = os.path.relpath(d, web_root_abs).replace(os.sep, "/")
+            # 只有"全局唯一的那份默认菜单"需要串行化（见 _FLAT_DEFAULT_LOCK）
+            guard = _FLAT_DEFAULT_LOCK if d == flat_default else nullcontext()
+            try:
+                with guard:
+                    _make_room(d, base_abs, log)
+                    _atomic_write(d, content)
+            except OSError as e:
+                errors.append("写入失败 " + rel + "：" + str(e)[:120])
+                continue
+            written.append(rel)
+            log.append("Deployed: " + rel)
+        if pid and name == FLAT_DEFAULT_BOOT and ("autoinstall" in content or "inst.ks=" in content):
+            # 显式告警而不是静默：默认菜单是全局唯一的，本模板没有装机记录时它就是一份
+            # 装机菜单，会把未登记的机器按本模板装掉（既有行为，见 _unregistered_default_menu）。
+            # 这正是"后部署的模板接管未登记机器"的那条路径，运维必须在日志里看得见。
+            log.append(
+                "WARNING: 本模板没有已登记装机记录，未登记机器将按本模板装机"
+                "（全局默认菜单 " + FLAT_DEFAULT_BOOT + " 被本模板占用；"
+                "多模板同网段请为每台机器建装机记录，才会各自拿到 boot/<mac>.ipxe）"
+            )
+    if errors:
+        return _deploy_fail(log, errors, scope, written)
+
+    # 2) 文件全部就位后才写 dnsmasq 配置、才重启
     dnsmasq_content = files.get("dnsmasq.conf", "")
     if dnsmasq_content:
-        ok = _dhcp.write_conf("opstk-pxe.conf", dnsmasq_content)
-        if ok:
+        if _dhcp.write_conf("opstk-pxe.conf", dnsmasq_content):
             log.append("Written: /etc/dnsmasq.d/opstk-pxe.conf")
         else:
-            log.append("FAILED: write dnsmasq config")
+            errors.append("FAILED: write dnsmasq config /etc/dnsmasq.d/opstk-pxe.conf")
+            return _deploy_fail(log, errors, scope, written)
 
-    # Write response files to HTTP directory
-    web_root_abs = os.path.abspath(WEB_ROOT)
-    for name, content in files.items():
-        if name == "dnsmasq.conf":
-            continue
-        rel = os.path.normpath(name.lstrip("/"))
-        if rel == "." or rel.startswith(".."):
-            log.append("Skip illegal path: " + name)
-            continue
-        dst = os.path.abspath(os.path.join(web_root_abs, rel))
-        if os.path.commonpath([dst, web_root_abs]) != web_root_abs:
-            log.append("Skip boundary path: " + name)
-            continue
-        parent = os.path.dirname(dst)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(dst, "w", encoding="utf-8") as f:
-            f.write(content)
-        log.append("Deployed: " + rel)
-
-    # Restart dnsmasq via shared module
     svc = _dhcp.dhcp_control("restart")
     log.append("dnsmasq restart: " + svc.get("msg", "unknown"))
-    return {"ok": svc["ok"], "log": log, "tftp_root": TFTP_ROOT, "web_root": WEB_ROOT}
+    if not svc.get("ok"):
+        errors.append("dnsmasq 重启失败：" + str(svc.get("msg", ""))[:120])
+    return {
+        "ok": bool(svc.get("ok")) and not errors,
+        "supported": True,
+        "errors": errors,
+        "log": log,
+        "scope": scope,
+        "files_written": written,
+        "tftp_root": TFTP_ROOT,
+        "web_root": WEB_ROOT,
+    }
 
 
 # ── ISO management ──

@@ -184,7 +184,7 @@ def _detect_rhel_media(mirror, server_ip):
 def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
                   kernel_path="", initrd_path="", squashfs_path="",
                   deploy_mode="standalone", iso_url="", kernel_console="",
-                  stage2="", extra_repos=None) -> PxeConfig:
+                  stage2="", extra_repos=None, answer_root="") -> PxeConfig:
     _dk, _di, _ds = _default_media(p)
     _iso = _iso_url_for(p, server_ip, iso_url)
     _repo, _stage2, _extra = (p.mirror or ""), "", []
@@ -210,6 +210,9 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
         server_ip=server_ip or "192.168.1.100",
         # H5: 静态服务实际挂载在 :8000/pxe/serve（见 app/main.py），兜底路径必须带 /serve
         http_root=http_root or ("http://" + (server_ip or "192.168.1.100") + ":8000/pxe/serve"),
+        # E1: 只有**应答文件 / iPXE 菜单**可以按模板隔离（部署时指向 profiles/<pid>）；
+        # 媒体必须继续走 http_root 的扁平路径。留空 = 与 http_root 相同。
+        answer_root=answer_root,
         kernel_path=kernel_path or _dk, initrd_path=initrd_path or _di,
         squashfs_path=squashfs_path or _ds,
         # Ubuntu 必须给出可挂载介质（casper 的 url=），否则必失败：
@@ -374,6 +377,9 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
         stage2=body.get("stage2", ""),
         extra_repos=body.get("extra_repos", []),
         deploy_mode=body.get("deploy_mode", "standalone"),
+        # 只有 /deploy 会填它（本机部署时的 profiles/<pid> 前缀）；
+        # /generate 与 /download 不填 → 输出与改造前逐字一致（向后兼容）。
+        answer_root=body.get("answer_root", ""),
     )
     cfg.hostname = body.get("hostname", "default")
     # 部署时自动检测的网络配置覆盖
@@ -441,8 +447,24 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
             + "。请在前端显式填写 server_ip，或修复主机名解析 /etc/hosts",
         )
 
-    # http_root 强制为本机静态服务地址（app/main.py 挂载在 /pxe/serve，见 H5）
+    # http_root 强制为本机静态服务地址（app/main.py 挂载在 /pxe/serve，见 H5）。
+    # **保持扁平、不要指向 profiles/<pid>**：http_root 是**媒体根**，
+    # kernel_path / initrd_path / iso_url 都拼它，而介质只存在于
+    # /srv/opstk/pxe-web/<os_type>/<os_version>/ 这些扁平路径上。
+    # 上一版修复把 http_root 整体指到 profiles/<pid>，媒体 URL 于是变成
+    # profiles/<pid>/ubuntu/22.04/vmlinuz（文件不在那儿）→ iPXE "Could not boot image"，
+    # 生产 PXE 被打断，因此被回退（190c1f8）。隔离必须只作用于**应答/引导脚本**。
     body.http_root = "http://" + body.server_ip + ":8000/pxe/serve"
+
+    # 模板作用域：pid 校验失败直接 400（不静默脱敏 —— 否则会以为隔离了、实际落到别处）
+    try:
+        scope = pxe_server.safe_pid(pid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="非法的模板 id：" + str(e)) from e
+    # 该前缀必须与 deploy_files 的落盘前缀一一对应：WEB_ROOT/profiles/<pid>。
+    # 目录名常量取自 server.PROFILE_SCOPE_DIR，避免两边各写一份字符串而漂移。
+    answer_root = ("http://" + body.server_ip + ":8000" + SERVE_MARK
+                   + pxe_server.PROFILE_SCOPE_DIR + "/" + scope)
 
     payload = body.model_dump(exclude_none=True)
     # 合并 net_config：以 detect_network() 为底，调用方显式传入的键覆盖它。
@@ -453,8 +475,20 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
         merged = dict(net)
         merged.update(caller_net_config)
         payload["net_config"] = merged
+    # 应答文件 / iPXE 菜单的 URL 前缀（不是模型字段，客户端无法注入；由上面算出）
+    payload["answer_root"] = answer_root
     files = await _gen_pxe_files(pid, payload, db)
-    return pxe_server.deploy_files(files, pid)
+    res = pxe_server.deploy_files(files, pid)
+
+    # 部署结果必须可判定：ok=False 时配置可能已经处于"指向不存在的文件"的状态，
+    # 绝不能当成功返回（前端会显示"部署完成"）。
+    if not res.get("supported"):
+        # 非 Linux：保持既有的"优雅降级"语义（ok=False + log，前端提示去下载 ZIP）
+        return res
+    if not res.get("ok"):
+        detail = "PXE 部署失败：" + "；".join(res.get("errors") or ["未知错误"])
+        raise HTTPException(status_code=500, detail=detail[:800])
+    return res
 
 
 # ---------- ISO ?? ----------
