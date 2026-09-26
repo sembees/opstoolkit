@@ -388,6 +388,20 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
         merged.update(body["net_config"])
         cfg.net_config = merged
     installs = list(body.get("installs", []))
+    # 回落：调用方不传 installs 时，取**该模板在 DB 里的装机记录**。
+    # 为什么不回落不行 —— 实测（RUNBOOK-STATE §5.29）：给模板登记了 3 台 MAC，但只要
+    # deploy body 不带 installs，就完全走不到按 MAC 隔离那条分支：
+    # `profiles/<pid>/boot/` 根本不生成、dnsmasq 里也没有 per-MAC 的 dhcp-boot，
+    # 于是"未登记的机器会被按最后一次部署的模板装机"这个洞在实际使用中一直敞着
+    # （界面部署按钮固定发 installs: []，所以界面上登记的装机条目对部署毫无影响）。
+    # 优先级：显式传入 > DB 记录 > 维持旧行为（模板菜单，向后兼容）。
+    if not installs:
+        rows = (await db.execute(
+            select(models.PxeInstall).where(models.PxeInstall.profile_id == pid)
+        )).scalars().all()
+        installs = [{"mac": r.mac, "hostname": r.hostname,
+                     "ip": getattr(r, "ip", None) or getattr(r, "mgmt_ip", None)}
+                    for r in rows]
     try:
         return generate_all(cfg, installs)
     except ValueError as e:

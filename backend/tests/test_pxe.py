@@ -2178,6 +2178,11 @@ class DeployIsolationTest(unittest.TestCase):
                               keyboard="us")
         db = self.mock.AsyncMock()
         db.get = self.mock.AsyncMock(return_value=p)
+        # 新增的"DB 回落查装机记录"（§5.29 修复）：这里给"查不到记录"的结果，
+        # 保持本用例原有的装配意图 —— 它验的是接线与失败处理，per-MAC 隔离另有专门用例。
+        _res = self.mock.MagicMock()
+        _res.scalars.return_value.all.return_value = []
+        db.execute = self.mock.AsyncMock(return_value=_res)
         body_kw = dict(server_ip="10.0.0.1", iso_url="http://10.0.0.1:8000/pxe/iso/test.iso")
 
         captured = {}
