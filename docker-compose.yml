@@ -13,6 +13,10 @@ services:
       - /etc/dnsmasq.d:/etc/dnsmasq.d
       - ./frontend/dist:/app/frontend/dist
       - ./backend/app:/app/backend/app
+      # 用例也挂进去。backend/tests 本来是**烤进镜像**的，改完用例必须 docker compose build
+      # 才生效 —— 踩过多次（§4-I / §5.41）：容器里跑的还是旧用例，golden 失败被当成回归、
+      # 新用例根本没被执行。挂进来之后"改用例 → 直接 pytest"就成立，与 backend/app 同理。
+      - ./backend/tests:/app/backend/tests
       # 入口脚本也挂进去：它是"容器是否自起 dnsmasq"的开关，必须与仓库保持一致，
       # 不能依赖镜像里烤进去的那份副本（改它需要重建镜像，而前端阶段重建当前会失败）。
       - ./backend/docker-entrypoint.sh:/docker-entrypoint.sh:ro
