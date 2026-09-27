@@ -563,7 +563,12 @@ class PxeRaidIn(BaseModel):
 
 class PxeDataDiskIn(BaseModel):
     model_config = ConfigDict(extra="allow")
-    name: str
+    # name 不再是身份，只是备注：设备名（sda/sdb）由内核探测顺序决定，**不稳定**。
+    # 排除数据盘必须靠下面三个稳定属性之一（§5.42，真机实测会抹错盘）。
+    name: str = ""
+    size: str = ""        # 稳定匹配：容量，如 "30G"（裸 G/M/T 按二进制，GB/MB/TB 按十进制）
+    serial: str = ""      # 稳定匹配：盘序列号
+    wwid: str = ""        # 稳定匹配：WWID
     mount: str = ""
     fstype: str = ""
     wipe: bool = False    # 生产红线：数据盘默认不碰
@@ -693,8 +698,25 @@ class PxeDiskConfigIn(BaseModel):
         for i, d in enumerate(v):
             if not isinstance(d, dict):
                 raise ValueError(f"data_disks[{i}] 必须是对象")
-            if not _disk_ident_check(d.get("name", ""), f"data_disks[{i}].name"):
-                raise ValueError(f"data_disks[{i}].name 不能为空")
+            # §5.42（真机三台并发实测，数据丢失级）：数据盘的排除集**不能靠设备名**。
+            # sdX 由内核探测顺序决定，同一台机器两次启动都可能互换；名字一指错，
+            # %pre 排除掉的就是系统盘，clearpart 接着把数据盘抹了（三台里中一台）。
+            # 所以这里要求"必须有稳定匹配条件"，只写 name 直接 422。
+            if not any(str(d.get(k) or "").strip() for k in ("size", "serial", "wwid")):
+                raise ValueError(
+                    f"data_disks[{i}]：必须给出稳定匹配条件之一（size / serial / wwid），"
+                    "只写 name（设备名）不可靠 —— 设备名会随内核探测顺序变化，"
+                    "用它做排除集会抹掉数据盘。例如 size=\"30G\"。")
+            if d.get("name") and not _disk_ident_check(d.get("name", ""), f"data_disks[{i}].name"):
+                raise ValueError(f"data_disks[{i}].name 含非法字符")
+            # wipe=true 时产物里要**显式写到这块盘**（clearpart/ignoredisk 那几行），
+            # 只给 size/serial/wwid 表达不出来 → 盘名必填。
+            # 与 generator._disk_plan 里的同名护栏成对：这里让界面保存时就 422，
+            # 那边兜住"从库里直接读出来的老配置"（绕过 schema 的那条路）。
+            if d.get("wipe") and not str(d.get("name") or "").strip():
+                raise ValueError(
+                    f"data_disks[{i}].name：wipe=true 时必须给出盘名"
+                    "（产物里要显式清这块盘，只给 size/serial/wwid 无法表达）")
             mount = _disk_mount_check(d.get("mount", ""), f"data_disks[{i}].mount")
             _disk_fstype_check(d.get("fstype", ""), f"data_disks[{i}].fstype", mount)
         return v
@@ -778,13 +800,28 @@ class PxeDiskConfigIn(BaseModel):
                     field + " 的 " + repr(tok) + " 把 " + repr(prefix)
                     + " 当作 RAID 成员，但该盘在 data_disks 里声明为数据盘 —— 二者矛盾"
                 )
-        # 数据盘名唯一性
+        # 数据盘名唯一性。**只看非空名字** —— name 现在只是备注（§5.42），
+        # 用 size/serial/wwid 声明时它本来就该是空的，不能让两个空名字算"重名"。
         seen_d = set()
         for i, d in enumerate(self.data_disks):
             dn = (d.name or "").strip()
+            if not dn:
+                continue
             if dn in seen_d:
                 raise ValueError(f"data_disks[{i}].name：数据盘 {dn!r} 重复声明")
             seen_d.add(dn)
+        # 稳定匹配条件也不许重复声明（同一块盘被写两遍 = 配置写错了）。
+        # 注意这里是 model_validator(mode="after")：self.data_disks 已经是
+        # **PxeDataDiskIn 对象**，不是 dict —— 必须用属性访问，用 .get() 会 AttributeError。
+        seen_m = set()
+        for i, d in enumerate(self.data_disks):
+            key = tuple(str(getattr(d, k, "") or "").strip().lower()
+                        for k in ("size", "serial", "wwid")
+                        if str(getattr(d, k, "") or "").strip())
+            if key and key in seen_m:
+                raise ValueError(
+                    f"data_disks[{i}]：与前面的数据盘声明了相同的匹配条件 {key}，重复声明")
+            seen_m.add(key)
         # RAID 设备名唯一性（缺省是 md0/md1…，显式给的名字也算）
         rnames = [(r.name or "").strip() or f"md{i}" for i, r in enumerate(self.raid)]
         dup_r = [n for n in rnames if rnames.count(n) > 1]

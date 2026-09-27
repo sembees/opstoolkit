@@ -1098,7 +1098,7 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
         ],
         "raid": [{"name": "md0", "level": 1, "devices": ["part.03", "part.04"],
                   "mount": "/data", "fstype": "xfs"}],
-        "data_disks": [{"name": "sdc", "fstype": "xfs"}],
+        "data_disks": [{"name": "sdc", "size": "30G", "fstype": "xfs"}],
     }
 
     def _rhel(self, dc, **kw):
@@ -1148,12 +1148,15 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
         from app.it.pxe.generator import _disk_plan
         plan = _disk_plan(_cfg(disk_config=self.RAID_DC), self.RAID_DC)
         self.assertEqual(plan["data_disks"], [
-            {"name": "sdc", "mount": "", "fstype": "xfs", "wipe": False}])
+            {"name": "sdc", "mount": "", "fstype": "xfs", "wipe": False,
+             # §5.42：稳定匹配条件必须随 plan 一起带下去，否则 %pre 拿不到，
+             # 排除集为空 → 又退回"按名字排除"那条会抹盘的老路。
+             "size": "30G", "serial": "", "wwid": ""}])
         # target 的 wipe 缺省是 true（装系统的盘本来就要清）
         self.assertTrue(plan["wipe"])
 
     def test_data_disk_wipe_true_gets_cleared_and_mounted(self):
-        dc = dict(self.RAID_DC, data_disks=[{"name": "sdc", "mount": "/backup",
+        dc = dict(self.RAID_DC, data_disks=[{"name": "sdc", "size": "30G", "mount": "/backup",
                                              "fstype": "xfs", "wipe": True}])
         fragment = generate_all(self._rhel(dc))["ks.cfg"].split(
             "cat > /tmp/disk.ks <<EOF\n", 1)[1].split("\nEOF", 1)[0]
@@ -1180,7 +1183,7 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
         """
         cases = [
             self.RAID_DC,                                        # 数据盘 wipe 缺省 false
-            dict(self.RAID_DC, data_disks=[{"name": "sdc", "mount": "/backup",
+            dict(self.RAID_DC, data_disks=[{"name": "sdc", "size": "30G", "mount": "/backup",
                                             "fstype": "xfs", "wipe": True}]),
             dict(self.RAID_DC, layout="custom", target={"mode": "name", "name": "sda"}),
         ]
@@ -1242,25 +1245,34 @@ class PxeAutoTargetExclusionTest(unittest.TestCase):
     def test_rhel_auto_excludes_data_disks_and_hardcodes_no_target(self):
         dc = {"target": {"mode": "auto"}, "layout": "custom",
               "partitions": CUSTOM_PARTS,
-              "data_disks": [{"name": "sdb", "fstype": "xfs"}]}
+              "data_disks": [{"name": "sdb", "size": "20G", "fstype": "xfs"}]}
         ks = generate_all(self._rhel(dc))["ks.cfg"]
-        # 排除集进了 %pre，且候选过滤真的被使用
-        self.assertIn("-v excl='sdb'", ks)
-        self.assertIn("excluded(nm)", ks)
-        # 目标盘依旧不写死（反向断言）
-        self.assertNotIn("sda", ks)
+        # §5.42：排除集只认稳定属性（这里 = 20G），**不再是设备名**
+        self.assertIn("-v dm='s21474836480'", ks)
+        self.assertIn("dmatched(L)", ks)
+        self.assertNotIn("-v excl=", ks)          # 按名字排除的旧写法彻底消失
+        self.assertNotIn("excluded(nm)", ks)
+        # 目标盘依旧不写死（反向断言）。注意 sdb 只出现在注释里（数据盘备注），
+        # **不能**出现在任何选盘/分区指令里 —— 那才是"写死盘名"。
+        self.assertNotIn("--ondisk=sdb", ks)
+        self.assertNotIn("clearpart --drives=sdb", ks)
         self.assertIn("clearpart --drives=$target --all --initlabel", ks)
         # %pre 选不到盘时必须中止，绝不"随便挑一块"
         self.assertIn("未找到可用的目标磁盘，装机中止", ks)
+        # §5.42：声明了数据盘却一块都没命中时也必须中止（排除集为空 = 会抹掉数据盘）
+        self.assertIn("拒绝继续", ks)
 
-    def test_exclusion_list_is_data_disks_only(self):
-        """排除集只能来自 data_disks；RAID 成员的盘名前缀**不能**进去。
+    def test_exclusion_uses_stable_matchers_not_device_names(self):
+        """排除集只能来自 data_disks，且**只认稳定属性**（size/serial/wwid），不认设备名。
 
-        RAID 成员在本规格里是**目标盘上的分区**（_raid_part_ref）：`sdb4` 只取"第 4 个分区"，
-        盘名前缀仅用于交叉校验。若把前缀也塞进排除集，`sda3` 的 `sda` 会把目标盘自己排除掉 ——
-        %pre 选不到盘，装机直接中止（比"选中数据盘"轻，但同样是故障）。
+        为什么（§5.42，真机三台并发实测，数据丢失级）：`sdX` 由内核探测顺序决定。
+        同一套虚机配置（scsi0=30G 数据盘、scsi1=20G 系统盘）在 VM143 上被枚举成
+        scsi0→sdb、scsi1→sda，与 VM142/VM144 正好相反，且同一台机器两次启动都不一样。
+        用名字做排除集，排掉的就是**系统盘**，target 落到数据盘上，clearpart 把它抹了
+        （三台里中一台）。另外 RAID 成员的盘名前缀**不能**进排除集 —— 那是目标盘上的
+        分区（_raid_part_ref），前缀进去会把目标盘自己排除掉、导致选不到盘。
         """
-        from app.it.pxe.generator import _disk_plan, _rhel_excluded_disks
+        from app.it.pxe.generator import _data_disk_matcher_specs, _disk_plan
         dc = {"target": {"mode": "match", "serial": "S3Z1NB0K123456"},
               "layout": "custom",
               "partitions": [{"mount": "/boot/efi", "size": "512M"},
@@ -1269,20 +1281,47 @@ class PxeAutoTargetExclusionTest(unittest.TestCase):
                              {"mount": "/", "size": "rest"}],
               "raid": [{"name": "md0", "level": 1, "devices": ["sdb2", "sdb3"],
                         "mount": "/data", "fstype": "xfs"}],
-              "data_disks": [{"name": "sdc", "fstype": "xfs"}]}
+              "data_disks": [{"size": "30G", "fstype": "xfs"}]}
         plan = _disk_plan(self._rhel(dc), dc)
         self.assertEqual(plan["raid"][0]["member_indexes"], [1, 2])
-        self.assertEqual(_rhel_excluded_disks(plan), ["sdc"])   # 没有 sdb / sda
+        self.assertEqual(_data_disk_matcher_specs(plan), ["s%d" % (30 * 1024 ** 3)])
         ks = generate_all(self._rhel(dc))["ks.cfg"]
-        self.assertIn("-v excl='sdc'", ks)
-        self.assertNotIn("excl='sdb", ks)
+        self.assertIn("-v dm='s32212254720'", ks)
+        self.assertNotIn("excl=", ks)                  # 按名字排除的旧写法彻底消失
+        self.assertNotIn("excluded(", ks)              # 旧的 excluded() 函数也没了
+        # §5.42 要求"相关日志要记录"：磁盘清单/命中数/最终 target 必须打到串口
+        self.assertIn("PXE-DISK:", ks)
+        self.assertIn("/dev/console", ks)
+        self.assertIn("PXE-DISK: 命中数据盘", ks)
 
-    def test_duplicate_data_disk_name_is_rejected_and_exclusion_dedups(self):
-        # 重名的数据盘现在是 422（见 PxeDataDiskTest），所以"去重"只剩纯函数层面可测
-        from app.it.pxe.generator import _rhel_excluded_disks
-        self.assertEqual(_rhel_excluded_disks(
-            {"data_disks": [{"name": "sdb"}, {"name": "sdb"}, {"name": "sdc"}]}),
-            ["sdb", "sdc"])
+    def test_name_only_data_disk_is_rejected_and_matchers_normalize(self):
+        """§5.42：只给设备名的数据盘必须**拒绝生成**；稳定匹配串要正确归一化。"""
+        from app.it.pxe.generator import _data_disk_matcher_specs, _size_to_bytes
+        self.assertEqual(_size_to_bytes("30G"), 30 * 1024 ** 3)     # 裸 G = 二进制
+        self.assertEqual(_size_to_bytes("30GB"), 30 * 1000 ** 3)    # 显式 GB = 十进制
+        self.assertEqual(_size_to_bytes("512M"), 512 * 1024 ** 2)
+        self.assertEqual(_size_to_bytes("32212254720"), 32212254720)
+        # size + serial：两个条件取"或"（多排除只让候选集变小 → 最终中止，是安全方向）
+        self.assertEqual(
+            _data_disk_matcher_specs({"data_disks": [{"size": "20G", "serial": "ABC123"}]}),
+            ["s21474836480", "nABC123"])
+        # 只给名字 → 拒绝，且提示里必须告诉用户改用 size/serial/wwid
+        with self.assertRaises(ValueError) as ctx:
+            _data_disk_matcher_specs({"data_disks": [{"name": "sda"}]})
+        self.assertIn("size", str(ctx.exception))
+        self.assertIn("设备名", str(ctx.exception))
+        # serial/wwid 会被拼进 %pre 的 shell/awk 字符串 → 注入面必须堵住
+        for bad in ("a'; rm -rf / #", "a b", 'a"b', "a$b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    _data_disk_matcher_specs({"data_disks": [{"serial": bad}]})
+        # 声明了数据盘却一块都匹配不上时，%pre 必须中止（不许在排除集为空时选盘）
+        ks = generate_all(self._rhel({"target": {"mode": "auto"}, "layout": "custom",
+                                      "partitions": CUSTOM_PARTS,
+                                      "data_disks": [{"size": "30G"}]}))["ks.cfg"]
+        self.assertIn("_dmcnt", ks)
+        self.assertIn("拒绝继续", ks)
+        self.assertIn("exit 1", ks)
 
     def test_lsblk_is_parsed_by_key_not_by_column(self):
         """缺陷 #4：%pre 用 -P/--pairs 按 key 取值，不再按下标取列。
@@ -1311,11 +1350,13 @@ class PxeAutoTargetExclusionTest(unittest.TestCase):
         """Ubuntu 的 layout.match 没有排除语法 → 必须拒绝，绝不猜一块盘然后 wipe 掉它。"""
         _assert_disk_config_rejected(
             self, {"target": {"mode": "auto"}, "layout": "lvm",
-                   "data_disks": [{"name": "sdc"}]}, "data_disks", os_type="ubuntu")
-        # RHEL 侧同一形状**不能**跟着报错：它的 %pre 能表达排除
+                   "data_disks": [{"name": "sdc", "size": "30G"}]}, "data_disks", os_type="ubuntu")
+        # RHEL 侧同一形状**不能**跟着报错：它的 %pre 能表达排除。
+        # §5.42：排除靠稳定属性（这里 size=30G），不再靠设备名。
         ks = generate_all(self._rhel({"target": {"mode": "auto"}, "layout": "lvm",
-                                      "data_disks": [{"name": "sdc"}]}))["ks.cfg"]
-        self.assertIn("-v excl='sdc'", ks)
+                                      "data_disks": [{"name": "sdc", "size": "30G"}]}))["ks.cfg"]
+        self.assertIn("-v dm='s32212254720'", ks)
+        self.assertNotIn("-v excl=", ks)
 
 
 class PxeDataDiskTest(unittest.TestCase):
@@ -1329,8 +1370,8 @@ class PxeDataDiskTest(unittest.TestCase):
 
     WIPE_DD = {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
                "partitions": CUSTOM_PARTS,
-               "data_disks": [{"name": "sdc", "mount": "/backup", "fstype": "xfs",
-                               "wipe": True}]}
+               "data_disks": [{"name": "sdc", "size": "30G", "mount": "/backup",
+                               "fstype": "xfs", "wipe": True}]}
 
     def test_ubuntu_custom_generates_data_disk(self):
         """Ubuntu custom 侧原本完全不生成数据盘（mount 被静默丢掉）—— 现在真的生成。"""
@@ -1359,12 +1400,12 @@ class PxeDataDiskTest(unittest.TestCase):
         _assert_disk_config_rejected(
             self, {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
                    "partitions": CUSTOM_PARTS,
-                   "data_disks": [{"name": "sdc", "mount": "/backup", "fstype": "xfs"}]},
+                   "data_disks": [{"name": "sdc", "size": "30G", "mount": "/backup", "fstype": "xfs"}]},
             "data_disks[0].mount")
 
     def test_data_disk_mount_or_wipe_on_noncustom_layout_is_rejected(self):
-        for dd, needle in (({"name": "sdc", "mount": "/backup"}, "data_disks[0].mount"),
-                           ({"name": "sdc", "wipe": True}, "data_disks[0].wipe=true")):
+        for dd, needle in (({"name": "sdc", "size": "30G", "mount": "/backup"}, "data_disks[0].mount"),
+                           ({"name": "sdc", "size": "30G", "wipe": True}, "data_disks[0].wipe=true")):
             with self.subTest(dd=dd):
                 _assert_disk_config_rejected(
                     self, {"target": {"mode": "name", "name": "sda"}, "layout": "lvm",
@@ -1418,7 +1459,8 @@ class PxeDataDiskTest(unittest.TestCase):
         _assert_disk_config_rejected(
             self, {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
                    "partitions": CUSTOM_PARTS,
-                   "data_disks": [{"name": "sdc"}, {"name": "sdc"}]},
+                   "data_disks": [{"name": "sdc", "size": "20G"},
+                                 {"name": "sdc", "size": "21G"}]},
             "data_disks[1].name")
 
     def test_duplicate_raid_name_is_rejected(self):
@@ -1441,7 +1483,7 @@ class PxeDataDiskTest(unittest.TestCase):
                                   {"mount": "/", "size": "rest"}],
                    "raid": [{"name": "md0", "level": 1, "devices": ["sdc2"],
                              "mount": "/data", "fstype": "xfs"}],
-                   "data_disks": [{"name": "sdc"}]},
+                   "data_disks": [{"name": "sdc", "size": "30G"}]},
             "raid[0].devices")
 
 
@@ -1563,10 +1605,11 @@ class PxeDiskConfigApiTest(unittest.TestCase):
             # 缺陷 #1：Ubuntu 非 custom + auto + 数据盘
             ("ubuntu auto + data_disks",
              {"target": {"mode": "auto"}, "layout": "lvm",
-              "data_disks": [{"name": "sdc"}]}, "data_disks"),
+              "data_disks": [{"name": "sdc", "size": "30G"}]}, "data_disks"),
             # 缺陷 #1：name 与数据盘同名
             ("name 撞数据盘",
-             {"target": {"mode": "name", "name": "sda"}, "data_disks": [{"name": "sda"}]},
+             {"target": {"mode": "name", "name": "sda"},
+                                      "data_disks": [{"name": "sda", "size": "20G"}]},
              "data_disks[0].name"),
             # 缺陷 #5：非 custom 给 partitions
             ("非 custom 给 partitions",
@@ -1626,7 +1669,7 @@ class PxeDiskValidationTest(unittest.TestCase):
         ("lv 有而 vg 无", {"layout": "custom", "partitions": [{"lv": "root", "size": "rest"}]},
          "vg 与 lv"),
         ("data_disks 与目标盘同名", {"target": {"mode": "name", "name": "sda"},
-                                     "data_disks": [{"name": "sda"}]},
+                                     "data_disks": [{"name": "sda", "size": "20G"}]},
          "data_disks[0].name"),
         ("mount 含 ..", {"layout": "custom",
                          "partitions": [{"mount": "/a/../etc", "size": "1G"}]},
@@ -1642,7 +1685,13 @@ class PxeDiskValidationTest(unittest.TestCase):
                              "partitions": [{"vg": "vg0;rm -rf /", "lv": "root",
                                              "mount": "/", "size": "rest"}]},
          "partitions[0].vg"),
-        ("data_disks[].name 为空", {"data_disks": [{"mount": "/data"}]},
+        # §5.42：数据盘改为"必须给稳定匹配条件"。原来这条测的是"name 为空要报错"，
+        # 现在换成新契约下同样会报 data_disks[0].name 的场景 —— wipe=true 时产物里要
+        # 显式写到这块盘，所以盘名仍然必填（否则会生成 `ignoredisk --only-use=` 这种残缺行）。
+        # 必须给 layout=custom，否则会先撞上"noncustom 下 wipe 会被丢弃"那条校验。
+        ("wipe=true 的数据盘仍必须给盘名",
+         {"layout": "custom", "partitions": CUSTOM_PARTS,
+          "data_disks": [{"size": "30G", "wipe": True}]},
          "data_disks[0].name"),
     ]
 

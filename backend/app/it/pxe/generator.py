@@ -587,15 +587,30 @@ def _disk_plan(c, dc):
         if not isinstance(d, dict):
             raise ValueError("disk_config.data_disks[%d] 必须是对象" % k)
         f = "disk_config.data_disks[%d]" % k
-        dname = _safe_ident(d.get("name", ""), f + ".name")
-        if not dname:
-            raise ValueError(f + ".name 不能为空")
-        if dname in data_names:
-            raise ValueError(f + ".name：数据盘 " + repr(dname) + " 重复声明")
-        data_names.append(dname)
+        dname = _safe_ident(d.get("name", ""), f + ".name") if d.get("name") else ""
+        # §5.42：设备名不是身份 —— sdX 由内核探测顺序决定，同一台机器两次启动都可能互换。
+        # 排除数据盘必须靠稳定属性（size/serial/wwid），只写 name 直接拒绝。
+        if not any(str(d.get(k) or "").strip() for k in ("size", "serial", "wwid")):
+            raise ValueError(
+                f + "：必须给出稳定匹配条件之一（size / serial / wwid）。"
+                "只写 name（设备名）不可靠 —— 设备名会随内核探测顺序变化，"
+                "用它做排除集会抹掉数据盘（真机三台并发实测，中了一台）。例如 size=\"30G\"。")
+        if dname:
+            if dname in data_names:
+                raise ValueError(f + ".name：数据盘 " + repr(dname) + " 重复声明")
+            data_names.append(dname)
+        # 名字为空时下游仍有几处需要盘名才能生成**合法**产物：
+        #   · wipe=True：要显式把这块盘写进 clearpart/ignoredisk
+        #   · Ubuntu：subiquity 的 storage 配置只认 path（/dev/sdX）
+        # 这些场景下 name 仍是必填；只有"纯排除用途"（RHEL + wipe=false）才允许只给稳定属性。
+        # 加这道护栏是为了不生成"ignoredisk --only-use=  "这种残缺行（那会把目标盘也弄丢）。
+        if not dname and (d.get("wipe") or not is_rhel_family(c.os_type)):
+            raise ValueError(
+                f + ".name：该场景（wipe=true 或 Ubuntu 布局）仍必须给出盘名 —— "
+                "产物里要显式写到这块盘；只有\"排除用途\"才能只给 size/serial/wwid。")
         # 缺陷 #1 的 schema 侧交叉检查：mode=name 时 target.name 与数据盘同名是自相矛盾
         # （同一块盘既当系统盘又当"别碰"的数据盘）。auto/match 下 name 不参与选盘，不做要求。
-        if mode == "name" and name and dname == name:
+        if mode == "name" and name and dname and dname == name:
             raise ValueError(f + ".name 不能与目标盘同名 " + repr(dname))
         dmount = _safe_mount(d.get("mount", ""), f + ".mount")
         dwipe = _as_bool(d.get("wipe"), f + ".wipe", default=False)
@@ -623,6 +638,11 @@ def _disk_plan(c, dc):
             "fstype": _safe_fstype(d.get("fstype", ""), f + ".fstype", dmount),
             # 生产红线：数据盘默认不碰，必须显式 wipe=true 才动（规格 §2）
             "wipe": dwipe,
+            # §5.42：稳定匹配条件必须带进 plan —— 否则 %pre 拿不到它们，
+            # 排除集为空，又会退回到"按名字排除"那条会抹盘的老路。
+            "size": str(d.get("size") or "").strip(),
+            "serial": _safe_matcher_value(d["serial"], "serial", k) if d.get("serial") else "",
+            "wwid": _safe_matcher_value(d["wwid"], "wwid", k) if d.get("wwid") else "",
         })
 
     # RAID 成员的"盘名前缀"与数据盘同名 = 用户想在这块盘上做 RAID，又声明它是"别碰"的数据盘。
@@ -913,22 +933,86 @@ def _rhel_custom_lines(plan, disk) -> list:
     return lines
 
 
-def _rhel_excluded_disks(plan) -> list:
-    """%pre 选盘时必须排除的盘。
+_SIZE_UNITS = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+_SIZE_UNITS_10 = {"K": 1000, "M": 1000 ** 2, "G": 1000 ** 3, "T": 1000 ** 4}
 
-    数据盘必须排在候选之外：真机上"小系统盘 + 大数据盘"时，按容量/名字挑出来的正好是数据盘，
-    紧接着 `clearpart --drives=$target --all --initlabel` 就把它抹了（本缺陷的数据丢失面）。
 
-    RAID 成员不在这里：本规格里 raid[].devices 引用的是**目标盘上的分区**（见 _raid_part_ref），
-    不存在"另一块被当 RAID 成员的盘"。写 sdc3 时盘名前缀只用于"它是不是被声明成 data_disks"
-    的交叉校验（见 _disk_plan），不改变分区归属 —— 若把盘名前缀也塞进排除集，等于把目标盘
-    自己排除掉（sda3 的盘名前缀就是 sda），反而会装不上。
+def _size_to_bytes(v) -> int:
+    """把 "30G" / "500M" / "32212254720" 转成字节数，供 %pre 与 lsblk 的 SIZE 做等值比对。
+
+    裸 G/M/T 按**二进制**解释（G = GiB）—— 与 PVE/`qm` 的 size=30G 语义一致；
+    显式写 GB/MB/TB 时按十进制。写成 "30GiB" 也认。
     """
-    out = []
-    for d in plan["data_disks"]:
-        if d["name"] not in out:
-            out.append(d["name"])
-    return out
+    s = str(v or "").strip().upper().replace(" ", "")
+    if not s:
+        return 0
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)([KMGT]?)(I?B)?$", s)
+    if not m:
+        return 0
+    num, unit, suffix = float(m.group(1)), m.group(2), (m.group(3) or "")
+    if unit and suffix == "B":
+        return int(num * _SIZE_UNITS_10[unit])
+    return int(num * _SIZE_UNITS[unit])
+
+
+def _safe_matcher_value(v, what, i) -> str:
+    """洗掉 serial/wwid 里的危险字符 —— 它们会被拼进 %pre 的 shell/awk 字符串。
+
+    只放行字母数字与 . _ : + -（真实序列号/wwid 都在这个集合里）。不放行引号、
+    反斜杠、$、空格，否则又是一条配置注入面（与 §5.9 的 os/netplan_renderer 同类）。
+    """
+    s = str(v or "").strip()
+    if not re.match(r"^[A-Za-z0-9._:+-]+$", s):
+        raise ValueError(
+            "disk_config.data_disks[%d].%s 含非法字符（只允许字母数字与 . _ : + -）：%r"
+            % (i, what, v))
+    return s
+
+
+def _data_disk_matcher_specs(plan) -> list:
+    """把 data_disks 转成"稳定属性"匹配串；只给了设备名就报错（拒绝生成）。
+
+    为什么必须这样（RUNBOOK-STATE §5.42，真机三台并发实测，数据丢失级）：
+    模板写 data_disks=[{name:"sda"}] + target.mode=auto 时，旧实现拿**设备名**当排除集，
+    而 `sdX` 由内核探测顺序决定。同一套虚机配置（scsi0=30G 数据盘、scsi1=20G 系统盘）：
+        VM142/VM144:  0:0:0:0 -> sda(30G)   0:0:0:1 -> sdb(20G)
+        VM143:        0:0:0:0 -> sdb(30G)   0:0:0:1 -> sda(20G)   ← 反了
+    于是 `excl='sda'` 排除掉的是**系统盘**，target 落到数据盘上，
+    紧接着 `clearpart --drives=$target --all --initlabel` **把数据盘抹了**，系统盘一根没动。
+    VM143 同一台机器两次启动还出现过两种顺序 —— 这是**非确定性**的，单机验证永远碰不到。
+
+    ⇒ 设备名不是身份，只是备注；排除必须靠 size / serial / wwid。
+    匹配串语法（每条一个条件，条件之间取**或**）：`s<字节>` / `n<序列号>` / `w<wwid>`。
+    取"或"是刻意的：多排除一块只会让候选集变小、最终 `target` 为空而**中止**（安全方向），
+    少排除一块则会把数据盘当目标盘（危险方向）。
+    """
+    specs, bad = [], []
+    for i, d in enumerate(plan.get("data_disks") or []):
+        one = []
+        if d.get("size"):
+            b = _size_to_bytes(d["size"])
+            if b <= 0:
+                raise ValueError(
+                    "disk_config.data_disks[%d].size 无法解析：%r（形如 30G / 500M / 32212254720）"
+                    % (i, d["size"]))
+            one.append("s%d" % b)
+        # serial/wwid 会被拼进 %pre 的 shell/awk 字符串，必须先洗掉引号等危险字符
+        # （否则就是又一条配置注入面）。
+        if d.get("serial"):
+            one.append("n" + _safe_matcher_value(d["serial"], "serial", i))
+        if d.get("wwid"):
+            one.append("w" + _safe_matcher_value(d["wwid"], "wwid", i))
+        if not one:
+            bad.append(d.get("name") or ("[%d]" % i))
+        specs.extend(one)
+    if bad:
+        raise ValueError(
+            "disk_config.data_disks 只给了设备名（%s）—— 拒绝生成安装配置。"
+            "设备名 sda/sdb 由内核探测顺序决定，同一台机器两次启动都可能互换；"
+            "拿它当排除集会把系统盘排除掉、让安装落到数据盘上并把它抹掉（真机实测过，三台里中一台）。"
+            "请改用稳定属性之一：size（如 \"30G\"）、serial、wwid。" % "、".join(bad))
+    return specs
+
 
 
 # ── %pre 里解析 lsblk 的 awk 前置段 ──
@@ -943,18 +1027,25 @@ _LSBLK_AWK_PRELUDE = (
     " p = index(l, \" \" k \"=\\\"\"); if (p == 0) return \"\";"
     " p += length(k) + 3; q = index(substr(l, p), \"\\\"\");"
     " return (q == 0) ? \"\" : substr(l, p, q - 1) } "
-    "BEGIN { nx = split(excl, ex, \",\") } "
-    "function excluded(nm,   i) {"
-    " for (i = 1; i <= nx; i++) if (ex[i] == nm) return 1; return 0 } "
+    # dm = 数据盘的稳定属性匹配串（见 _data_disk_matcher_specs）：s<字节> / n<序列号> / w<wwid>
+    # 空 dm → split 返回 0 → dmatched 恒假 → 没有排除集（调用方会在声明了数据盘时先中止）。
+    "BEGIN { nd = split(dm, dc, \"|\") } "
+    "function dmatched(L,   i, c, k, v) {"
+    " for (i = 1; i <= nd; i++) { c = dc[i]; if (c == \"\") continue;"
+    " k = substr(c, 1, 1); v = substr(c, 2);"
+    " if (k == \"s\" && gv(L, \"SIZE\") + 0 == v + 0) return 1;"
+    " if (k == \"n\" && v != \"\" && gv(L, \"SERIAL\") == v) return 1;"
+    " if (k == \"w\" && v != \"\" && gv(L, \"WWN\") == v) return 1 }"
+    " return 0 } "
 )
-# 选盘主体：只认整盘、非可移动、非 usb、容量达标、且不在排除集里。
+# 选盘主体：只认整盘、非可移动、非 usb、容量达标、且**不是**数据盘（按稳定属性判定）。
 _AWK_PICK_BY_SIZE = (
     "{ L = \" \" $0;"
     " if (gv(L, \"TYPE\") != \"disk\") next;"
     " if (gv(L, \"RM\") != \"0\") next;"
     " if (gv(L, \"TRAN\") == \"usb\") next;"
     " nm = gv(L, \"NAME\");"
-    " if (nm == \"\" || excluded(nm)) next;"
+    " if (nm == \"\" || dmatched(L)) next;"
     " if (min > 0 && gv(L, \"SIZE\") + 0 < min) next;"
     " print nm }"
 )
@@ -963,27 +1054,66 @@ _AWK_PICK_BY_KEY = (
     "{ L = \" \" $0;"
     " if (gv(L, \"SERIAL\") == s || gv(L, \"MODEL\") == s) {"
     " nm = gv(L, \"NAME\");"
-    " if (nm != \"\" && !excluded(nm)) print nm } }"
+    " if (nm != \"\" && !dmatched(L)) print nm } }"
+)
+# 选盘留痕（§5.42 要求"相关日志要记录"）：把磁盘清单与命中情况打到串口 + %pre 日志。
+# 单机装机时不可能复现的事故，全靠这几行日志事后定位。
+_AWK_LIST_DISKS = (
+    "{ L = \" \" $0;"
+    " if (gv(L, \"TYPE\") != \"disk\") next;"
+    " if (dmatched(L)) dmc++;"
+    " printf \"PXE-DISK: %s %-9s size=%-14s serial=%s wwn=%s\\n\","
+    " (dmatched(L) ? \"[数据盘]\" : \"[  --  ]\"), gv(L, \"NAME\"), gv(L, \"SIZE\"),"
+    " gv(L, \"SERIAL\"), gv(L, \"WWN\") }"
+    " END { printf \"PXE-DISK: 命中数据盘 %d 块\\n\", dmc+0 }"
+)
+_AWK_COUNT_MATCH = (
+    "{ L = \" \" $0; if (gv(L, \"TYPE\") != \"disk\") next;"
+    " if (dmatched(L)) dmc++ } END { print dmc+0 }"
 )
 
 
 def _rhel_pick_target_lines(plan) -> list:
-    """%pre 里现场挑目标盘（规格 §3.1）：ks 没有"自动选盘"原语，只能脚本化。"""
-    excl = ",".join(_rhel_excluded_disks(plan))
-    lines = ["# 选出目标盘：非可移动、非光驱、容量 >= min_size_gb、按名排序取第一块",
-             "# data_disks 里声明过的盘**先从候选里排除**：否则容量最大/名字最小的数据盘会被选中，"
-             "随后的 clearpart 直接把它抹掉（本缺陷的数据丢失面）。"
-             "lsblk 用 -P/--pairs 输出，按 key 取值，不依赖列位置。"]
+    """%pre 里现场挑目标盘（规格 §3.1）：ks 没有"自动选盘"原语，只能脚本化。
+
+    排除集只认**稳定属性**（size/serial/wwid），不认设备名 —— 见 §5.42：
+    设备名 sda/sdb 由内核探测顺序决定，同一台机器两次启动都可能互换，
+    拿它做排除集会排掉系统盘、把安装落到数据盘上并抹掉它。
+    """
+    dm = "|".join(_data_disk_matcher_specs(plan))
+    lines = [
+        "# 选盘留痕：磁盘清单 + 命中情况 + 最终 target 全部打到串口（console）与 %pre 日志。",
+        "# 为什么值得占这几行：§5.42 那类事故（三台里中一台）事后只能靠这些日志定位。",
+        "pxelog() { echo \"PXE-DISK: $*\"; echo \"PXE-DISK: $*\" > /dev/console 2>/dev/null || true; }",
+        "pxelog '开始选盘；数据盘稳定匹配串=%s'" % (dm or "<无>"),
+        "pxelog '磁盘清单（[数据盘]=按稳定属性命中，会被排除）- - - - - - - - - - - - -'",
+        "lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | awk -v dm='%s' '%s' | tee /dev/console"
+        % (dm, _LSBLK_AWK_PRELUDE + _AWK_LIST_DISKS),
+        "_dmcnt=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | awk -v dm='%s' '%s')"
+        % (dm, _LSBLK_AWK_PRELUDE + _AWK_COUNT_MATCH),
+        "pxelog \"按稳定属性命中数据盘 ${_dmcnt} 块\"",
+    ]
+    if dm:
+        # 声明了数据盘却一块都没命中 ⇒ 匹配条件对不上这台机器的盘，**排除集是空的**。
+        # 此时继续选盘必然把数据盘当目标盘抹掉 ⇒ 必须中止（方案 A：宁可不装，绝不抹盘）。
+        lines += [
+            "if [ \"${_dmcnt}\" -eq 0 ]; then",
+            "  pxelog '!! 已声明数据盘，但按稳定属性一块都没匹配到 —— 拒绝继续（排除集为空会抹掉数据盘）'",
+            "  pxelog '!! 请核对 data_disks 的 size / serial / wwid 是否与这台机器相符；装机中止'",
+            "  echo 'PXE: 数据盘稳定匹配失败，装机中止（拒绝在排除集为空的情况下选盘）' >&2; exit 1",
+            "fi",
+        ]
     if plan["mode"] == "match":
         key = plan["serial"] or plan["model"]
-        lines.append("target=$(lsblk -dnP -o NAME,SERIAL,MODEL | "
-                     "awk -v s='%s' -v excl='%s' '" % (key, excl))
+        lines.append("target=$(lsblk -dnP -o NAME,SERIAL,MODEL,WWN | "
+                     "awk -v s='%s' -v dm='%s' '" % (key, dm))
         lines.append(_LSBLK_AWK_PRELUDE + _AWK_PICK_BY_KEY + "' | sort | head -1)")
     else:
         # 恒用 -b（字节）比较：未给下限时 min=0，等价于"只看是不是整盘/可移动/usb"。
-        lines.append("target=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE | "
-                     "awk -v min=%d -v excl='%s' '" % (int(plan["min_size_gb"]) * 1024 ** 3, excl))
+        lines.append("target=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | "
+                     "awk -v min=%d -v dm='%s' '" % (int(plan["min_size_gb"]) * 1024 ** 3, dm))
         lines.append(_LSBLK_AWK_PRELUDE + _AWK_PICK_BY_SIZE + "' | sort | head -1)")
+    lines.append("pxelog \"选定目标盘 target='${target:-<空>}'\"")
     lines.append("if [ -z \"$target\" ]; then "
                  "echo 'PXE: 未找到可用的目标磁盘，装机中止' >&2; exit 1; fi")
     return lines

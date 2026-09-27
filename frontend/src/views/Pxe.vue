@@ -274,23 +274,42 @@
 
           <el-divider content-position="left">其它数据盘（默认<b>不格式化</b>）</el-divider>
           <div style="margin-bottom: 6px; font-size: 12px; color: var(--el-text-color-secondary)">
-            这里只做"挂载"。要格式化别的盘必须显式打开下面的开关 —— 生产上默认不动数据盘。
+            这里只做"挂载"。要格式化别的盘必须显式打开下面的开关 —— 生产上默认不动数据盘。<br />
+            <b style="color: var(--el-color-warning)">识别方式必须填「容量」/「序列号」/「WWID」之一</b>：
+            盘名（sda/sdb）由内核探测顺序决定，<b>同一台机器两次启动都可能互换</b>，
+            拿它当"别碰这块盘"的判据会把系统盘排除掉、让安装落到数据盘上并抹掉它（真机实测过）。
+            盘名只作备注。容量写法如 <code>30G</code>（G/M/T 按二进制，GB/MB/TB 按十进制）。
           </div>
           <el-table :data="form.data_disks" size="small" style="margin-bottom: 6px">
-            <el-table-column label="盘名" width="140">
-              <template #default="{ row }"><el-input v-model="row.name" placeholder="sdb" /></template>
+            <el-table-column label="容量（识别用）" width="130">
+              <template #default="{ row }">
+                <el-input v-model="row.size" placeholder="30G" />
+              </template>
             </el-table-column>
-            <el-table-column label="挂载点" width="160">
+            <el-table-column label="序列号（识别用）" width="150">
+              <template #default="{ row }">
+                <el-input v-model="row.serial" placeholder="可空" />
+              </template>
+            </el-table-column>
+            <el-table-column label="WWID（识别用）" width="150">
+              <template #default="{ row }">
+                <el-input v-model="row.wwid" placeholder="可空" />
+              </template>
+            </el-table-column>
+            <el-table-column label="盘名（仅备注）" width="130">
+              <template #default="{ row }"><el-input v-model="row.name" placeholder="可空" /></template>
+            </el-table-column>
+            <el-table-column label="挂载点" width="150">
               <template #default="{ row }"><el-input v-model="row.mount" placeholder="/data" /></template>
             </el-table-column>
-            <el-table-column label="文件系统" width="130">
+            <el-table-column label="文件系统" width="120">
               <template #default="{ row }">
                 <el-select v-model="row.fstype" clearable>
                   <el-option v-for="f in FSTYPES" :key="f" :label="f" :value="f" />
                 </el-select>
               </template>
             </el-table-column>
-            <el-table-column label="格式化" width="100">
+            <el-table-column label="格式化" width="90">
               <template #default="{ row }"><el-switch v-model="row.wipe" /></template>
             </el-table-column>
             <el-table-column label="操作" width="70">
@@ -300,7 +319,10 @@
             </el-table-column>
           </el-table>
           <div style="margin-bottom: 12px">
-            <el-button size="small" @click="form.data_disks.push({ name: '', mount: '', fstype: 'xfs', wipe: false })">
+            <el-button
+              size="small"
+              @click="form.data_disks.push({ size: '', serial: '', wwid: '', name: '', mount: '', fstype: 'xfs', wipe: false })"
+            >
               + 加一块数据盘
             </el-button>
           </div>
@@ -611,8 +633,13 @@ function buildDiskConfig() {
     })
   if (parts.length) dc.partitions = parts
   const dd = form.data_disks
-    .filter(d => d.name)
-    .map(d => ({ name: d.name, mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe }))
+    // §5.42：只要有稳定识别条件（size/serial/wwid）就保留 —— 不再要求必须有盘名。
+    // 盘名现在只是备注，只填盘名的行会被后端 422 拒绝（那正是要拦的东西）。
+    .filter(d => d.size || d.serial || d.wwid)
+    .map(d => ({
+      size: d.size || "", serial: d.serial || "", wwid: d.wwid || "",
+      name: d.name || "", mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe,
+    }))
   if (dd.length) dc.data_disks = dd
   const rd = form.raid
     .filter(r => r.name && r.devices)
@@ -669,6 +696,7 @@ function fillForm(p) {
     vg: q.vg || "", lv: q.lv || "",
   }))
   form.data_disks = (dc.data_disks || []).map(d => ({
+    size: d.size || "", serial: d.serial || "", wwid: d.wwid || "",
     name: d.name || "", mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe,
   }))
   form.raid = (dc.raid || []).map(r => ({
