@@ -401,13 +401,21 @@ def _disk_plan(c, dc):
     name = _safe_ident(tgt.get("name", "") or legacy_disk, "disk_config.target.name")
     serial = _safe_ident(tgt.get("serial", ""), "disk_config.target.serial", extra=" ")
     model = _safe_ident(tgt.get("model", ""), "disk_config.target.model", extra=" ")
+    # id_path：udev 的物理路径（pci-0000:00:05.0-scsi-0:0:0:1）。Ubuntu 侧必须优先用它 ——
+    # subiquity 的 serial 取 sysfs，QEMU 下为空（§5.45 实测）。字符集收窄到 udev 实际会用的集合。
+    id_path = re.sub(r"[^A-Za-z0-9._:+-]", "", str(tgt.get("id_path") or "").strip())
     if mode == "auto":
         # 规格 §2 明文要求：auto 必须忽略 name，避免"以为自动其实写死"
         name = ""
     if mode == "name" and not name:
         raise ValueError("disk_config.target.mode=name 但没有给出 disk_config.target.name")
-    if mode == "match" and not (serial or model):
-        raise ValueError("disk_config.target.mode=match 但没有给出 serial 或 model")
+    # id_path 也算合法的匹配键 —— Ubuntu 侧甚至**只能**用它（subiquity 的 serial 取 sysfs，
+    # QEMU 下为空，见 §5.45）。RHEL 侧的 %pre 目前只用 serial/model 匹配，给了 id_path
+    # 也不会被用上，所以下面按"是否已有 RHEL 能用的键"分别判断，避免生成一份
+    # 看着合法却在 RHEL 上选不出盘的配置。
+    if mode == "match" and not (serial or model or id_path):
+        raise ValueError(
+            "disk_config.target.mode=match 但没有给出 id_path、serial 或 model")
 
     min_gb = 0
     mg = tgt.get("min_size_gb")
@@ -656,6 +664,7 @@ def _disk_plan(c, dc):
 
     return {
         "mode": mode, "name": name, "serial": serial, "model": model,
+        "id_path": id_path,
         "min_size_gb": min_gb, "wipe": wipe, "layout": layout,
         "partitions": partitions, "raid": raid_out, "data_disks": data,
     }
@@ -673,15 +682,33 @@ def _plan_volgroups(plan) -> list:
 # ---- Ubuntu / subiquity ----
 
 def _ubuntu_disk_match(plan):
-    """目标盘在 subiquity 里的表达（规格 §3.1）。"""
+    """目标盘在 subiquity 里的表达（规格 §3.1）。
+
+    ⚠️ `serial` 在虚拟化环境下**不可靠**（RUNBOOK-STATE §5.45 真机实测）：
+    subiquity 取的是 sysfs 的 `/sys/block/sdX/device/serial`，而 QEMU/virtio-scsi
+    **不填这个属性**（实测为空）。`lsblk -o SERIAL` 与 udev 报的 `drive-scsiN`
+    来自 SCSI VPD 页，是**另一个来源** —— 于是 `serial: drive-scsi1` 会让 subiquity 报
+    `matched no disk`，装机直接失败。**同一个字段在 RHEL(%pre 用 lsblk) 与
+    Ubuntu(subiquity 用 sysfs) 两条路径上含义不同。**
+    `id_path`（udev 的 ID_PATH，如 `pci-0000:00:05.0-scsi-0:0:0:1`）是物理路径，
+    与内核枚举顺序无关，且在 QEMU 与真机上都由 udev 填充 —— 因此**优先用它**。
+    """
     if plan["mode"] == "name":
         return {"path": "/dev/" + plan["name"]}
     if plan["mode"] == "match":
         m = {}
-        if plan["serial"]:
+        if plan.get("id_path"):
+            m["id_path"] = plan["id_path"]
+        elif plan["serial"]:
             m["serial"] = plan["serial"]
         if plan["model"]:
             m["model"] = plan["model"]
+        if not m:
+            # 一个匹配键都没有时生成的 disk 条目没有身份，subiquity 可能匹配到任意一块盘 ——
+            # 宁可不生成，也不发一份"能装但可能装错盘"的配置。
+            raise ValueError(
+                "Ubuntu 的 target.mode=match 需要至少一个匹配键："
+                "id_path（推荐，形如 pci-0000:00:05.0-scsi-0:0:0:1）、serial 或 model")
         return m
     return {}
 
@@ -726,8 +753,15 @@ def _ubuntu_storage_obj(plan):
         return fid
 
     for p in plan["partitions"]:
+        # **`size: "rest"` 不能直接发给 subiquity**（§5.45 真机实测）：
+        # 它报 `'rest' is not valid input.` 然后整机装机失败。
+        # curtin/subiquity 里"占满剩余空间"的写法是 **-1**。
+        # 这是产品内部约定（RHEL 侧用 --grow）到各 OS 的翻译，不能原样透传。
+        psize = str(p["size"] or "").strip().lower()
+        size_val = -1 if psize in ("rest", "remaining", "grow", "-1") \
+            else _human_size_to_bytes(p["size"])
         e = {"type": "partition", "id": p["id_sub"], "device": "disk0",
-             "size": _human_size_to_bytes(p["size"])}
+             "size": size_val}
         if _PART_FLAGS.get(p["mount"]):
             e["flag"] = _PART_FLAGS[p["mount"]]
         cfg.append(e)
@@ -758,7 +792,12 @@ def _ubuntu_storage_obj(plan):
         lv_id = "lv%d" % lv_n[0]
         lv_n[0] += 1
         cfg.append({"type": "lvm_partition", "id": lv_id, "volgroup": p["vg"],
-                    "name": p["lv"], "size": _human_size_to_bytes(p["size"])})
+                    "name": p["lv"],
+                    # 同 partition：subiquity 不接受 "rest"，占满剩余空间要用 -1（§5.45 真机实测）
+                    "size": (-1
+                             if str(p["size"] or "").strip().lower() in
+                             ("rest", "remaining", "grow", "-1")
+                             else _human_size_to_bytes(p["size"]))})
         fid = _format(lv_id, p["fstype"] or ("swap" if p["mount"] == "swap" else "ext4"))
         if p["mount"] and p["mount"] != "swap":
             mounts.append((fid, p["mount"]))

@@ -914,10 +914,11 @@ class PxeCustomLayoutTest(unittest.TestCase):
             {"type": "format", "id": "fmt1", "volume": "part1", "fstype": "ext4"},
             {"type": "partition", "id": "part2", "device": "disk0", "size": 8589934592},
             {"type": "format", "id": "fmt2", "volume": "part2", "fstype": "swap"},
-            {"type": "partition", "id": "part3", "device": "disk0", "size": "rest"},
+            # §5.45：subiquity 不接受 "rest"，占满剩余空间要用 -1（真机实测 "is not valid input"）
+            {"type": "partition", "id": "part3", "device": "disk0", "size": -1},
             {"type": "lvm_volgroup", "id": "vg0", "name": "vg0", "devices": ["part3"]},
             {"type": "lvm_partition", "id": "lv0", "volgroup": "vg0", "name": "root",
-             "size": "rest"},
+             "size": -1},
             {"type": "format", "id": "fmt3", "volume": "lv0", "fstype": "ext4"},
             {"type": "mount", "id": "mnt0", "device": "fmt0", "path": "/boot/efi"},
             {"type": "mount", "id": "mnt1", "device": "fmt1", "path": "/boot"},

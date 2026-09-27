@@ -580,6 +580,10 @@ class PxeDiskTargetIn(BaseModel):
     name: str = ""
     serial: str = ""
     model: str = ""
+    # udev 的物理路径，如 pci-0000:00:05.0-scsi-0:0:0:1。
+    # **Ubuntu 侧请用它**：subiquity 的 serial 匹配取 sysfs `/sys/block/sdX/device/serial`，
+    # 而 QEMU/virtio-scsi 不填该属性（实测为空）→ `serial` 必然 matched no disk（§5.45）。
+    id_path: str = ""
     min_size_gb: int = 0
 
 
