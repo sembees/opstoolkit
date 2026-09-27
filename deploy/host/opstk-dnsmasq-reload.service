@@ -1,0 +1,10 @@
+[Unit]
+Description=OpsToolkit: 校验并重载 dnsmasq（PXE 配置变更后）
+Documentation=file:/opt/opstk/deploy/host/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/opstk-dnsmasq-reload.sh
+# 重载失败不能拖垮 path 单元：把失败写进状态文件交给应用侧判定即可，
+# 否则 systemd 会因 start-limit 把 .path 一起停掉，之后连重试机会都没有。
+SuccessExitStatus=0 1

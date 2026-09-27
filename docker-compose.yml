@@ -21,6 +21,11 @@ services:
       - /srv/opstk/pxe-web:/srv/opstk/pxe-web
       - /srv/opstk/iso:/srv/opstk/iso
       - /srv/opstk/mnt:/srv/opstk/mnt
+      # 宿主机 dnsmasq 重载握手的状态目录。必须挂：容器无法命令宿主机 systemd
+      # （没挂 /run/dbus，也没有 pid: host），只能靠共享文件系统确认
+      # "刚写的配置到底有没有被正在跑的 dnsmasq 加载"。不挂的后果实测过 ——
+      # 宿主机明明重载成功，容器里 open() 永远 ENOENT，部署报失败。
+      - /srv/opstk/state:/srv/opstk/state
     restart: unless-stopped
 
 volumes:

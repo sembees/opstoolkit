@@ -1,0 +1,12 @@
+[Unit]
+Description=OpsToolkit: 监视 PXE 的 dnsmasq 配置变化，触发校验+重载
+Documentation=file:/opt/opstk/deploy/host/README.md
+
+[Path]
+# 容器把配置写进这个路径（compose 把宿主机的 /etc/dnsmasq.d 挂了进去），
+# 但容器无法命令宿主机的 systemd —— 由这个 path 单元补上"加载"这一步。
+PathChanged=/etc/dnsmasq.d/opstk-pxe.conf
+Unit=opstk-dnsmasq-reload.service
+
+[Install]
+WantedBy=multi-user.target
