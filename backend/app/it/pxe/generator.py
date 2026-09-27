@@ -1050,14 +1050,19 @@ _LSBLK_AWK_PRELUDE = (
     "function dmatched(L,   gi) {"
     " for (gi = 1; gi <= npg; gi++) if (dgrp(L, gi)) return 1; return 0 } "
 )
-# 选盘主体：只认整盘、非可移动、非 usb、容量达标、且**不是**数据盘（按稳定属性判定）。
+# 选盘主体：只认整盘、非可移动、非 usb、非 RAM 盘、容量达标、且**不是**数据盘。
+# zram 必须显式排除：`lsblk` 把 /dev/zram0 报成 TYPE=disk、RM=0、TRAN 空，
+# 它**能通过之前的所有过滤条件**；之所以一直没出事故，只是因为 "zram0" 在字母序里
+# 排在 nvme*/vd*/sd* 之后（靠 sort|head -1 侥幸）。真机上少一块盘就会选中内存盘。
+# 这是新加的 %pre 留痕第一次跑就暴露出来的。
 _AWK_PICK_BY_SIZE = (
     "{ L = \" \" $0;"
     " if (gv(L, \"TYPE\") != \"disk\") next;"
     " if (gv(L, \"RM\") != \"0\") next;"
     " if (gv(L, \"TRAN\") == \"usb\") next;"
     " nm = gv(L, \"NAME\");"
-    " if (nm == \"\" || dmatched(L)) next;"
+    " if (nm == \"\" || nm ~ /^(zram|ram|loop|sr|dm-|md)/) next;"
+    " if (dmatched(L)) next;"
     " if (min > 0 && gv(L, \"SIZE\") + 0 < min) next;"
     " print nm }"
 )
@@ -1076,10 +1081,15 @@ _AWK_PICK_BY_KEY = (
 _AWK_LIST_AND_CHECK = (
     "{ L = \" \" $0;"
     " if (gv(L, \"TYPE\") != \"disk\") next;"
+    " nm = gv(L, \"NAME\");"
+    # zram/loop/sr 这类**不是候选盘**，它们在清单里标出来但不算"数据盘"，
+    # 也不参与选盘；否则 zram0 会被误当成一块可用目标盘（它确实通过了旧过滤条件）。
+    " if (nm ~ /^(zram|ram|loop|sr)/) {"
+    "   printf \"PXE-DISK: [ 跳过 ] %-9s size=%-14s (非候选盘)\\n\", nm, gv(L, \"SIZE\"); next }"
     " m = dmatched(L);"
     " if (m) { dmc++; for (gi = 1; gi <= npg; gi++) if (dgrp(L, gi)) gcnt[gi]++ }"
     " printf \"PXE-DISK: %s %-9s size=%-14s serial=%s wwn=%s\\n\","
-    " (m ? \"[数据盘]\" : \"[  --  ]\"), gv(L, \"NAME\"), gv(L, \"SIZE\"),"
+    " (m ? \"[数据盘]\" : \"[  --  ]\"), nm, gv(L, \"SIZE\"),"
     " gv(L, \"SERIAL\"), gv(L, \"WWN\") }"
     " END { bad = 0;"
     " for (gi = 1; gi <= npg; gi++) if (gcnt[gi] + 0 == 0) {"
