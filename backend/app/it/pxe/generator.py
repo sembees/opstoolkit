@@ -224,7 +224,14 @@ def _hash_pw(plaintext):
 #   3) 盘名不许写死：auto 模式在 RHEL 侧用 %pre+%include 现场挑盘（ks 没有"自动选盘"
 #      原语），Ubuntu 侧用 subiquity 的 match: {size: largest}。
 _SIZE_RE = re.compile(r"^[0-9]+(\.[0-9]+)?[MGTP]$|^rest$|^100%FREE$")
-_FSTYPE_ALLOWED = ("ext4", "xfs", "btrfs", "fat32", "vfat", "swap")
+# bios_grub：**不是文件系统**，而是一个 1MiB、无文件系统、带 bios_grub 标记的分区。
+# 为什么需要它（RUNBOOK-STATE §5.46 缺陷 3，真机实测）：BIOS + GPT 下 subiquity 会报
+#   "autoinstall config did not create needed bootloader partition"
+# 然后拒绝装机 —— GRUB 在 BIOS+GPT 上必须有一个地方放 core.img。
+# RHEL 侧的对应物是 `part biosboot --fstype=biosboot`。
+# 用一个"伪 fstype"来表达它（而不是新增字段）是为了让前端/存量配置的改动面最小。
+BIOS_GRUB_FSTYPE = "bios_grub"
+_FSTYPE_ALLOWED = ("ext4", "xfs", "btrfs", "fat32", "vfat", "swap", BIOS_GRUB_FSTYPE)
 _MOUNT_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
 _RAID_LEVELS = (0, 1, 5, 6, 10)
 _DISK_MODES = ("auto", "name", "match")
@@ -764,9 +771,14 @@ def _ubuntu_storage_obj(plan):
              "size": size_val}
         if _PART_FLAGS.get(p["mount"]):
             e["flag"] = _PART_FLAGS[p["mount"]]
+        if p["fstype"] == BIOS_GRUB_FSTYPE:
+            # BIOS + GPT 的引导分区：**只建分区 + 打标记，不能有 format 条目**
+            # （它没有文件系统）。subiquity 认这个 flag 就不再报
+            # "did not create needed bootloader partition"（§5.46 缺陷 3）。
+            e["flag"] = "bios_grub"
         cfg.append(e)
-        if p["vg"] or p["index"] in raid_members:
-            # LVM PV / RAID 成员本身不建文件系统
+        # LVM PV / RAID 成员 / bios_grub 都不建文件系统
+        if p["vg"] or p["index"] in raid_members or p["fstype"] == BIOS_GRUB_FSTYPE:
             continue
         fstype = p["fstype"] or ("ext4" if p["mount"] and p["mount"] != "swap" else "")
         if not fstype:
@@ -922,6 +934,12 @@ def _rhel_custom_lines(plan, disk) -> list:
                 raid_members[i] = "raid.%02d" % (len(raid_members) + 1)
 
     for p in plan["partitions"]:
+        if p["fstype"] == BIOS_GRUB_FSTYPE:
+            # BIOS+GPT 的引导分区（§5.46 缺陷 3）。kickstart 侧的对应物就是
+            # `part biosboot`（anaconda 的 mntpoint 明确接受 biosboot，见下面那段注释），
+            # 固定 1MiB、无文件系统 —— 用户填的 size 在这里被忽略（biosboot 分区大小没有意义）。
+            lines.append("part biosboot --fstype=biosboot --size=1 --ondisk=" + disk)
+            continue
         ident = pv_of.get(p["index"]) or raid_members.get(p["index"]) or p["id_ks"]
         is_pv = p["index"] in pv_of
         is_raid = p["index"] in raid_members

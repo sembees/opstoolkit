@@ -392,7 +392,7 @@ class InspectionTemplateOut(ORMBase):
 _DISK_SIZE_PATTERN = r"^[0-9]+(\.[0-9]+)?[MGTP]$|^rest$|^100%FREE$"
 _DISK_SIZE_RE = re.compile(_DISK_SIZE_PATTERN)
 _DISK_MOUNT_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
-_DISK_FSTYPE_ALLOWED = ("ext4", "xfs", "btrfs", "fat32", "vfat", "swap")
+_DISK_FSTYPE_ALLOWED = ("ext4", "xfs", "btrfs", "fat32", "vfat", "swap", "bios_grub")
 _DISK_LAYOUT_ALLOWED = ("lvm", "direct", "zfs", "custom")
 _DISK_MODE_ALLOWED = ("auto", "name", "match")
 _RAID_LEVEL_ALLOWED = (0, 1, 5, 6, 10)
