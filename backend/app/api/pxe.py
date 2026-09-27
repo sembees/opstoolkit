@@ -488,6 +488,15 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     # 注意必须在 dict 层合并：detect_network() 的结果含 server_ip、warnings
     # 等模型字段之外的键，须原样保留并传给生成器，不能经过模型二次过滤。
     caller_net_config = payload.get("net_config") or {}
+    # 回落：请求体没给 net_config 时，用**该模板在 DB 里存的** net_config。
+    # 为什么必须回落 —— 实测（RUNBOOK-STATE §5.39）：detect_network() 取的是
+    # **默认路由所在网卡**（本项目里是接企业网的 ens18），所以只要部署时不显式覆盖，
+    # 生成出来的 dnsmasq 就会在**企业网段**上开 DHCP 池，把 10.128.118.0/24 的地址发出去。
+    # 而模板里明明配了"PXE 走哪个网卡/哪个池"，却完全没被读 —— 与 §5.29 的 installs
+    # 是同一个模式（DB 里存了设置、部署却不看）。优先级：请求体 > DB 模板 > 自动探测。
+    if not caller_net_config:
+        _pf = await db.get(models.PxeProfile, pid)
+        caller_net_config = ((_pf.net_config if _pf else None) or {})
     if net:
         merged = dict(net)
         merged.update(caller_net_config)
