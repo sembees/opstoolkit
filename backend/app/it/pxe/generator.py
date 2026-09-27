@@ -115,6 +115,12 @@ class PxeConfig:
     squashfs_path: str = "ubuntu/22.04/installer.squashfs"
     # 内核控制台，见 DEFAULT_KERNEL_CONSOLE 的说明
     kernel_console: str = DEFAULT_KERNEL_CONSOLE
+    # 32 位 UEFI(client-arch 6) 的 ipxe-i386.efi **在发行版包里不存在**（§4-6 实测：
+    # Ubuntu 22.04 的 apt 里只有 grub-ipxe / ipxe / ipxe-qemu，都不含它；上游也无预编译产物）。
+    # 调用方（api 层）按"这个文件在 TFTP 根或候选路径里到底在不在"来传：
+    # **不在就别广播一条指向不存在文件的引导项** —— 那只会给 ia32 客户端一个必然失败的承诺。
+    # 默认 True = 保持既有输出完全不变（不打扰任何现存用例与部署）。
+    ipxe_ia32_available: bool = True
     # 可挂载的安装介质 URL（casper 的 url= 参数）。
     # 为什么必须有它：live-server 的 casper 需要一个**可挂载介质**才能建立 live 文件系统。
     # 旧写法用相对位置参数 `--- ubuntu/22.04/installer.squashfs` 实测直接失败：
@@ -1551,6 +1557,12 @@ def _dnsmasq(c, installs=None):
     L.append("tag-if=set:fw-menu-def,tag:fw-menu" + neg)
     L.append("# 未登记机器的默认菜单：扁平全局文件（不是 profiles/<pid>/ 下的那份）")
     L.append("dhcp-boot=tag:fw-menu-def," + c.http_root + "/boot.ipxe")
+    if not c.ipxe_ia32_available:
+        # 只摘掉"下发 32 位固件"那两条。**必须保留** dhcp-match 里的 efi-ia32 与
+        # tag-if=set:fw-ia32：否则 ia32 客户端会因为 tag:!efi-ia32 成立而落进 fw-bios，
+        # 拿到 undionly.kpxe（BIOS 固件）—— 架构不符，比"没有引导项"更糟。
+        L = [x for x in L if not x.startswith(("pxe-service=tag:fw-ia32",
+                                               "dhcp-boot=tag:fw-ia32"))]
     L.append("")
     return "\n".join(L) + "\n"
 

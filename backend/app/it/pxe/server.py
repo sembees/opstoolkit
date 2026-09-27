@@ -429,8 +429,32 @@ def prepare_firmware() -> list:
                 copied = True
                 break
         if not copied:
-            log.append("Missing firmware: " + name + " (install ipxe-bootimgs)")
+            # 别再无脑写 "install ipxe-bootimgs" —— 这个包在 Ubuntu 22.04 上**根本不存在**
+            # （§4-6 实测：apt-cache search ipxe 只有 grub-ipxe / ipxe / ipxe-qemu），
+            # 而且 32 位 EFI 二进制上游也没有预编译产物。给一句能照做的实话。
+            if name == "ipxe-i386.efi":
+                log.append("Missing firmware: " + name
+                           + "（发行版不提供 32 位 UEFI 的 iPXE 二进制；若确有 arch 6 客户端，"
+                             "需自行编译后放到 " + TFTP_ROOT + "/。该固件缺失时，"
+                             "生成的 dnsmasq 不会再广播 fw-ia32 引导项 —— 不承诺做不到的事）")
+            else:
+                log.append("Missing firmware: " + name
+                           + "（Ubuntu/Debian 可试 `apt install ipxe`；或自行编译后放到 "
+                           + TFTP_ROOT + "/）")
     return log
+
+
+def firmware_present() -> dict:
+    """TFTP 根（或已知候选路径）里实际存在哪些固件。键与 FIRMWARE 一致。
+
+    用途：生成 dnsmasq 配置时判断"32 位 UEFI 固件在不在"——不在就别广播那条引导项。
+    先看 TFTP 根（部署后文件会拷到这里），再看发行版候选路径（还没 prepare 时也能判断）。
+    """
+    out = {}
+    for name, sources in FIRMWARE.items():
+        dst = os.path.join(TFTP_ROOT, name)
+        out[name] = os.path.exists(dst) or any(os.path.exists(s) for s in sources)
+    return out
 
 
 # ── Deploy ──

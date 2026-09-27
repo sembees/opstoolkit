@@ -87,6 +87,35 @@ class PxeGeneratorTest(unittest.TestCase):
             if line.startswith("dhcp-boot="):
                 self.assertEqual(line.split(",")[0].count("tag:"), 1, line)
 
+    def test_missing_ia32_firmware_is_not_advertised(self):
+        """32 位 UEFI 固件不存在时：不广播指向它的引导项，但**保留** efi-ia32 的 tag 判定。
+
+        背景（§4-6 实测）：ipxe-i386.efi 在发行版包里根本不存在（Ubuntu 22.04 只有
+        grub-ipxe / ipxe / ipxe-qemu），上游也无预编译产物。文件不在却照样广播
+        `pxe-service=tag:fw-ia32,...` / `dhcp-boot=tag:fw-ia32,ipxe-i386.efi`，
+        等于给 arch 6 客户端一个必然失败的承诺。
+        而 `dhcp-match=set:efi-ia32` **必须留着**：摘掉它，ia32 客户端会因为
+        `tag:!efi-ia32` 成立而落进 fw-bios，拿到 BIOS 固件 undionly.kpxe —— 架构不符，更糟。
+        """
+        from app.it.pxe.generator import PxeConfig, generate_all, _dnsmasq
+        from test_pxe import _cfg
+
+        base = _cfg()
+        # 默认（True）：保持既有输出不变 —— 这是向后兼容的保证
+        dns_on = _dnsmasq(PxeConfig(**{**base.__dict__, "ipxe_ia32_available": True}))
+        self.assertIn("dhcp-boot=tag:fw-ia32,ipxe-i386.efi", dns_on)
+        # 固件缺失（False）：摘掉两条下发，但保留 efi-ia32 的判定
+        dns_off = _dnsmasq(PxeConfig(**{**base.__dict__, "ipxe_ia32_available": False}))
+        self.assertNotIn("pxe-service=tag:fw-ia32", dns_off)
+        self.assertNotIn("dhcp-boot=tag:fw-ia32", dns_off)
+        self.assertIn("dhcp-match=set:efi-ia32,option:client-arch,6", dns_off)
+        self.assertIn("tag-if=set:fw-ia32,tag:!ipxe,tag:efi-ia32", dns_off)
+        # 其余两条固件下发不受影响
+        self.assertIn("dhcp-boot=tag:fw-x64,ipxe.efi", dns_off)
+        self.assertIn("dhcp-boot=tag:fw-bios,undionly.kpxe", dns_off)
+        # 默认值就是 True，且不传时输出与传 True 完全一致
+        self.assertEqual(_dnsmasq(base), dns_on)
+
     def test_rhel_kickstart(self):
         # D17：RHEL 装机必须给出可用的安装源。本机从不发布 ISO 仓库树
         # （extract_from_iso 只拷 vmlinuz/initrd.img，目录里没有 repomd.xml），

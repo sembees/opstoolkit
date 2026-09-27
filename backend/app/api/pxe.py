@@ -221,6 +221,9 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
         iso_size_mb=_iso_size_mb(_iso),
         # 留空则用后端默认值（带串口，便于无显示器机器的装机排障）
         kernel_console=kernel_console or DEFAULT_KERNEL_CONSOLE,
+        # 32 位 UEFI(arch 6) 的 ipxe-i386.efi 在发行版包里不存在（§4-6）。按实际是否
+        # 存在来生成：文件不在就不广播那条必然失败的引导项。见 generator.PxeConfig。
+        ipxe_ia32_available=pxe_server.firmware_present().get("ipxe-i386.efi", False),
         deploy_mode=deploy_mode,
     )
 
