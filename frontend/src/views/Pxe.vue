@@ -632,14 +632,24 @@ function buildDiskConfig() {
       return o
     })
   if (parts.length) dc.partitions = parts
-  const dd = form.data_disks
-    // §5.42：只要有稳定识别条件（size/serial/wwid）就保留 —— 不再要求必须有盘名。
-    // 盘名现在只是备注，只填盘名的行会被后端 422 拒绝（那正是要拦的东西）。
-    .filter(d => d.size || d.serial || d.wwid)
-    .map(d => ({
-      size: d.size || "", serial: d.serial || "", wwid: d.wwid || "",
-      name: d.name || "", mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe,
-    }))
+  // §5.42：数据盘必须带稳定识别条件（size/serial/wwid），否则**不能提交**。
+  // 这里**绝不能 filter 静默丢行** —— 之前那样写会把"只填了盘名"的旧行悄悄丢掉，
+  // 后端于是看到"没有数据盘"、%pre 排除集为空、自动选盘选中数据盘并抹掉它
+  // （MiMo R2 的 H2 指出的正是一条带回退的静默数据丢失路径）。
+  const ddRaw = form.data_disks.filter(d =>
+    (d.size || d.serial || d.wwid || d.name || d.mount))
+  const ddBad = ddRaw.filter(d => !(d.size || d.serial || d.wwid))
+  if (ddBad.length) {
+    throw new Error(
+      '有 ' + ddBad.length + ' 行数据盘没填「容量 / 序列号 / WWID」：' +
+      '盘名（sda/sdb）由内核探测顺序决定，同一台机器两次启动都可能互换，' +
+      '用它识别"别碰这块盘"会把系统盘排除掉、让安装落到数据盘上并抹掉它。' +
+      '请至少填一个识别条件（推荐容量，如 30G）。')
+  }
+  const dd = ddRaw.map(d => ({
+    size: d.size || "", serial: d.serial || "", wwid: d.wwid || "",
+    name: d.name || "", mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe,
+  }))
   if (dd.length) dc.data_disks = dd
   const rd = form.raid
     .filter(r => r.name && r.devices)

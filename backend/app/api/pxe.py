@@ -1,6 +1,7 @@
 """PXE 装机接口。"""
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 from urllib.parse import quote, unquote
@@ -504,7 +505,11 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     # 应答文件 / iPXE 菜单的 URL 前缀（不是模型字段，客户端无法注入；由上面算出）
     payload["answer_root"] = answer_root
     files = await _gen_pxe_files(pid, payload, db)
-    res = pxe_server.deploy_files(files, pid)
+    # deploy_files 是同步函数，而容器部署路径里它会**阻塞等待**宿主机重载完成
+    # （最长 OPS_HOST_RELOAD_TIMEOUT，默认 25s）。直接在 async 路由里调用会把整个
+    # 事件循环卡住 25 秒 —— 并发装机时所有 API（包括别的部署、进度查询）全部停摆。
+    # 丢到线程里执行，事件循环继续服务。
+    res = await asyncio.to_thread(pxe_server.deploy_files, files, pid)
 
     # 部署结果必须可判定：ok=False 时配置可能已经处于"指向不存在的文件"的状态，
     # 绝不能当成功返回（前端会显示"部署完成"）。

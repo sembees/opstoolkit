@@ -5,7 +5,13 @@ Documentation=file:/opt/opstk/deploy/host/README.md
 [Path]
 # 容器把配置写进这个路径（compose 把宿主机的 /etc/dnsmasq.d 挂了进去），
 # 但容器无法命令宿主机的 systemd —— 由这个 path 单元补上"加载"这一步。
+#
+# PathChanged 吃的是 IN_CLOSE_WRITE/IN_ATTRIB/IN_MOVE_SELF/IN_DELETE_SELF；
+# 如果哪天 write_conf 改成"写临时文件 + rename"的原子替换，PathChanged 可能收不到事件
+# （IN_MOVED_TO 属于 PathModified 的语义）。两条都挂上：多触发一次的代价只是多跑一遍
+# restart，而漏触发的代价是"每次部署都超时失败"。
 PathChanged=/etc/dnsmasq.d/opstk-pxe.conf
+PathModified=/etc/dnsmasq.d/opstk-pxe.conf
 Unit=opstk-dnsmasq-reload.service
 
 [Install]

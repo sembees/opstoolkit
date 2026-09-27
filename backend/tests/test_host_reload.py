@@ -86,3 +86,59 @@ def test_container_control_does_not_claim_config_is_live(monkeypatch):
 def test_hint_is_actionable():
     assert "install-opstk-dnsmasq-reload.sh" in dhcp.HOST_RELOAD_HINT
     assert dhcp.HOST_RELOAD_UNIT in dhcp.HOST_RELOAD_HINT
+
+
+def test_conf_sha_matches_bytes_actually_written(tmp_path, monkeypatch):
+    """R1 的 #5：真正的不变量是"conf_sha(字符串) == 落盘字节的 sha256"。
+
+    原来那条只断言 conf_sha 等于它自己的定义（同义反复）。这里真的过一遍 write_conf，
+    再对**磁盘上的字节**取 sha —— 一旦 write_conf 哪天改写内容（补换行/换编码/改换行符），
+    宿主机算出的 sha 就永远匹配不上，表现为"每次部署都超时"，而报错却指向"去装重载单元"。
+    """
+    import hashlib
+    monkeypatch.setattr(dhcp, "CONF_DIR", str(tmp_path))
+    content = "interface=ens19\ndhcp-range=192.168.199.100,192.168.199.200,12h\n"
+    assert dhcp.write_conf("opstk-pxe.conf", content) is True
+    on_disk = (tmp_path / "opstk-pxe.conf").read_bytes()
+    assert dhcp.conf_sha(content) == hashlib.sha256(on_disk).hexdigest()
+
+
+def test_wait_rejects_stale_marker_even_with_matching_sha(state_file):
+    """R1 的 #2：内容相同的连续两次部署不能命中上一次的陈旧标记。
+
+    只比对 sha 时，第二次会在宿主机还没做任何事之前就"成功" —— 整条校验被跳过。
+    所以 wait_host_reload 还要看标记时间戳是否 >= 本次部署开始的时刻。
+    """
+    sha = dhcp.conf_sha("same")
+    state_file.write_text("OK %s 1000\n" % sha, encoding="utf-8")
+    # 本次部署开始于 2000：标记（1000）太旧，不算数
+    got = dhcp.wait_host_reload(sha, timeout=0.6, not_before=2000)
+    assert got["ok"] is False
+    # 时间戳够新才算
+    state_file.write_text("OK %s 3000\n" % sha, encoding="utf-8")
+    got = dhcp.wait_host_reload(sha, timeout=0.6, not_before=2000)
+    assert got["ok"] is True
+
+
+def test_invalidate_removes_stale_marker(state_file):
+    state_file.write_text("OK abc 1\n", encoding="utf-8")
+    assert dhcp.invalidate_host_reload_state() is True
+    assert dhcp.host_reload_status() is None
+    # 本来就不存在也算成功（幂等）
+    assert dhcp.invalidate_host_reload_state() is True
+
+
+def test_unreadable_state_is_not_reported_as_missing(tmp_path, monkeypatch):
+    """R1 的 #9：权限/SELinux 读失败不能伪装成"没装单元"，那会把排查引向错误方向。"""
+    d = tmp_path / "state-as-dir"          # 用目录冒充文件，读到的是 IsADirectoryError
+    d.mkdir()
+    monkeypatch.setattr(dhcp, "HOST_RELOAD_STATE", str(d))
+    st = dhcp.host_reload_status()
+    assert st is not None and st["state"] == "UNREADABLE" and st["err"]
+
+
+def test_malformed_ok_line_is_not_accepted(state_file):
+    """宿主机脚本理论上不写空 sha，但真出现时"OK <时间>"会被错位解析成 sha=时间戳。"""
+    state_file.write_text("OK 1699999999\n", encoding="utf-8")
+    st = dhcp.host_reload_status()
+    assert st["state"] == "UNREADABLE"

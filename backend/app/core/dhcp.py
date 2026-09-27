@@ -119,7 +119,7 @@ def remove_conf(name):
 HOST_RELOAD_STATE_DIR = "/srv/opstk/state"
 HOST_RELOAD_STATE = HOST_RELOAD_STATE_DIR + "/.dnsmasq-reload.state"
 HOST_RELOAD_UNIT = "opstk-dnsmasq-reload.path"
-HOST_RELOAD_WAIT = 12.0
+HOST_RELOAD_WAIT = 25.0
 
 HOST_RELOAD_HINT = (
     "宿主机 dnsmasq 未加载新配置：磁盘上的配置已更新，但正在运行的守护进程仍是旧的，"
@@ -137,40 +137,77 @@ def conf_sha(content: str) -> str:
 def host_reload_status():
     """读宿主机重载单元写下的完成标记。
 
-    返回 {"state": "OK"|"FAIL", "sha": str, "ts": str, "reason": str} 或 None（标记不存在）。
-    标记缺失通常意味着宿主机还没装重载单元 —— 这本身就是要报的错，不能当成功。
+    返回 {"state","sha","ts","reason","err"} 或 None（标记确实不存在）。
+    区分 ENOENT 与其他 OSError：把权限/SELinux 导致的读失败也说成"没装单元"，
+    会把排查引到完全错误的方向（MiMo R1 的低危项）。err 非空时调用方要把它显示出来。
     """
     try:
         with open(HOST_RELOAD_STATE, "r", encoding="utf-8", errors="replace") as fh:
-            parts = fh.read().strip().split()
-    except OSError:
+            raw = fh.read().strip()
+    except FileNotFoundError:
         return None
+    except OSError as e:
+        return {"state": "UNREADABLE", "sha": "", "ts": "", "reason": "",
+                "err": (e.strerror or str(e))}
+    parts = raw.split()
     if not parts:
-        return None
-    st = {"state": parts[0], "sha": "", "ts": "", "reason": ""}
+        return {"state": "UNREADABLE", "sha": "", "ts": "", "reason": "", "err": "empty-state-file"}
+    st = {"state": parts[0], "sha": "", "ts": "", "reason": "", "err": ""}
     if parts[0] == "OK":
         st["sha"] = parts[1] if len(parts) > 1 else ""
         st["ts"] = parts[2] if len(parts) > 2 else ""
+        # 宿主机脚本理论上不会写出空 sha，但"OK <时间>"被按 sha/ts 错位解析的后果
+        # 是拿时间戳当 sha 比对，这里显式判成不可用。
+        if not st["sha"] or not st["ts"].isdigit():
+            st["state"], st["err"] = "UNREADABLE", "malformed-ok-line"
     else:
         st["reason"] = " ".join(parts[1:])
     return st
 
 
-def wait_host_reload(sha: str, timeout: float = HOST_RELOAD_WAIT):
-    """等宿主机把**这一份**配置真正加载完（标记里的 sha 必须等于刚写的那份）。
+def invalidate_host_reload_state():
+    """部署前作废旧标记（best-effort）。
 
-    只认 sha 相等，不认"标记比刚才新"：否则连续两次部署时，第一次的成功标记
-    会让第二次误判为已生效 —— 又一次假成功。
+    为什么必须做：`wait_host_reload` 只比对 sha，而**连续两次部署内容相同**时，
+    第二次会在宿主机还没做任何事之前就命中上一次留下的 OK 标记 —— 等于整条校验被跳过
+    （MiMo R1 的中危项）。删掉它，任何读到的 OK 都必然来自本次写入之后。
     """
-    deadline = time.time() + max(0.0, timeout)
+    try:
+        os.remove(HOST_RELOAD_STATE)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def wait_host_reload(sha: str, timeout: float = None, not_before: float = None):
+    """等宿主机把**这一份**配置真正加载完。
+
+    判据三条同时成立：state == OK、sha 相同、且标记的时间戳 >= 本次部署开始的时刻。
+    只认 sha 相等不够 —— 同内容重复部署会命中陈旧标记（见 invalidate_host_reload_state）。
+    时间戳可以直接和宿主机的 `date +%s` 比：容器与宿主机共用同一个内核时钟
+    （compose 没给独立 time namespace），不存在漂移。
+
+    用 monotonic 计超时：NTP 往回跳时 time.time() 会让等待循环远超过预期。
+    """
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("OPS_HOST_RELOAD_TIMEOUT", HOST_RELOAD_WAIT))
+        except ValueError:
+            timeout = HOST_RELOAD_WAIT
+    deadline = time.monotonic() + max(0.0, timeout)
     last = None
     while True:
         st = host_reload_status()
         if st:
             last = st
-            if st["state"] == "OK" and st["sha"] == sha:
+            fresh = True
+            if not_before is not None and st["ts"].isdigit():
+                fresh = float(st["ts"]) >= not_before
+            if st["state"] == "OK" and st["sha"] == sha and fresh:
                 return {"ok": True, "state": st}
-        if time.time() >= deadline:
+        if time.monotonic() >= deadline:
             return {"ok": False, "state": last}
         time.sleep(0.4)
 

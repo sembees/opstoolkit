@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from contextlib import nullcontext
 
@@ -712,9 +713,21 @@ def deploy_files(files, pid="") -> dict:
     # 2) 文件全部就位后才写 dnsmasq 配置、才重启
     dnsmasq_content = files.get("dnsmasq.conf", "")
     want_sha = ""
+    # not_before 必须是**整数秒**：宿主机脚本的 ts 是 `date +%s`（整数），
+    # 若这里留成 float，同秒内的两次部署会出现 `ts(整数) >= not_before(x.5)` 为假
+    # → 明明重载成功了却一直等到超时（假失败）。取整后这个窗口只有 1 秒，
+    # 而且写之前已经作废旧标记，陈旧标记根本不存在。
+    not_before = int(time.time())
     if dnsmasq_content:
+        # 写之前先作废旧标记：只比对 sha 的话，**连续两次部署内容相同**时第二次会在
+        # 宿主机还没做任何事之前就命中上一次的 OK 标记，整条校验等于被跳过。
+        _dhcp.invalidate_host_reload_state()
         if _dhcp.write_conf("opstk-pxe.conf", dnsmasq_content):
             log.append("Written: /etc/dnsmasq.d/opstk-pxe.conf")
+            # conf_sha 算的是**将要落盘的字符串**。write_conf 在 Linux 上以 utf-8、
+            # 不做换行转换地写同一个字符串，所以与宿主机 sha256sum 的字节一致；
+            # 若哪天 write_conf 改成会改写内容（补换行/换编码），这里必须同步改，
+            # 否则握手永远不成立（表现为每次部署都超时）。backend/tests 有对应用例。
             want_sha = _dhcp.conf_sha(dnsmasq_content)
         else:
             errors.append("FAILED: write dnsmasq config /etc/dnsmasq.d/opstk-pxe.conf")
@@ -724,12 +737,8 @@ def deploy_files(files, pid="") -> dict:
     log.append("dnsmasq restart: " + svc.get("msg", "unknown"))
     if svc.get("reload_delegated") and want_sha:
         # 容器部署路径：dhcp_control 出于安全**不会**（也不能）动宿主机的 dnsmasq。
-        # 必须等宿主机重载单元确认"跑的是刚写的这份"（sha 核对），才允许报成功。
-        # 为什么不能直接信 svc.ok —— 实测（RUNBOOK-STATE §5.41）：只写文件不重载时，
-        # 磁盘上的扁平 boot.ipxe 已被改写为"拒绝安装"菜单，而运行的 dnsmasq 仍按旧配置
-        # 把它下发给所有机器 → 全网装机卡在 PXE 循环里，接口却返回 ok=true、
-        # 界面显示"部署完成"。配置"写下去了"和配置"生效了"必须分开判定。
-        got = _dhcp.wait_host_reload(want_sha)
+        # 必须等宿主机重载单元确认"跑的是刚写的这份"（sha + 新鲜度），才允许报成功。
+        got = _dhcp.wait_host_reload(want_sha, not_before=not_before)
         if got.get("ok"):
             log.append("宿主机 dnsmasq 已重载，配置 sha 核对一致（生效）")
         else:
@@ -737,11 +746,19 @@ def deploy_files(files, pid="") -> dict:
             errors.append(
                 _dhcp.HOST_RELOAD_HINT
                 + ("（宿主机重载脚本报：" + str(st.get("reason"))[:120] + "）" if st.get("reason") else "")
+                + ("（读状态文件失败：" + str(st.get("err"))[:80] + "）" if st.get("err") else "")
+                # 失败时磁盘**已经改过**了，必须说清楚：只说"请装单元"会让运维以为
+                # 什么都没发生，然后一直重试（MiMo R1 的 #7）。
+                + "【注意】本次的文件已落盘：正在运行的 dnsmasq 仍是旧配置，"
+                  "而 /pxe/serve/boot.ipxe 等文件已更新，装机网络处于不一致状态，"
+                  "未登记的机器可能卡在 PXE 循环。修复重载链路后**重新部署一次**即可恢复。"
             )
     elif not svc.get("ok"):
         errors.append("dnsmasq 重启失败：" + str(svc.get("msg", ""))[:120])
     return {
-        "ok": not errors,
+        # 双保险：既不放过收集到的 errors，也不放过 dhcp_control 自己报的失败
+        # （改动前是 bool(svc.ok) and not errors，中途被简化成 not errors）。
+        "ok": bool(svc.get("ok")) and not errors,
         "supported": True,
         "errors": errors,
         "log": log,

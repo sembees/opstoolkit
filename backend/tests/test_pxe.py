@@ -1284,7 +1284,7 @@ class PxeAutoTargetExclusionTest(unittest.TestCase):
               "data_disks": [{"size": "30G", "fstype": "xfs"}]}
         plan = _disk_plan(self._rhel(dc), dc)
         self.assertEqual(plan["raid"][0]["member_indexes"], [1, 2])
-        self.assertEqual(_data_disk_matcher_specs(plan), ["s%d" % (30 * 1024 ** 3)])
+        self.assertEqual(_data_disk_matcher_specs(plan), [["s%d" % (30 * 1024 ** 3)]])
         ks = generate_all(self._rhel(dc))["ks.cfg"]
         self.assertIn("-v dm='s32212254720'", ks)
         self.assertNotIn("excl=", ks)                  # 按名字排除的旧写法彻底消失
@@ -1304,7 +1304,7 @@ class PxeAutoTargetExclusionTest(unittest.TestCase):
         # size + serial：两个条件取"或"（多排除只让候选集变小 → 最终中止，是安全方向）
         self.assertEqual(
             _data_disk_matcher_specs({"data_disks": [{"size": "20G", "serial": "ABC123"}]}),
-            ["s21474836480", "nABC123"])
+            [["s21474836480", "nABC123"]])   # 分组：一个声明一组，组内取或
         # 只给名字 → 拒绝，且提示里必须告诉用户改用 size/serial/wwid
         with self.assertRaises(ValueError) as ctx:
             _data_disk_matcher_specs({"data_disks": [{"name": "sda"}]})
@@ -1315,13 +1315,20 @@ class PxeAutoTargetExclusionTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     _data_disk_matcher_specs({"data_disks": [{"serial": bad}]})
-        # 声明了数据盘却一块都匹配不上时，%pre 必须中止（不许在排除集为空时选盘）
+        # 声明了数据盘时，%pre 必须**逐个声明**校验命中，未命中就中止。
         ks = generate_all(self._rhel({"target": {"mode": "auto"}, "layout": "custom",
                                       "partitions": CUSTOM_PARTS,
                                       "data_disks": [{"size": "30G"}]}))["ks.cfg"]
-        self.assertIn("_dmcnt", ks)
         self.assertIn("拒绝继续", ks)
         self.assertIn("exit 1", ks)
+        # 判据必须是 awk 的**退出码**，不能把数字回声出来再 `[ -eq 0 ]`：
+        # 输出为空/非数字时 `[ "" -eq 0 ]` 会报错并让 if 判假 → 护栏失效（fail-open）。
+        self.assertIn("if ! lsblk", ks)
+        self.assertNotIn('"${_dmcnt}" -eq 0', ks)
+        self.assertIn("set -o pipefail", ks)
+        # 逐声明（按组）统计，而不是只统计"命中了几块盘"：
+        # 只数总数的话，"声明两块只命中一块"会放行，没命中的那块数据盘就成了目标盘。
+        self.assertIn("第 %d 个数据盘声明一块都没命中", ks)
 
     def test_lsblk_is_parsed_by_key_not_by_column(self):
         """缺陷 #4：%pre 用 -P/--pairs 按 key 取值，不再按下标取列。
@@ -2346,3 +2353,59 @@ class DeployIsolationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ReviewFindingsRegressionTest(unittest.TestCase):
+    """MiMo Token Plan 审查（R1/R2）发现的问题的回归用例。"""
+
+    def _rhel(self, dc, **kw):
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        kw.setdefault("mirror", "http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        return _cfg(disk_config=dc, **kw)
+
+    def test_matchers_are_grouped_per_declaration(self):
+        """H1：匹配串必须**按声明分组** —— 否则护栏只能证明"至少一块盘被排除"。
+
+        仅数总命中数时，"声明两块、只命中一块"会放行，没命中的那块的 matcher 就是漏的，
+        它自己（或系统盘）会走进 clearpart。分组后可以逐组要求必须命中。
+        """
+        from app.it.pxe.generator import _data_disk_matcher_specs
+        got = _data_disk_matcher_specs({"data_disks": [
+            {"size": "30G"}, {"serial": "ABC"}, {"size": "20G", "wwid": "0x5000"}]})
+        self.assertEqual(got, [["s32212254720"], ["nABC"], ["s21474836480", "w0x5000"]])
+        # 生成出来的 dm 用 ; 分组、| 组内取或
+        ks = generate_all(self._rhel({"target": {"mode": "auto"}, "layout": "custom",
+                                      "partitions": CUSTOM_PARTS,
+                                      "data_disks": [{"size": "30G"}, {"size": "20G"}]}))["ks.cfg"]
+        self.assertIn("-v dm='s32212254720;s21474836480'", ks)
+
+    def test_match_target_key_is_sanitized(self):
+        """M1：target.mode=match 的 serial/model 也会拼进 %pre 的 shell 单引号串。
+
+        这是本轮改动特意要堵的注入面里**同函数、同拼接方式**漏掉的一条
+        （只洗了 data_disks 的 serial/wwid）。
+        """
+        from app.it.pxe.generator import _disk_plan
+        dc = {"target": {"mode": "match", "serial": "a'; id; #"}, "layout": "custom",
+              "partitions": CUSTOM_PARTS}
+        with self.assertRaises(ValueError) as ctx:
+            _disk_plan(self._rhel(dc), dc)
+        self.assertIn("target.serial", str(ctx.exception))
+
+    def test_size_match_has_tolerance_for_real_disks(self):
+        """M2：真实物理盘容量不是整数（"300GB" 盘 ≈ 3000592982016 B）。
+
+        精确字节等值会让"300G"这种写法永远匹配不上 → 每台都中止（可用性），
+        或者在用户折算错误时错命中（安全性）。所以改为 ±2% 容差，
+        并同时接受"把 GB 当二进制写"的解释。
+        """
+        from app.it.pxe.generator import _LSBLK_AWK_PRELUDE, _size_to_bytes
+        self.assertEqual(_size_to_bytes("300G"), 300 * 1024 ** 3)
+        # awk 里确实做了容差比较（不是 ==）
+        self.assertIn("<= 0.02", _LSBLK_AWK_PRELUDE)
+
+    def test_serial_match_is_case_insensitive(self):
+        """M2：序列号大小写不敏感 —— 用户从文档抄的大写写法不该因此不命中。"""
+        from app.it.pxe.generator import _LSBLK_AWK_PRELUDE
+        self.assertIn('tolower(gv(L, "SERIAL")) == tolower(v)', _LSBLK_AWK_PRELUDE)
+        self.assertIn('tolower(gv(L, "WWN")) == tolower(v)', _LSBLK_AWK_PRELUDE)

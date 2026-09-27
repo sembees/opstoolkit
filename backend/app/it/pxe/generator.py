@@ -982,11 +982,13 @@ def _data_disk_matcher_specs(plan) -> list:
     VM143 同一台机器两次启动还出现过两种顺序 —— 这是**非确定性**的，单机验证永远碰不到。
 
     ⇒ 设备名不是身份，只是备注；排除必须靠 size / serial / wwid。
-    匹配串语法（每条一个条件，条件之间取**或**）：`s<字节>` / `n<序列号>` / `w<wwid>`。
-    取"或"是刻意的：多排除一块只会让候选集变小、最终 `target` 为空而**中止**（安全方向），
-    少排除一块则会把数据盘当目标盘（危险方向）。
+    返回**按声明分组**的条件（每组 = 一个 data_disks 条目，组内取"或"）。
+    为什么要分组（MiMo R2 的 H1）：原先把各条声明的条件拍平成一个 OR 列表，
+    再用"命中盘数 == 0"判护栏 —— 那只能证明"至少有一块盘被排除"，
+    证不了"每个声明都命中"。声明两块只命中一块时护栏放行，没命中的那块数据盘
+    就会被当成目标盘抹掉。分组后可以逐组要求"必须命中"。
     """
-    specs, bad = [], []
+    groups, bad = [], []
     for i, d in enumerate(plan.get("data_disks") or []):
         one = []
         if d.get("size"):
@@ -1004,14 +1006,14 @@ def _data_disk_matcher_specs(plan) -> list:
             one.append("w" + _safe_matcher_value(d["wwid"], "wwid", i))
         if not one:
             bad.append(d.get("name") or ("[%d]" % i))
-        specs.extend(one)
+        groups.append(one)
     if bad:
         raise ValueError(
             "disk_config.data_disks 只给了设备名（%s）—— 拒绝生成安装配置。"
             "设备名 sda/sdb 由内核探测顺序决定，同一台机器两次启动都可能互换；"
             "拿它当排除集会把系统盘排除掉、让安装落到数据盘上并把它抹掉（真机实测过，三台里中一台）。"
             "请改用稳定属性之一：size（如 \"30G\"）、serial、wwid。" % "、".join(bad))
-    return specs
+    return groups
 
 
 
@@ -1027,16 +1029,26 @@ _LSBLK_AWK_PRELUDE = (
     " p = index(l, \" \" k \"=\\\"\"); if (p == 0) return \"\";"
     " p += length(k) + 3; q = index(substr(l, p), \"\\\"\");"
     " return (q == 0) ? \"\" : substr(l, p, q - 1) } "
-    # dm = 数据盘的稳定属性匹配串（见 _data_disk_matcher_specs）：s<字节> / n<序列号> / w<wwid>
-    # 空 dm → split 返回 0 → dmatched 恒假 → 没有排除集（调用方会在声明了数据盘时先中止）。
-    "BEGIN { nd = split(dm, dc, \"|\") } "
-    "function dmatched(L,   i, c, k, v) {"
-    " for (i = 1; i <= nd; i++) { c = dc[i]; if (c == \"\") continue;"
+    # dm = 数据盘稳定属性匹配串。**分组**：';' 分组（一个 data_disks 条目一组），
+    # 组内 '|' 取或。条件形如 s<字节> / n<序列号> / w<wwid>。
+    "BEGIN { npg = split(dm, grp, \";\") } "
+    "function dgrp(L, gi,   n, dc, i, c, k, v, sz, d) {"
+    " n = split(grp[gi], dc, \"|\");"
+    " for (i = 1; i <= n; i++) { c = dc[i]; if (c == \"\") continue;"
     " k = substr(c, 1, 1); v = substr(c, 2);"
-    " if (k == \"s\" && gv(L, \"SIZE\") + 0 == v + 0) return 1;"
-    " if (k == \"n\" && v != \"\" && gv(L, \"SERIAL\") == v) return 1;"
-    " if (k == \"w\" && v != \"\" && gv(L, \"WWN\") == v) return 1 }"
+    # SIZE 用**容差**比对：真实物理盘容量从来不是整数（"300GB" 盘 ≈ 3000592982016 B），
+    # 写 "300G" 永远精确匹配不上；而用户也常把 GB/MB 当二进制写。
+    # 因此：声明值与盘的字节数相差 <=2%（十进制/二进制两种解释都试）即算命中。
+    " if (k == \"s\") { sz = gv(L, \"SIZE\") + 0; d = v + 0;"
+    "   if (d > 0 && sz > 0 && (sz - d) / d <= 0.02 && (d - sz) / d <= 0.02) return 1;"
+    "   if (d > 0 && sz > 0 && (sz - d * 0.9537) / (d * 0.9537) <= 0.02"
+    "       && (d * 0.9537 - sz) / (d * 0.9537) <= 0.02) return 1 }"
+    # 序列号/WWID 大小写不敏感（用户从文档抄的大写写法不该因此不命中）
+    " if (k == \"n\" && v != \"\" && tolower(gv(L, \"SERIAL\")) == tolower(v)) return 1;"
+    " if (k == \"w\" && v != \"\" && tolower(gv(L, \"WWN\")) == tolower(v)) return 1 }"
     " return 0 } "
+    "function dmatched(L,   gi) {"
+    " for (gi = 1; gi <= npg; gi++) if (dgrp(L, gi)) return 1; return 0 } "
 )
 # 选盘主体：只认整盘、非可移动、非 usb、容量达标、且**不是**数据盘（按稳定属性判定）。
 _AWK_PICK_BY_SIZE = (
@@ -1056,20 +1068,24 @@ _AWK_PICK_BY_KEY = (
     " nm = gv(L, \"NAME\");"
     " if (nm != \"\" && !dmatched(L)) print nm } }"
 )
-# 选盘留痕（§5.42 要求"相关日志要记录"）：把磁盘清单与命中情况打到串口 + %pre 日志。
-# 单机装机时不可能复现的事故，全靠这几行日志事后定位。
-_AWK_LIST_DISKS = (
+# 选盘留痕 + **逐声明护栏**（一次 awk 同时做，靠退出码传递判定，避免解析数字）：
+# 打出磁盘清单（命中的标 [数据盘]），逐组统计命中数，任一**声明**一块都没命中就 exit 3。
+# 为什么用退出码而不是"回声一个数字再 -eq 0"（MiMo R2 的 M3）：输出为空或非数字时
+# `[ "" -eq 0 ]` 在 bash 里报错返回非 0 → if 判假 → **跳过中止分支继续装**（fail-open）。
+# 这块命令本身就是安全护栏，必须 fail-closed。
+_AWK_LIST_AND_CHECK = (
     "{ L = \" \" $0;"
     " if (gv(L, \"TYPE\") != \"disk\") next;"
-    " if (dmatched(L)) dmc++;"
+    " m = dmatched(L);"
+    " if (m) { dmc++; for (gi = 1; gi <= npg; gi++) if (dgrp(L, gi)) gcnt[gi]++ }"
     " printf \"PXE-DISK: %s %-9s size=%-14s serial=%s wwn=%s\\n\","
-    " (dmatched(L) ? \"[数据盘]\" : \"[  --  ]\"), gv(L, \"NAME\"), gv(L, \"SIZE\"),"
+    " (m ? \"[数据盘]\" : \"[  --  ]\"), gv(L, \"NAME\"), gv(L, \"SIZE\"),"
     " gv(L, \"SERIAL\"), gv(L, \"WWN\") }"
-    " END { printf \"PXE-DISK: 命中数据盘 %d 块\\n\", dmc+0 }"
-)
-_AWK_COUNT_MATCH = (
-    "{ L = \" \" $0; if (gv(L, \"TYPE\") != \"disk\") next;"
-    " if (dmatched(L)) dmc++ } END { print dmc+0 }"
+    " END { bad = 0;"
+    " for (gi = 1; gi <= npg; gi++) if (gcnt[gi] + 0 == 0) {"
+    "   printf \"PXE-DISK: !! 第 %d 个数据盘声明一块都没命中\\n\", gi; bad++ }"
+    " printf \"PXE-DISK: 命中数据盘 %d 块；声明 %d 个，未命中 %d 个\\n\", dmc + 0, npg, bad;"
+    " exit (bad > 0 ? 3 : 0) }"
 )
 
 
@@ -1080,31 +1096,35 @@ def _rhel_pick_target_lines(plan) -> list:
     设备名 sda/sdb 由内核探测顺序决定，同一台机器两次启动都可能互换，
     拿它做排除集会排掉系统盘、把安装落到数据盘上并抹掉它。
     """
-    dm = "|".join(_data_disk_matcher_specs(plan))
+    dm = ";".join("|".join(g) for g in _data_disk_matcher_specs(plan))
     lines = [
+        "set -o pipefail",     # 下面那条 lsblk|awk 是安全护栏，管道任一段失败都要算失败
         "# 选盘留痕：磁盘清单 + 命中情况 + 最终 target 全部打到串口（console）与 %pre 日志。",
         "# 为什么值得占这几行：§5.42 那类事故（三台里中一台）事后只能靠这些日志定位。",
         "pxelog() { echo \"PXE-DISK: $*\"; echo \"PXE-DISK: $*\" > /dev/console 2>/dev/null || true; }",
         "pxelog '开始选盘；数据盘稳定匹配串=%s'" % (dm or "<无>"),
         "pxelog '磁盘清单（[数据盘]=按稳定属性命中，会被排除）- - - - - - - - - - - - -'",
-        "lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | awk -v dm='%s' '%s' | tee /dev/console"
-        % (dm, _LSBLK_AWK_PRELUDE + _AWK_LIST_DISKS),
-        "_dmcnt=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | awk -v dm='%s' '%s')"
-        % (dm, _LSBLK_AWK_PRELUDE + _AWK_COUNT_MATCH),
-        "pxelog \"按稳定属性命中数据盘 ${_dmcnt} 块\"",
     ]
     if dm:
-        # 声明了数据盘却一块都没命中 ⇒ 匹配条件对不上这台机器的盘，**排除集是空的**。
-        # 此时继续选盘必然把数据盘当目标盘抹掉 ⇒ 必须中止（方案 A：宁可不装，绝不抹盘）。
+        # 声明了数据盘 ⇒ **逐个声明**都必须在真机上命中，否则中止。
+        # 判据用 awk 的退出码（3=有声明未命中），不再回声一个数字回来做 `-eq` ——
+        # 数字为空/非数字时 `[ "" -eq 0 ]` 会报错并让 if 判假，等于护栏失效（fail-open）。
         lines += [
-            "if [ \"${_dmcnt}\" -eq 0 ]; then",
-            "  pxelog '!! 已声明数据盘，但按稳定属性一块都没匹配到 —— 拒绝继续（排除集为空会抹掉数据盘）'",
+            "if ! lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN"
+            " | awk -v dm='%s' '%s' | tee /dev/console; then" % (dm, _LSBLK_AWK_PRELUDE + _AWK_LIST_AND_CHECK),
+            "  pxelog '!! 有数据盘声明一块都没命中 —— 拒绝继续（排除集不完整会把数据盘当目标盘抹掉）'",
             "  pxelog '!! 请核对 data_disks 的 size / serial / wwid 是否与这台机器相符；装机中止'",
-            "  echo 'PXE: 数据盘稳定匹配失败，装机中止（拒绝在排除集为空的情况下选盘）' >&2; exit 1",
+            "  echo 'PXE: 数据盘稳定匹配失败，装机中止（拒绝在排除集不完整的情况下选盘）' >&2; exit 1",
             "fi",
         ]
+    else:
+        lines.append("lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN"
+                     " | awk -v dm='' '%s' | tee /dev/console"
+                     % (_LSBLK_AWK_PRELUDE + _AWK_LIST_AND_CHECK))
     if plan["mode"] == "match":
-        key = plan["serial"] or plan["model"]
+        # 与本文件里 data_disks 的 serial/wwid 同样处理：这个值会拼进 %pre 的 shell 单引号串，
+        # 不洗就是一条 root 权限的配置注入面（MiMo R2 的 M1）。
+        key = _safe_matcher_value(plan["serial"] or plan["model"], "target.serial/model", 0)
         lines.append("target=$(lsblk -dnP -o NAME,SERIAL,MODEL,WWN | "
                      "awk -v s='%s' -v dm='%s' '" % (key, dm))
         lines.append(_LSBLK_AWK_PRELUDE + _AWK_PICK_BY_KEY + "' | sort | head -1)")
