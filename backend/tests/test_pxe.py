@@ -681,6 +681,8 @@ class PxeIsoUrlTest(unittest.TestCase):
 
 # 改造前（HEAD）的磁盘行，逐字抄在这里当红线基准。任何"顺手重排注释/空格"都会被它抓住。
 LEGACY_KS_LVM = [
+    # §5.14 修复：补上 ignoredisk 把"没有 --ondisk 的 part 行"钉在目标盘上（见 generator._rhel_ks）
+    "ignoredisk --only-use=sda",
     "clearpart --drives=sda --all --initlabel",
     "part /boot/efi --fstype=efi --size=512",
     "part /boot --fstype=ext4 --size=1024",
@@ -692,6 +694,8 @@ LEGACY_KS_LVM = [
     "bootloader --location=mbr --boot-drive=sda",
 ]
 LEGACY_KS_DIRECT = [
+    # §5.14 修复：同上
+    "ignoredisk --only-use=sda",
     "clearpart --drives=sda --all --initlabel",
     "part /boot/efi --fstype=efi --size=512",
     "part / --fstype=ext4 --ondisk=sda --grow",
@@ -796,15 +800,21 @@ class PxeDiskRegressionTest(unittest.TestCase):
         lvm/direct，其中两个带历史键 disk —— 只要有一个字节动了，这里就会红。
         """
         # key 用 json 文本（dict 不可哈希）
+        # ⚠️ 2026-09-26 重新基线化（用户签核）：§5.14 修复给 **RHEL legacy 路径**加了
+        # `ignoredisk --only-use=<disk>`（原来的 part 行大多没有 --ondisk，多盘机器上可能
+        # 落到别的盘）。因此两个 RHEL 用例的 sha 变了；**两个 Ubuntu 用例必须保持不变**
+        # （本修复只碰 _rhel_ks），这一点已在重算时断言过。
+        # 重新基线化的前提是真机验收已通过：VM140（scsi0/sdb 两块盘）走 legacy 路径装机，
+        # 分区动作只在 /dev/sda、非目标盘 sdb 开头 1MiB 逐字节未变、从 sda 起到登录提示。
         golden = {
             '["ubuntu","lvm",null]':
                 "6680721c74a9cefc63bdba945daa035dbf199ad6ca312c2c180ab86a64e8931a",
             '["ubuntu","direct",{"disk":"vda"}]':
                 "f7d357d3c69052f5f4abab66dc4428b0cc368a849cafb76c8104901022223346",
             '["rhel","lvm",null]':
-                "76f4c51b696456af2e365750c7b363735c1bd9398bd03cc4c83e8b4fe8a93ac3",
+                "bd1ff9342dbab0632fef9e7cf16dcebd393d65a19822395e75a80accb3a4d6cf",
             '["rhel","direct",{"disk":"nvme0n1"}]':
-                "5a4d0316b6f6e5f34cceeec8151be8c5edad2b4e8cb3a3c0fbf96e149dc938ce",
+                "43130dfeff8ac52adbe2be45de0a611e0341a5039e8ab1764e726e87fceb402a",
         }
         cases = [
             ("ubuntu", "lvm", None),

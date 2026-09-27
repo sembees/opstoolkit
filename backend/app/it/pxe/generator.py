@@ -1134,7 +1134,16 @@ def _rhel_ks(c):
         # 把数据盘 sdb 也抹掉。合法盘名恒等，故输出不变。
         disk = _safe_ident(disk, "disk_config.disk") if disk is not None else "sda"
         parts = _rhel_layout_lines(c.disk_scheme, disk)
-        disk_lines = [parts.rstrip(), "bootloader --location=mbr --boot-drive=" + disk]
+        # §5.14 修复（用户已签核"重新基线化 golden + 重做真机验收"）：
+        # 本分支的 part 行**大多没有 --ondisk**（/boot/efi、/boot、pv.01、swap 都没有），
+        # 而 `clearpart --drives=<disk>` 只说明"清哪块盘"，**并不约束 part 落在哪块盘** ——
+        # 多盘机器上这些分区可能被 anaconda 放到别的盘上（装坏或毁数据）。
+        # `ignoredisk --only-use=<disk>` 的语义就是"本次安装只使用这些盘"（pykickstart 原文），
+        # 正好把无 --ondisk 的 part 行钉在目标盘上。
+        # 注意：一份 ks 里**只能有一条 ignoredisk**（两条是 anaconda 硬解析错误），
+        # 本分支原本一条都没有，所以这里加一条是安全的。
+        disk_lines = ["ignoredisk --only-use=" + disk,
+                      parts.rstrip(), "bootloader --location=mbr --boot-drive=" + disk]
     else:
         # 结构化配置：auto/match 走 %pre + %include（ks 没有自动选盘原语）；
         # 显式 name 直接由 Python 侧输出。两条路径下 clearpart/part/volgroup/logvol/
