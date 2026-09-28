@@ -2417,3 +2417,55 @@ class ReviewFindingsRegressionTest(unittest.TestCase):
         from app.it.pxe.generator import _LSBLK_AWK_PRELUDE
         self.assertIn('tolower(gv(L, "SERIAL")) == tolower(v)', _LSBLK_AWK_PRELUDE)
         self.assertIn('tolower(gv(L, "WWN")) == tolower(v)', _LSBLK_AWK_PRELUDE)
+
+
+class TargetMatchFailSafeTest(unittest.TestCase):
+    """生产标准：目标盘匹配键的失效方式必须是"大声报错"，不能是"静默选第一块盘"。
+
+    真机实测（RUNBOOK-STATE §5.46 追加 5）：Ubuntu 侧给 subiquity 一个它不认识的键
+    （我们试的是 id_path），它**不报错**，而是把 disk 条目当成没有匹配条件，
+    然后匹配第一块盘 —— 实测连写两次、两个不同的 id_path 值，都打到同一块 30G 数据盘，
+    20G 系统盘一根没动。**静默抹数据盘**在生产里不可接受，所以：
+      · Ubuntu：拒绝 id_path，只允许 serial/model（不匹配会明确报 matched no disk）
+      · RHEL  ：mode=match 必须有 serial 或 model（空 key 会让 %pre 命中任意盘）
+    """
+
+    def _cfg(self, dc, **kw):
+        import importlib
+        m = importlib.import_module("tests.test_pxe")
+        kw.setdefault("os_type", "ubuntu")
+        kw.setdefault("os_version", "22.04")
+        kw.setdefault("mirror", "")
+        return m._cfg(disk_config=dc, **kw)
+
+    PARTS = [{"mount": "/boot", "size": "1G", "fstype": "ext4"},
+             {"mount": "/", "size": "rest", "fstype": "ext4"}]
+
+    def test_ubuntu_rejects_id_path_as_target_match(self):
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "match", "id_path": "pci-0000:00:05.0-scsi-0:0:0:1"},
+              "layout": "custom", "partitions": self.PARTS}
+        with self.assertRaises(ValueError) as ctx:
+            generate_all(self._cfg(dc))
+        msg = str(ctx.exception)
+        self.assertIn("id_path", msg)
+        # 提示必须说清"为什么"：不识别 → 静默退回第一块盘 → 抹数据盘
+        self.assertIn("第一块盘", msg)
+
+    def test_ubuntu_match_requires_a_loud_failure_key(self):
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "match"}, "layout": "custom", "partitions": self.PARTS}
+        with self.assertRaises(ValueError):
+            generate_all(self._cfg(dc))
+
+    def test_rhel_match_without_serial_or_model_is_rejected(self):
+        """空 key 会让 `awk -v s=''` 命中任意 SERIAL 为空的盘 —— 静默装错盘。"""
+        from app.it.pxe.generator import generate_all
+        import importlib
+        m = importlib.import_module("tests.test_pxe")
+        dc = {"target": {"mode": "match"}, "layout": "custom", "partitions": self.PARTS}
+        cfg = m._cfg(disk_config=dc, os_type="rhel", os_version="9",
+                     mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        with self.assertRaises(ValueError) as ctx:
+            generate_all(cfg)
+        self.assertIn("serial", str(ctx.exception))

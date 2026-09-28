@@ -703,19 +703,31 @@ def _ubuntu_disk_match(plan):
     if plan["mode"] == "name":
         return {"path": "/dev/" + plan["name"]}
     if plan["mode"] == "match":
-        m = {}
+        # ⚠️ 生产标准：**只允许"不生效就会大声报错"的匹配键**。
+        # 真机实测（§5.46 追加 5）：给 subiquity 一个它不认识的键（如 id_path），
+        # 它**不报错**，而是把 disk 条目当成"没有匹配条件"，然后**匹配第一块盘** ——
+        # 在"数据盘排在前面"的机器上，这就等于**直接抹掉数据盘**（实测：连写两次，
+        # 两个不同的 id_path 值都打到了同一块 30G 数据盘，20G 系统盘一根没动）。
+        # 这种"静默退回"的失效方式在生产里是不可接受的：
+        #   · `serial` / `model` 不匹配 → subiquity 明确报 matched no disk（大声失败，可接受）
+        #   · 未知键              → 静默装到第一块盘（数据丢失，不可接受）
         if plan.get("id_path"):
-            m["id_path"] = plan["id_path"]
-        elif plan["serial"]:
+            raise ValueError(
+                "Ubuntu 侧不支持 disk_config.target.id_path：subiquity 不识别这个键时"
+                "**不会报错**，而是退回\"匹配第一块盘\"，在数据盘排在系统盘前面的机器上"
+                "会直接抹掉数据盘（真机实测）。请改用 target.serial 或 target.model"
+                "（不匹配时会明确报 matched no disk，属于安全失败），"
+                "或改用 target.mode=name 显式给出盘名。")
+        m = {}
+        if plan["serial"]:
             m["serial"] = plan["serial"]
         if plan["model"]:
             m["model"] = plan["model"]
         if not m:
-            # 一个匹配键都没有时生成的 disk 条目没有身份，subiquity 可能匹配到任意一块盘 ——
-            # 宁可不生成，也不发一份"能装但可能装错盘"的配置。
             raise ValueError(
-                "Ubuntu 的 target.mode=match 需要至少一个匹配键："
-                "id_path（推荐，形如 pci-0000:00:05.0-scsi-0:0:0:1）、serial 或 model")
+                "Ubuntu 的 target.mode=match 需要至少一个匹配键：serial 或 model。"
+                "注意 subiquity 的 serial 取 sysfs 的 /sys/block/sdX/device/serial，"
+                "虚拟化环境（QEMU/virtio-scsi）下该属性为空，会导致 matched no disk（§5.45）。")
         return m
     return {}
 
@@ -1211,6 +1223,12 @@ def _rhel_pick_target_lines(plan) -> list:
     if plan["mode"] == "match":
         # 与本文件里 data_disks 的 serial/wwid 同样处理：这个值会拼进 %pre 的 shell 单引号串，
         # 不洗就是一条 root 权限的配置注入面（MiMo R2 的 M1）。
+        if not (plan["serial"] or plan["model"]):
+            # 空 key 会让 `awk -v s=''` 命中**任意 SERIAL/MODEL 为空的盘**（第一块）。
+            # 这是"静默选错盘"的失效方式 —— 生产上不可接受，直接拒绝生成。
+            raise ValueError(
+                "disk_config.target.mode=match 在 RHEL 侧需要 serial 或 model："
+                "两者都为空时 %pre 会用一个空匹配串，命中任意盘（静默装错盘）。")
         key = _safe_matcher_value(plan["serial"] or plan["model"], "target.serial/model", 0)
         lines.append("target=$(lsblk -dnP -o NAME,SERIAL,MODEL,WWN | "
                      "awk -v s='%s' -v dm='%s' '" % (key, dm))
