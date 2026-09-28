@@ -4,7 +4,9 @@ set -e
 echo "=== OpsToolkit 启动 ==="
 
 # 创建必要目录
-mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/iso /srv/opstk/mnt /app/backend/data
+# ztp-web 也必须建：app/main.py **只在启动时目录存在**的前提下才注册 /ztp 静态服务，
+# 少了它，ZTP 部署写进去的 HTTP 文件在容器重建后要等下一次重启才服务得到（§5.52）。
+mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/ztp-web /srv/opstk/iso /srv/opstk/mnt /app/backend/data
 
 # 修复 SELinux (如果在 SELinux 环境中)
 if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = "Enforcing" ]; then

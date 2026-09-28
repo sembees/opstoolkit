@@ -23,6 +23,11 @@ services:
       # PXE 文件 (内核 + 固件 + 应答文件)
       - /srv/tftp:/srv/tftp
       - /srv/opstk/pxe-web:/srv/opstk/pxe-web
+      # ZTP 的 HTTP 目录。**必须挂**：ZTP 部署会把设备配置同时写到 TFTP 与 HTTP 两个根，
+      # 不挂的话那些文件只活在容器的可写层里 —— 宿主机看不到、容器一重建就没了，
+      # 而 app/main.py 又只在"启动时目录存在"的前提下才注册 /ztp 静态服务
+      # （见 §5.52）。与 pxe-web 同理，挂宿主机目录才是唯一持久的做法。
+      - /srv/opstk/ztp-web:/srv/opstk/ztp-web
       - /srv/opstk/iso:/srv/opstk/iso
       - /srv/opstk/mnt:/srv/opstk/mnt
       # 宿主机 dnsmasq 重载握手的状态目录。必须挂：容器无法命令宿主机 systemd
