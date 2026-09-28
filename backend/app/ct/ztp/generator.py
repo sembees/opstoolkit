@@ -21,7 +21,7 @@ class ZtpProfile:
     mgmt_netmask: str = "255.255.255.0"
     mgmt_gateway: str = "10.0.0.254"
     dns_servers: list = field(default_factory=lambda: ["114.114.114.114"])
-    ntp_server: str = "10.0.0.254"
+    ntp_server: str = ""
     snmp_community: str = "public"
     domain_name: str = ""
     vlans: list = field(default_factory=list)   # [{"id":10,"name":"MGMT"}]
@@ -50,6 +50,17 @@ class ZtpDevice:
     mac: str = ""               # 用于 DHCP 映射
     serial: str = ""            # 用于文件命名 (可选)
     mgmt_ip: str = ""           # 该设备管理 IP (可选覆盖)
+
+
+def _ntp(p) -> str:
+    """模板里填的 NTP 服务器（没填就是空串）。
+
+    **不下发默认值**：NTP 服务器每个现场都不一样，而以前的默认值
+    `10.0.0.254` 在任何现场都不可达 —— 设备会反复重试、时间永远不同步，
+    而且日志里看不出原因。留空 = 生成的设备配置里**不出现** NTP 行，
+    由运维按现场填（界面/文档都写清了）。
+    """
+    return (getattr(p, "ntp_server", "") or "").strip()
 
 
 def _file_stem(dev) -> str:
@@ -160,9 +171,9 @@ def h3c_config(dev, p) -> str:
         f" snmp-agent community read {p.snmp_community}",
         " snmp-agent sys-info version v2c",
         "#",
-        f"ntp-service unicast-peer {p.ntp_server}",
-        "#",
     ]
+    if _ntp(p):
+        L += [f"ntp-service unicast-peer {_ntp(p)}", "#"]
     if p.domain_name:
         L.append(f"domain {p.domain_name}")
     if p.extra_config:
@@ -219,9 +230,9 @@ def huawei_config(dev, p) -> str:
         f" snmp-agent community read {p.snmp_community}",
         " snmp-agent sys-info version v2c",
         "#",
-        f"ntp-service unicast-server {p.ntp_server}",
-        "#",
     ]
+    if _ntp(p):
+        L += [f"ntp-service unicast-server {_ntp(p)}", "#"]
     if p.dns_servers:
         L.append(f"dns server {p.dns_servers[0]}")
     if p.domain_name:
@@ -278,8 +289,9 @@ def cisco_config(dev, p) -> str:
         "crypto key generate rsa modulus 2048",
         "!",
         f"snmp-server community {p.snmp_community} RO",
-        f"ntp server {p.ntp_server}",
     ]
+    if _ntp(p):
+        L.append(f"ntp server {_ntp(p)}")
     if p.dns_servers:
         L.append("ip name-server " + " ".join(p.dns_servers))
     if p.extra_config:
@@ -513,7 +525,8 @@ def _readme(p, devices) -> str:
         f"ZTP 服务器: {p.server_ip}\n"
         f"投递模式: {p.deploy_mode}\n"
         f"DHCP 网卡: {iface}\n"
-        f"DHCP 地址池: {p.dhcp_start} - {p.dhcp_end}\n\n"
+        f"DHCP 地址池: {p.dhcp_start} - {p.dhcp_end}\n"
+        f"NTP 服务器: {_ntp(p) or '（未配置：生成的设备配置里不下发 NTP）'}\n\n"
         + warn +
         "步骤:\n"
         "1. 安装 dnsmasq, 把生成的 dnsmasq.conf 放进 /etc/dnsmasq.d/ (例如\n"
@@ -525,6 +538,10 @@ def _readme(p, devices) -> str:
         f"   {p.tftp_root}/ztp/  放入各设备 .cfg 与 default.cfg\n\n"
         f"3. (可选) HTTP 服务器镜像 {p.http_root} 提供大文件下载\n\n"
         "4. 新设备空配置上电, 接入开局网络, 自动获取配置\n\n"
+        "NTP 说明:\n"
+        "  NTP 服务器**每个现场都不一样**, 所以这里不代填默认值:\n"
+        "  模板里留空 = 设备配置里不出现 NTP 行(设备时间不会同步);\n"
+        "  要下发就按**现场真实**的 NTP 地址填进模板, 再重新生成。\n\n"
         "厂商要点:\n"
         "  H3C   : auto-config, DHCP option 66(TFTP) + 67(文件名)\n"
         "  华为  : ZTP, DHCP option 66(TFTP) + 67(中间文件) + 中间文件描述下载项\n"

@@ -107,7 +107,9 @@
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="网关"><el-input v-model="form.mgmt_gateway" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="DNS"><el-input v-model="form.dns_servers" placeholder="逗号分隔" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="NTP"><el-input v-model="form.ntp_server" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="NTP">
+            <el-input v-model="form.ntp_server" placeholder="各现场不同；留空 = 不下发 NTP" />
+          </el-form-item></el-col>
         </el-row>
         <el-form-item label="VLAN规划">
           <el-input v-model="form.vlans_text" type="textarea" :rows="2" placeholder="每行: VLAN号,名称" />
@@ -273,7 +275,7 @@ const inlineDevDialog = ref(false)
 const emptyForm = () => ({
   name: "", vendor: "h3c", domain_name: "",
   mgmt_vlan: 10, mgmt_interface: "Vlan-interface10", mgmt_netmask: "255.255.255.0",
-  mgmt_gateway: "10.0.0.254", dns_servers: "114.114.114.114", ntp_server: "10.0.0.254",
+  mgmt_gateway: "10.0.0.254", dns_servers: "114.114.114.114", ntp_server: "",
   vlans_text: "",
   admin_user: "admin", admin_password: "", enable_secret: "", snmp_community: "public",
   uplink_port: "", access_ports: "", extra_config: "",

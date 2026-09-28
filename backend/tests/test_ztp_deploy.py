@@ -435,5 +435,43 @@ class ZtpDeployServerTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.conf))
 
 
+class ZtpNtpOptionalTest(unittest.TestCase):
+    """NTP 服务器**每个现场都不一样**，所以：模板里没填就**不下发** NTP 行，
+    绝不代填一个谁都连不上的默认值（旧默认 10.0.0.254 在任何现场都不可达 ——
+    设备反复重试、时间永远不同步，而日志里看不出原因）。
+    """
+
+    def _dev_cfg(self, vendor, ntp):
+        gen = importlib.import_module("app.ct.ztp.generator")
+        p = gen.ZtpProfile(vendor=vendor, admin_password="Test@123", ntp_server=ntp,
+                           dhcp_iface="ens19", server_ip="192.168.199.1")
+        files = gen.generate_all(p, [gen.ZtpDevice(hostname="SW1", mac="00:11:22:33:44:55")])
+        return files["ztp/SW1.cfg"], files["README.txt"]
+
+    def test_blank_ntp_emits_no_ntp_line(self):
+        for vendor, keyword in (("h3c", "ntp-service"), ("huawei", "ntp-service"),
+                                ("cisco", "ntp server")):
+            cfg, readme = self._dev_cfg(vendor, "")
+            self.assertNotIn(keyword, cfg, "%s 在留空时仍下发了 NTP" % vendor)
+            self.assertIn("（未配置：生成的设备配置里不下发 NTP）", readme)
+            self.assertIn("NTP 说明", readme)
+
+    def test_filled_ntp_is_emitted_verbatim(self):
+        for vendor, keyword, line in (
+                ("h3c", "ntp-service unicast-peer", "ntp-service unicast-peer 10.9.9.9"),
+                ("huawei", "ntp-service unicast-server",
+                 "ntp-service unicast-server 10.9.9.9"),
+                ("cisco", "ntp server", "ntp server 10.9.9.9")):
+            cfg, readme = self._dev_cfg(vendor, "10.9.9.9")
+            self.assertIn(line, cfg, "%s 没有下发填好的 NTP" % vendor)
+            self.assertIn("10.9.9.9", readme)
+
+    def test_profile_default_is_blank_not_a_fake_address(self):
+        gen = importlib.import_module("app.ct.ztp.generator")
+        self.assertEqual(gen.ZtpProfile().ntp_server, "")
+        schemas = importlib.import_module("app.core.schemas")
+        self.assertEqual(schemas.ZtpTemplateIn(name="t").ntp_server, "")
+
+
 if __name__ == "__main__":
     unittest.main()

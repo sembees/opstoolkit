@@ -210,7 +210,8 @@ class ZtpTemplate(Base):
     mgmt_netmask: Mapped[str] = mapped_column(String(32), default="255.255.255.0")
     mgmt_gateway: Mapped[str] = mapped_column(String(64), default="10.0.0.254")
     dns_servers: Mapped[Optional[list]] = mapped_column(JSON, default=list)
-    ntp_server: Mapped[str] = mapped_column(String(64), default="10.0.0.254")
+    # NTP 各现场不同：留空串表示"不下发 NTP"，不再给一个谁都连不上的假默认值
+    ntp_server: Mapped[str] = mapped_column(String(64), default="")
     snmp_community: Mapped[str] = mapped_column(String(64), default="public")
     domain_name: Mapped[str] = mapped_column(String(128), default="")
     vlans: Mapped[Optional[list]] = mapped_column(JSON, default=list)

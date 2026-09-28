@@ -1497,7 +1497,7 @@ class ZtpTemplateIn(BaseModel):
     mgmt_netmask: str = "255.255.255.0"
     mgmt_gateway: str = "10.0.0.254"
     dns_servers: list[str] = ["114.114.114.114"]
-    ntp_server: str = "10.0.0.254"
+    ntp_server: str = ""                   # 留空 = 设备配置里不下发 NTP（各现场不同）
     snmp_community: str = "public"
     domain_name: str = ""
     vlans: list[dict[str, Any]] = []
