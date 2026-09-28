@@ -142,7 +142,9 @@
             </el-form-item>
           </el-col>
           <el-col :span="8"><el-form-item label="服务器IP"><el-input v-model="form.server_ip" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="DHCP网卡"><el-input v-model="form.dhcp_iface" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="DHCP网卡">
+            <el-input v-model="form.dhcp_iface" placeholder="必填，例：ens19（不能是承载默认路由的网卡）" />
+          </el-form-item></el-col>
         </el-row>
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="DHCP起始"><el-input v-model="form.dhcp_start" /></el-form-item></el-col>
@@ -201,6 +203,18 @@
           </el-tag>
         </el-form-item>
       </el-form>
+      <!-- R4：DHCP 网卡没填时，生成的配置里是占位 eth0 —— 后端会**拒绝部署**
+           （占位值 / 不存在的网卡 / 承载默认路由的骨干网卡都会被拦）。
+           在界面上先说清楚，比让运维撞一个 422 友好。 -->
+      <el-alert v-if="genIfacePlaceholder" type="warning" :closable="false" show-icon style="margin-bottom: 8px">
+        <template #title>该模板没有指定「DHCP网卡」，生成的配置是占位 interface=eth0</template>
+        <div style="font-size:12px;line-height:1.6">
+          这份配置可以下载，但<strong>不能部署</strong>：dnsmasq 配了 bind-interfaces，网卡不存在会直接起不来
+          （而它同时服务着 PXE）；填错成承载默认路由的网卡，则会在骨干网段上开 DHCP 池、抢答企业 DHCP。
+          请点「编辑」把 DHCP网卡 填成宿主机上真实存在、且不承载默认路由的那张卡
+          （本项目里是 <code>ens19</code>）。
+        </div>
+      </el-alert>
       <div style="margin-bottom: 8px">
         <el-button size="small" @click="addInlineDevice"><el-icon><Plus /></el-icon> 添加临时设备</el-button>
       </div>
@@ -231,7 +245,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onBeforeUnmount } from "vue"
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from "vue"
 import http, { downloadZip } from "../api"
 import { ElMessage } from "element-plus"
 
@@ -249,6 +263,11 @@ const activeFile = ref("")
 const deploying = ref(false)
 const deployResult = ref([])
 const deployOk = ref(true)
+// R4：当前生成用的模板的 DHCP 网卡（空 / eth0 = 占位值，生成的配置不能部署）
+const genIface = ref("")
+const genIfacePlaceholder = computed(
+  () => ["", "eth0", "eth1", "auto", "detect"].includes((genIface.value || "").trim().toLowerCase())
+)
 const inlineDevDialog = ref(false)
 
 const emptyForm = () => ({
@@ -328,6 +347,14 @@ function openTemplateDialog(row) {
 
 async function saveTemplate() {
   if (!form.name) { ElMessage.warning("请输入模板名"); return }
+  // R4：DHCP 网卡是必填的 —— 留空/占位 eth0 时生成的配置会被部署接口直接拒绝
+  // （占位值、不存在的网卡、承载默认路由的骨干网卡都不允许）。与其让运维撞 422，
+  // 不如在保存模板时就说清楚。
+  const iface = (form.dhcp_iface || "").trim().toLowerCase()
+  if (!iface || ["eth0", "eth1", "auto", "detect"].includes(iface)) {
+    ElMessage.warning("请填写「DHCP网卡」：宿主机上真实存在、且不承载默认路由的那张卡（例：ens19）")
+    return
+  }
   // 新建时必须有设备管理员口令：ZTP 生成器现在**不代填**默认口令（旧的 ChangeMe@123
   // 是公开仓库里的常量，等于给设备发一个全网都知道的口令），没有口令的模板一生成就 422。
   // 挡在这里比让运维撞 422 友好。编辑时留空仍表示"不修改"（后端 null 时不改原值）。
@@ -371,6 +398,8 @@ function openGenDialog(row) {
   genForm.deploy_mode = row.deploy_mode || "standalone"
   genForm.server_ip = row.server_ip || "10.0.0.250"
   genForm.devices = []
+  // R4：网卡是模板级的（部署接口不接受覆盖），生成/部署前先在界面上点出来
+  genIface.value = (row.dhcp_iface || "").trim()
   genDialog.value = true
   genFiles.value = {}
   sessionStorage.setItem("ztp_template_id", row.id)
@@ -431,8 +460,11 @@ async function doDeploy() {
     else ElMessage.error("部署失败，请查看日志")
   } catch (e) {
     deployOk.value = false
-    deployResult.value = [e.message || "部署请求失败"]
-    ElMessage.error("部署请求失败")
+    // 后端 ok=False 时返回 500 + detail（与 PXE 的 /deploy 同口径）；
+    // axios 的 e.message 只有一句泛泛的英文，运维要的是后端那句中文原因。
+    const detail = e?.response?.data?.detail
+    deployResult.value = Array.isArray(detail) ? detail : [detail || e.message || "部署请求失败"]
+    ElMessage.error("部署失败")
   } finally {
     deploying.value = false
   }

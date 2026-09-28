@@ -68,48 +68,37 @@ def sudo_ok():
     return rc == 0
 
 
-def _remove_quiet(path):
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except OSError:
-        pass
-
-
 def write_conf(name, content):
-    """把配置写进 CONF_DIR/<name>。**原子替换**：先写同目录临时文件，再 rename。
+    """把配置写进 CONF_DIR/<name>（**原地**写，不是 rename 替换）。
 
-    为什么必须原子（MiMo R3 的附带修复）：原来是 `open(path, "w")` 直接写，
-    写失败（磁盘满 / 进程被杀 / 被中断）会留下**截断的配置** —— 而这份配置会在
-    dnsmasq 下一次启动（包含开机）时被读取，语法不合法 ⇒ dnsmasq 起不来 ⇒
-    整个装机网段没有 DHCP/TFTP。原子替换让"写失败"只意味着"文件没变"。
+    为什么必须是原地写（真机实测，2026-09，RUNBOOK §5.50）：宿主机的
+    opstk-dnsmasq-reload.path 监视这个文件，而 systemd 的 PathChanged/PathModified
+      · **不吃 IN_ATTRIB** —— `touch` / `os.utime`（只改 mtime）根本不触发；
+      · **对 rename 替换（IN_MOVED_TO）也不可靠** —— 监视挂在被替换掉的那个 inode 上，
+        实测同一个部署里"第一份配置的替换触发了、紧接着第二份没有"，
+        表现就是部署偶发地卡在"等宿主机重载"直到超时。
+    只有**原地写入**产生 IN_CLOSE_WRITE / IN_MODIFY，落在那只 watch 命中的 inode 上，
+    每次都稳定触发。可靠触发是这条链路的前提：不触发 = 配置永远不会生效。
 
-    临时文件必须和目标**同目录**（同一文件系统），rename 才是原子的。
-    宿主机的重载单元同时监视 PathChanged 与 PathModified：rename 产生的是
-    IN_MOVED_TO（PathModified 语义），两条都挂着，不会漏触发。
+    代价：进程在 write() 中途被杀，理论上可能留下半截文件（单次 write 一个小文本文件，
+    这个窗口以微秒计）。以前为此改成过"临时文件 + rename"的原子替换，
+    结果是**触发不可靠**（更难查、后果更重）。两害相权，选可触发；
+    半截配置的风险由三件事兜住：部署前的红线/预检、宿主机 `dnsmasq --test` 不通过就
+    不重启（dnsmasq 仍跑旧配置）、以及失败回滚。
     """
     os.makedirs(CONF_DIR, exist_ok=True)
     path = os.path.join(CONF_DIR, name)
-    tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
         return True
     except PermissionError:
-        # 非 root（没走容器 root / 没配 sudo 免密）：退化成 sudo tee + mv，
-        # 同样是"临时文件 + 原子替换"，不会把半截内容留在正式路径上。
-        rc, _, _ = _run(["tee", tmp], sudo=True, stdin_data=content)
-        if rc == 0:
-            rc2, _, _ = _run(["mv", "-f", tmp, path], sudo=True)
-            if rc2 == 0:
-                return True
-        _remove_quiet(tmp)
-        return False
+        # 非 root：退化成 sudo tee（tee 也是原地写，同样触发 IN_CLOSE_WRITE）
+        rc, _, _ = _run(["tee", path], sudo=True, stdin_data=content)
+        return rc == 0
     except Exception:
-        _remove_quiet(tmp)
         return False
 
 
@@ -158,8 +147,14 @@ HOST_RELOAD_WAIT = 25.0
 # 抬高这个数字 = 强制运维在宿主机重跑 install 脚本，而且是**零落盘**地失败。
 # 实测踩过两次：宿主机的单元/脚本改过之后忘了重跑 install 脚本，于是 /deploy 每次
 # 都"写完了才超时失败"。版本标记把这件事故变成一条可照做的指令。
-HOST_RELOAD_MIN_SCRIPT_VERSION = 2
+HOST_RELOAD_MIN_SCRIPT_VERSION = 3
 HOST_RELOAD_LINK = HOST_RELOAD_STATE_DIR + "/.dnsmasq-reload.link"
+# ZTP 的握手槽位（与 PXE 各一个，互不冒充）。
+# 为什么必须分开：宿主脚本监视的是 /etc/dnsmasq.d 下的**两个**配置文件
+# （opstk-pxe.conf 与 opstk-ztp.conf），一次重载可能由其中任何一个触发。
+# 只用一个状态文件时，ZTP 只能拿 PXE 的 sha 去核对，永远核不上（或者更糟：
+# 把"PXE 那份生效了"当成"ZTP 那份也生效了"）。
+HOST_RELOAD_STATE_ZTP = HOST_RELOAD_STATE_DIR + "/.dnsmasq-reload.state.ztp"
 # 活体探测的等待上限。比 HOST_RELOAD_WAIT 短：探测只是"碰一下看单元响不响"，
 # 而真正那一次重载可能正被 flock 串行化（另一个部署在跑 restart）。
 HOST_RELOAD_PROBE_WAIT = 15.0
@@ -207,6 +202,11 @@ def host_reload_link_status():
     return {"version": int(parts[1]), "ts": parts[2] if len(parts) > 2 else "", "err": ""}
 
 
+def host_reload_state_path(name: str = "pxe") -> str:
+    """握手槽位：pxe（默认）或 ztp。两个槽位各自记自己那份配置的 sha。"""
+    return HOST_RELOAD_STATE_ZTP if (name or "").lower() == "ztp" else HOST_RELOAD_STATE
+
+
 def _writable_dir_probe(path):
     """状态目录能不能写（能不能删掉旧的完成标记同样重要）。返回 (ok, err)。"""
     probe = os.path.join(path, ".opstk-write-probe.%d" % os.getpid())
@@ -222,15 +222,16 @@ def _writable_dir_probe(path):
     return True, ""
 
 
-def host_reload_status():
-    """读宿主机重载单元写下的完成标记。
+def host_reload_status(state_path=None):
+    """读宿主机重载单元写下的完成标记（默认读 PXE 槽位，传 state_path 读别的槽位）。
 
     返回 {"state","sha","ts","reason","err"} 或 None（标记确实不存在）。
     区分 ENOENT 与其他 OSError：把权限/SELinux 导致的读失败也说成"没装单元"，
     会把排查引到完全错误的方向（MiMo R1 的低危项）。err 非空时调用方要把它显示出来。
     """
+    state_path = state_path or HOST_RELOAD_STATE
     try:
-        with open(HOST_RELOAD_STATE, "r", encoding="utf-8", errors="replace") as fh:
+        with open(state_path, "r", encoding="utf-8", errors="replace") as fh:
             raw = fh.read().strip()
     except FileNotFoundError:
         return None
@@ -262,7 +263,7 @@ def host_reload_status():
     return st
 
 
-def invalidate_host_reload_state():
+def invalidate_host_reload_state(state_path=None):
     """部署前作废旧标记（best-effort）。
 
     为什么必须做：`wait_host_reload` 只比对 sha，而**连续两次部署内容相同**时，
@@ -270,7 +271,7 @@ def invalidate_host_reload_state():
     （MiMo R1 的中危项）。删掉它，任何读到的 OK 都必然来自本次写入之后。
     """
     try:
-        os.remove(HOST_RELOAD_STATE)
+        os.remove(state_path or HOST_RELOAD_STATE)
         return True
     except FileNotFoundError:
         return True
@@ -278,8 +279,9 @@ def invalidate_host_reload_state():
         return False
 
 
-def wait_host_reload(sha: str, timeout: float = None, not_before: float = None):
-    """等宿主机把**这一份**配置真正加载完。
+def wait_host_reload(sha: str, timeout: float = None, not_before: float = None,
+                     state_path=None):
+    """等宿主机把**这一份**配置真正加载完（state_path 决定等哪个槽位：PXE / ZTP）。
 
     判据三条同时成立：state == OK、sha 相同、且标记的时间戳 >= 本次部署开始的时刻。
     只认 sha 相等不够 —— 同内容重复部署会命中陈旧标记（见 invalidate_host_reload_state）。
@@ -296,7 +298,7 @@ def wait_host_reload(sha: str, timeout: float = None, not_before: float = None):
     deadline = time.monotonic() + max(0.0, timeout)
     last = None
     while True:
-        st = host_reload_status()
+        st = host_reload_status(state_path)
         if st:
             last = st
             fresh = True
@@ -307,6 +309,66 @@ def wait_host_reload(sha: str, timeout: float = None, not_before: float = None):
         if time.monotonic() >= deadline:
             return {"ok": False, "state": last}
         time.sleep(0.4)
+
+
+def rewrite_conf_unchanged(conf_path):
+    """对配置文件做一次**原地**写入，内容一模一样（触发宿主机 path 单元的最小动作）。
+
+    两个地方用它，理由相同：systemd 的 PathChanged/PathModified
+      · 不吃 IN_ATTRIB ⇒ `touch`/`os.utime` 完全不触发；
+      · 对 rename 替换不可靠 ⇒ 监视挂在被换掉的 inode 上；
+    只有原地写入的 IN_CLOSE_WRITE 稳定触发。内容不变 ⇒ 宿主脚本判定 unchanged
+    ⇒ 只写状态、不重启 dnsmasq。
+    返回 (ok, err)。
+    """
+    try:
+        with open(conf_path, "rb") as fh:
+            cur = fh.read()
+        with open(conf_path, "wb") as fh:
+            fh.write(cur)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return True, ""
+    except OSError as e:
+        return False, (e.strerror or str(e))
+
+
+def wait_host_reload_retrying(sha, conf_path, state_path=None, not_before=None,
+                              timeout=None, nudge=None):
+    """等宿主机加载这一份配置，**超时就再触发一次**。
+
+    为什么必须重试（真机实测）：path 单元是**边沿触发**，而 systemd 对"已经在运行/
+    正在启动"的服务，start 是空操作 —— 一次配置写入如果正好落在上一次运行还没结束的
+    窗口里（部署前的活体探测刚碰过同一个文件），这个事件就被吃掉，之后不会再有事件，
+    应用只能等满超时（现象：部署偶发卡在"等宿主机重载"，重试一次又好了）。
+    所以超时后**再原地写一次同样的内容**，把丢失的那个边沿补上。
+
+    总耗时不超过 timeout（默认 OPS_HOST_RELOAD_TIMEOUT / HOST_RELOAD_WAIT）。
+    返回 (结果, 触发次数)。
+    """
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("OPS_HOST_RELOAD_TIMEOUT", HOST_RELOAD_WAIT))
+        except ValueError:
+            timeout = HOST_RELOAD_WAIT
+    deadline = time.monotonic() + max(0.0, timeout)
+    nudge = nudge or (lambda: rewrite_conf_unchanged(conf_path)[0])
+    got = None
+    attempts = 0
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        # 单次等待取总预算的 1/3（至少 1.5s）：保证任何合理超时下都至少补触发一次
+        got = wait_host_reload(sha, timeout=min(left, max(1.5, left / 3.0)),
+                               not_before=not_before, state_path=state_path)
+        if got.get("ok"):
+            return got, attempts
+        if time.monotonic() >= deadline:
+            break
+        attempts += 1
+        nudge()
+    return (got or {"ok": False, "state": None}), attempts
 
 
 def reload_failure_is_pre_restart(state) -> bool:
@@ -321,7 +383,7 @@ def reload_failure_is_pre_restart(state) -> bool:
     return (state.get("reason") or "").startswith(HOST_RELOAD_PRE_RESTART_FAILURES)
 
 
-def reload_preflight(conf_path=None, timeout=None):
+def reload_preflight(conf_path=None, timeout=None, state_path=None):
     """部署**之前**确认"把配置写下去之后，宿主机真的能让它生效"。
 
     为什么要有预检（MiMo R3）：原来的顺序是"先落盘、再核对重载"，于是链路坏掉时
@@ -332,8 +394,11 @@ def reload_preflight(conf_path=None, timeout=None):
     判据两层：
       · 静态：状态目录存在且可写；宿主机脚本留下的版本标记存在且 >=
         HOST_RELOAD_MIN_SCRIPT_VERSION；
-      · 活体：碰一下被监视的那份配置文件（只改 mtime，不动内容），等宿主机脚本写出
+      · 活体：对配置做一次**内容完全相同**的写入（rename 替换），等宿主机脚本写出
         一个**新的**状态文件。它证明"单元真的在触发、脚本真的跑得起来"。
+        ⚠ 不能改用 `touch`/`os.utime`：systemd 的 PathChanged/PathModified 不含
+        IN_ATTRIB，只改 mtime **根本不会触发**（真机实测，2026-09 —— 这曾让每个
+        部署都误报"预检超时"）。内容没变 ⇒ 宿主脚本判定 unchanged ⇒ 不重启 dnsmasq。
         陈旧判定只看时间戳（ts >= not_before），所以单元已经死掉时必然超时失败。
         **故意不删旧标记**：删掉它会让正在等重载的并发部署失去它要等的那个标记，
         而时间戳判陈旧已经足够。
@@ -343,6 +408,7 @@ def reload_preflight(conf_path=None, timeout=None):
     """
     log = []
     conf_path = conf_path if conf_path is not None else PXE_CONF
+    state_path = state_path if state_path is not None else HOST_RELOAD_STATE
     if timeout is None:
         try:
             timeout = float(os.environ.get("OPS_HOST_RELOAD_PROBE_TIMEOUT",
@@ -407,26 +473,29 @@ def reload_preflight(conf_path=None, timeout=None):
         return _ret(True, "no-target-to-probe", state=None, probed=False)
 
     not_before = int(time.time())
-    try:
-        os.utime(conf_path, None)
-    except OSError as e:
-        err = e.strerror or str(e)
-        log.append("预检失败：无法碰触监视目标 " + conf_path + "（" + err + "）")
+    ok, err = rewrite_conf_unchanged(conf_path)
+    if not ok:
+        log.append("预检失败：无法探测监视目标 " + conf_path + "（" + err + "）")
         return _ret(False, "probe-touch-failed",
-                    "无法修改被监视的配置文件 " + conf_path + " 的 mtime（" + err
+                    "无法对监视目标 " + conf_path + " 做一次写入探测（" + err
                     + "）：容器对这个目录必须是可写的，否则连配置本身也写不下去。"
                       "请检查 /etc/dnsmasq.d 的挂载与权限。")
 
     deadline = time.monotonic() + max(0.0, timeout)
     last = None
     while True:
-        st = host_reload_status()
+        st = host_reload_status(state_path)
         if st:
             last = st
             fresh = bool(st["ts"].isdigit()) and int(st["ts"]) >= not_before
             if fresh:
                 log.append("预检通过：重载链路有响应（宿主机脚本报 %s %s）"
                            % (st["state"], (st.get("reason") or "")[:60]))
+                # 让宿主机把这次运行**跑完**再返回：path 是边沿触发，而 systemd 对
+                # "正在运行"的服务 start 是空操作 —— 紧接着的部署写入如果撞进这个
+                # 窗口，事件会被吃掉（部署偶发卡在等重载）。等一下能显著减少这种相撞，
+                # 真正的兜底是 wait_host_reload_retrying 的"再触发一次"。
+                time.sleep(0.4)
                 return _ret(True, "", state=st, probed=True)
         if time.monotonic() >= deadline:
             break
@@ -442,6 +511,239 @@ def reload_preflight(conf_path=None, timeout=None):
                   "查：systemctl status " + HOST_RELOAD_UNIT
                 + "；journalctl -u opstk-dnsmasq-reload --since '-5 min'",
                 state=last)
+
+
+# ── "不许把 DHCP 池开到骨干网上"的护栏 ──────────────────────────────────
+# 背景（RUNBOOK §5.50）：ZTP 生成器在没有显式给网卡时会去猜，容器里猜到的是
+# **企业网那张卡**（ens18/10.128.118.113），而 standalone 模式的配置里还带
+# dhcp-range —— 这份配置一旦被 dnsmasq 加载，就会在骨干网段上开一个 DHCP 池、
+# 抢答企业 DHCP（分出去的路由器/网关全是错的）。而 dnsmasq 是**开机自启**的：
+# 只要那份文件躺在 /etc/dnsmasq.d 里，任何一次重启（哪怕与本模块无关）都会加载它。
+# 所以这类配置必须在**落盘之前**就被拒绝，而不是靠"它还没生效"侥幸。
+
+def _default_route_iface(proc_route="/proc/net/route"):
+    """默认路由所在的网卡名；读不到返回 ""。
+
+    /proc/net/route 每行：<iface> <dest> <gw> <flags> ...，Destination 为 00000000
+    的那行就是默认路由（字段是**主机字节序**的十六进制，网关需要小端还原）。
+    """
+    try:
+        with open(proc_route, encoding="utf-8") as fh:
+            for line in fh.read().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "00000000":
+                    return parts[0]
+    except OSError:
+        return ""
+    return ""
+
+
+def gateway_from_route(proc_route="/proc/net/route"):
+    """默认路由的网关地址（拿不到返回 ""）。与 _default_route_iface 读同一个文件。"""
+    import socket
+    import struct
+    try:
+        with open(proc_route, encoding="utf-8") as fh:
+            for line in fh.read().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "00000000":
+                    return socket.inet_ntoa(struct.pack("<I", int(parts[2], 16)))
+    except (OSError, ValueError, struct.error):
+        return ""
+    return ""
+
+
+def _iface_v4(iface):
+    """网卡的 (IPv4, 前缀长度)；取不到返回 None。ioctl，不依赖 ip 命令。"""
+    if not iface:
+        return None
+    try:
+        import fcntl
+        import socket
+        import struct
+    except ImportError:
+        return None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            raw = fcntl.ioctl(s.fileno(), 0x8915, struct.pack("256s", iface[:15].encode()))
+            ip = socket.inet_ntoa(raw[20:24])
+            mask = fcntl.ioctl(s.fileno(), 0x891B, struct.pack("256s", iface[:15].encode()))
+            m = socket.inet_ntoa(mask[20:24])
+        finally:
+            s.close()
+        bits = bin(int.from_bytes(socket.inet_aton(m), "big")).count("1")
+        return ip, bits
+    except Exception:
+        return None
+
+
+def protected_networks(providers=None):
+    """宿主机的"骨干网事实"：默认路由网卡名 + 该网卡承载的 IPv4 网段列表。
+
+    用途：拦住"把 DHCP 池开到承载默认路由的网段上"。取不到时返回 ("", [], 原因)，
+    调用方必须据此**拒绝部署**（fail-closed）—— 宁可部署不了，也不能赌。
+    providers 可注入，便于单测（{"route": 文件路径, "iface": (ip,prefix)}）。
+    """
+    import ipaddress
+    p = providers or {}
+    try:
+        iface = p["iface_name"] if "iface_name" in p else _default_route_iface(
+            p.get("route", "/proc/net/route"))
+    except OSError:
+        iface = ""
+    if p.get("iface_v4") is not None:
+        got = p["iface_v4"]
+    else:
+        got = _iface_v4(iface)
+    nets = []
+    if got:
+        try:
+            nets.append(ipaddress.ip_network(got[0] + "/" + str(got[1]), strict=False))
+        except ValueError:
+            nets = []
+    if not iface:
+        return "", [], "读不到默认路由（/proc/net/route），无法判断哪张网卡是骨干网"
+    if not nets:
+        return iface, [], "读不到 %s 上的 IPv4 地址/掩码，无法算出骨干网段" % iface
+    return iface, nets, ""
+
+
+def parse_dnsmasq_dhcp(conf_text):
+    """从生成的配置里取出 (interface 列表, dhcp-range 的地址段列表)。
+
+    只认 dnsmasq 自己的写法：`interface=<name>`、`dhcp-range=<a>,<b>[,<lease>]`
+    （proxy 模式的 `dhcp-range=<ip>,proxy` 只取到第一个地址，不构成"池"，不算越界）。
+    """
+    import ipaddress
+    ifaces = []
+    ranges = []
+    for line in (conf_text or "").splitlines():
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        if s.startswith("interface="):
+            ifaces.append(s.split("=", 1)[1].strip())
+        elif s.startswith("dhcp-range="):
+            parts = [x.strip() for x in s.split("=", 1)[1].split(",")]
+            ips = []
+            for x in parts[:2]:
+                try:
+                    ips.append(ipaddress.ip_address(x))
+                except ValueError:
+                    pass
+            if len(ips) == 2:
+                ranges.append((ips[0], ips[1]))
+    return ifaces, ranges
+
+
+# dnsmasq 里**只能出现一次**的关键字（出现两次就 `illegal repeated keyword`，
+# 而且它拒绝的是**整份**配置：dnsmasq 直接起不来，开机也起不来 ⇒ 装机网段没有 DHCP）。
+# 实测（10.128.118.113）：/etc/dnsmasq.d 下 opstk-pxe.conf 已有 `port=0` 时，
+# 再加一份也写 `port=0` 的 opstk-ztp.conf ⇒ `dnsmasq --test` 报
+# `illegal repeated keyword at line 2 of /etc/dnsmasq.d/opstk-ztp.conf`；
+# 而同场的 `interface=` / `bind-interfaces` / `enable-tftp` / `tftp-root` /
+# `dhcp-range=` / `dhcp-option=` 都可以重复（逐个删掉验证过）。
+# 只登记**验证过**的关键字，不凭印象扩充。
+_SINGLETON_KEYWORDS = ("port",)
+
+
+def _other_conf_has_keyword(keyword, exclude_path, conf_dir=None):
+    """CONF_DIR 下**除自己以外**的 .conf 里有没有这个关键字。返回文件名或 ""。"""
+    d = conf_dir if conf_dir is not None else CONF_DIR
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return ""
+    for n in names:
+        if not n.endswith(".conf"):
+            continue
+        p = os.path.join(d, n)
+        if os.path.abspath(p) == os.path.abspath(exclude_path or ""):
+            continue
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    s = line.strip()
+                    if s.startswith(keyword + "=") or s == keyword:
+                        return n
+        except OSError:
+            continue
+    return ""
+
+
+def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=None):
+    """落盘前的红线检查。返回 (ok, 原因) —— 原因是要显示给运维的中文说明。
+
+    五条，全部 fail-closed：
+      1. `interface=` 是占位值（eth0/eth1/空）⇒ 拒绝（说明生成器没拿到真实网卡）；
+      2. 目标网卡在宿主机上**不存在** ⇒ 拒绝。这条尤其重要：dnsmasq 配了
+         `bind-interfaces` + 不存在的网卡会**起不来**，而 dnsmasq 同时服务着 PXE ——
+         一个 ZTP 模板里的网卡笔误就能把整个装机网段的 DHCP/TFTP 一起打掉；
+      3. 目标网卡就是承载**默认路由**的那张（骨干网/企业网）⇒ 拒绝；
+      4. `dhcp-range` 与骨干网段有重叠 ⇒ 拒绝（哪怕网卡名写对了，池也不能落在骨干网段）；
+      5. 用了**不可重复**的关键字（如 `port=`）而配置目录里别的 .conf 已经用过
+         ⇒ 拒绝。这条修的是真机实测到的"两份配置互斥"：dnsmasq 会连整份配置一起拒绝，
+         结果是守护进程起不来。
+    """
+    import ipaddress
+    ifaces, ranges = parse_dnsmasq_dhcp(conf_text)
+    if not ifaces:
+        return False, "生成的配置里没有 interface=（不知道要服务哪张网卡），拒绝部署"
+    placeholders = {"eth0", "eth1", "ens0", ""}
+    for i in ifaces:
+        if i in placeholders:
+            return False, ("配置里的 DHCP 网卡是占位值 `" + i + "`：请在模板/参数里**明确填写**"
+                           "要把 DHCP 池开在哪张网卡上（容器内自动探测网卡不可靠 —— "
+                           "实测会猜到承载企业网的那张卡）。")
+    try:
+        present = set(os.listdir("/sys/class/net"))
+    except OSError:
+        present = set()
+    if present:
+        for i in ifaces:
+            if i not in present:
+                return False, ("宿主机上不存在网卡 `" + i + "`：dnsmasq 配了 bind-interfaces + "
+                               "不存在的网卡会**启动失败**，而它同时服务着 PXE —— "
+                               "请改成宿主机上真实存在的网卡（当前有：" +
+                               ", ".join(sorted(present)[:8]) + " …）")
+    iface, nets, why = protected_networks(providers)
+    if why:
+        return False, ("无法判断哪张网卡/哪个网段是骨干网：" + why
+                       + "。为避免把 DHCP 池开到骨干网上，这里**拒绝部署**。")
+    for i in ifaces:
+        if i == iface:
+            return False, ("DHCP 网卡 `" + i + "` 正是承载默认路由的骨干网卡"
+                           "（" + ", ".join(str(n) for n in nets) + "）："
+                           "在它上面开 DHCP 会抢答骨干网的地址/网关，必须改到专用装机网卡。")
+    for lo, hi in ranges:
+        for net in nets:
+            try:
+                lo_in = ipaddress.ip_address(lo) in net
+                hi_in = ipaddress.ip_address(hi) in net
+            except ValueError:
+                continue
+            if lo_in or hi_in:
+                return False, ("dhcp-range " + str(lo) + "-" + str(hi) + " 落在骨干网段 "
+                               + str(net) + " 内：这会把骨干网的地址分给客户端，"
+                                 "请把池改到专用装机网段。")
+    # 5) 不可重复关键字冲突（真机实测：两份配置都写 port=0 ⇒ dnsmasq 拒绝整份配置）
+    for kw in _SINGLETON_KEYWORDS:
+        used_here = any(
+            (ln.strip().startswith(kw + "=") or ln.strip() == kw)
+            for ln in (conf_text or "").splitlines() if not ln.strip().startswith("#"))
+        if not used_here:
+            continue
+        other = _other_conf_has_keyword(kw, own_path, conf_dir)
+        if other:
+            return False, ("这份配置用了 `" + kw + "=`，而配置目录里的 " + other
+                           + " 已经用过它：dnsmasq 的 `" + kw + "` 是**不可重复**的关键字，"
+                             "重复会让 dnsmasq 以 `illegal repeated keyword` 拒绝**整份**配置 —— "
+                             "结果是守护进程起不来（含开机），整个装机网段没有 DHCP/TFTP。"
+                             "请把 `" + kw + "` 留给主配置（例如 opstk-pxe.conf）只写一次；"
+                             "若 " + other + " 是旧版生成器留下的，"
+                             "重新部署一次对应的模板即可修正。")
+    return True, ""
 
 
 def _find_dnsmasq_pids(skip_zombies=True):

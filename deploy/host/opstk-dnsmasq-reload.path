@@ -1,17 +1,30 @@
 [Unit]
-Description=OpsToolkit: 监视 PXE 的 dnsmasq 配置变化，触发校验+重载
+Description=OpsToolkit: 监视 PXE/ZTP 的 dnsmasq 配置变化，触发校验+重载
 Documentation=file:/opt/opstk/deploy/host/README.md
 
 [Path]
-# 容器把配置写进这个路径（compose 把宿主机的 /etc/dnsmasq.d 挂了进去），
+# 容器把配置写进这些路径（compose 把宿主机的 /etc/dnsmasq.d 挂了进去），
 # 但容器无法命令宿主机的 systemd —— 由这个 path 单元补上"加载"这一步。
 #
-# PathChanged 吃的是 IN_CLOSE_WRITE/IN_ATTRIB/IN_MOVE_SELF/IN_DELETE_SELF；
-# 如果哪天 write_conf 改成"写临时文件 + rename"的原子替换，PathChanged 可能收不到事件
-# （IN_MOVED_TO 属于 PathModified 的语义）。两条都挂上：多触发一次的代价只是多跑一遍
-# restart，而漏触发的代价是"每次部署都超时失败"。
+# 必须**两个**配置文件都监视：ZTP 的部署只改 opstk-ztp.conf，
+# 只监视 opstk-pxe.conf 时它永远不触发（实测：ZTP 部署写下去就再也没人管，
+# 接口还报成功；而 dnsmasq 是开机自启的，那份配置会在下一次重启时被静默加载）。
+#
+# ⚠ 触发条件是被实测卡过一次的地方（RUNBOOK §5.50）：
+#   · PathChanged/PathModified **都不吃 IN_ATTRIB** ⇒ `touch` / `os.utime`
+#     （只改 mtime）**不会**触发任何一次；
+#   · 对 rename 替换（IN_MOVED_TO）也**不可靠** —— watch 挂在被换掉的那个 inode 上，
+#     实测"同一个部署里第一份配置的替换触发了、紧接着第二份没有"，
+#     表现是部署偶发卡在"等宿主机重载"到超时。
+#   · 稳定触发的是**原地写入**（IN_CLOSE_WRITE / IN_MODIFY）。
+# 因此应用侧的契约是：写 /etc/dnsmasq.d 下的配置**必须原地写**，不许 rename 替换
+# （见 app/core/dhcp.py::write_conf 与 reload_preflight 的探针）。
+# PathChanged 与 PathModified 两条都留着：多触发一次的代价只是多跑一遍
+# `dnsmasq --test`（脚本发现内容没变就不会重启），漏触发的代价是部署永远不生效。
 PathChanged=/etc/dnsmasq.d/opstk-pxe.conf
 PathModified=/etc/dnsmasq.d/opstk-pxe.conf
+PathChanged=/etc/dnsmasq.d/opstk-ztp.conf
+PathModified=/etc/dnsmasq.d/opstk-ztp.conf
 Unit=opstk-dnsmasq-reload.service
 
 [Install]

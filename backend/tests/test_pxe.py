@@ -24,6 +24,13 @@ import yaml
 
 from app.it.pxe.generator import PxeConfig, generate_all, pick_iso
 
+# R4：红线检查的**真实实现**必须在任何用例 setUp 覆盖它之前抓住 ——
+# 有两个测试类为了 hermetic 会把它换成放行桩（容器与宿主机共享网络命名空间，
+# 不隔离的话用例会随宿主环境漂移），而专门测红线的用例要把它装回去。
+import app.core.dhcp as _dhcp_mod
+
+_REAL_CHECK_DHCP_CONF_SAFETY = _dhcp_mod.check_dhcp_conf_safety
+
 
 def _cfg(**kw):
     """测试辅助：本文件测的是 post_script / storage / ipxe，不是口令策略。
@@ -1873,6 +1880,12 @@ class DeployIsolationTest(unittest.TestCase):
             # 这里固定成"非容器"，让预检走它自己的跳过分支 —— 测试是 hermetic 的，
             # 绝不能在跑用例时去碰真实的 /etc/dnsmasq.d/opstk-pxe.conf。
             (server._dhcp, "_in_container", lambda: False),
+            # R4：落盘前的红线检查会去读**宿主机的真实网络事实**（默认路由网卡、
+            # /sys/class/net）。容器与宿主机共享网络命名空间，所以不隔离的话，
+            # 生成器默认的 `interface=eth0` 会被真机事实判成占位值而拒绝 ——
+            # 那与本类要测的"路径隔离/原子落盘"无关，却会让用例随宿主环境漂移。
+            # 红线逻辑本身由 test_ztp_deploy.py 专门覆盖（含 PXE 侧的接入点）。
+            (server._dhcp, "check_dhcp_conf_safety", lambda *a, **k: (True, "")),
         ):
             p = mock.patch.object(target, attr, value)
             p.start()
@@ -2633,6 +2646,10 @@ class DeployPreflightAndRollbackTest(unittest.TestCase):
             (dhcp, "CONF_DIR", self.confdir),          # 真实的 write_conf，写进临时目录
             (dhcp, "PXE_CONF", self.conf),
             (dhcp, "_in_container", lambda: False),    # 默认：预检走"跳过"分支
+            # R4 的红线检查在真实环境里读宿主机的默认路由/网卡集合；容器共享宿主
+            # 网络命名空间 ⇒ 这里必须隔离，否则用例会随宿主环境漂移。
+            # 专心测预检/回滚；红线本身的接入点另有专门用例。
+            (dhcp, "check_dhcp_conf_safety", lambda *a, **k: (True, "")),
             (dhcp, "is_linux", lambda: True),
             (dhcp, "sudo_ok", lambda: True),
             (dhcp, "ensure_dirs", lambda dirs=None: []),
@@ -2699,6 +2716,10 @@ class DeployPreflightAndRollbackTest(unittest.TestCase):
     def _wait(self, *results):
         m = self.mock.Mock(side_effect=list(results))
         self.mock.patch.object(self.dhcp, "wait_host_reload", m).start()
+        # 生产代码走的是**带重试**的版本（边沿事件可能被 systemd 合并掉，
+        # 超时要补触发一次）。测试里让它直接转调上面那个桩，不产生补触发。
+        self.mock.patch.object(self.dhcp, "wait_host_reload_retrying",
+                               lambda *a, **k: (m(*a, **k), 0)).start()
         self.addCleanup(self.mock.patch.stopall)
         return m
 
@@ -2709,6 +2730,43 @@ class DeployPreflightAndRollbackTest(unittest.TestCase):
                                                   "reason": "restart-failed", "err": ""}}
 
     # ── 1. 预检失败 ⇒ 零落盘 ──
+
+    def test_backbone_dhcp_conf_is_refused_before_any_write(self):
+        """R4：PXE 侧也必须走红线检查 —— 池开在骨干网上要在**落盘之前**被拒绝。
+
+        setUp 里为了 hermetic 把 check_dhcp_conf_safety 换成了放行桩，
+        这里装回**真实现**并注入真机事实（ens18 承载默认路由、企业网 10.128.118.0/24）。
+        """
+        import ipaddress
+        self.mock.patch.object(
+            self.dhcp, "protected_networks",
+            lambda providers=None: ("ens18", [ipaddress.ip_network("10.128.118.0/24")], "")
+        ).start()
+        self.addCleanup(self.mock.patch.stopall)
+        self.mock.patch.object(self.dhcp, "check_dhcp_conf_safety",
+                               _REAL_CHECK_DHCP_CONF_SAFETY).start()
+        self.addCleanup(self.mock.patch.stopall)
+        orig_listdir = self.os.listdir
+
+        def fake_listdir(p):
+            if p == "/sys/class/net":
+                return ["lo", "ens18", "ens19", "docker0"]
+            return orig_listdir(p)
+
+        self.mock.patch.object(self.dhcp.os, "listdir", fake_listdir).start()
+        self.addCleanup(self.mock.patch.stopall)
+
+        pid = "a" * 32
+        self._delegate()
+        files = self._files(pid)
+        files["dnsmasq.conf"] = ("interface=ens18\nbind-interfaces\n"
+                                 "dhcp-range=10.0.0.100,10.0.0.200,12h\n")
+        res = self.server.deploy_files(files, pid)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res.get("preflight_reason"), "dhcp-safety")
+        self.assertEqual(res["files_written"], [])
+        self.assertIn("本次未写入任何文件", res["errors"][0])
+        self.assertEqual(sorted(self._tree()), ["ubuntu/22.04/initrd", "ubuntu/22.04/vmlinuz"])
 
     def test_preflight_failure_writes_nothing(self):
         pid = "a" * 32

@@ -1,6 +1,8 @@
 """CT ZTP 开局接口。"""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -239,7 +241,11 @@ async def service_control(body: dict = None, _user=Depends(get_current_user)):
 
 @router.post("/templates/{tid}/deploy")
 async def deploy_to_host(tid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
-    """一键部署到本机: 生成配置 -> 落地 TFTP/HTTP -> 重启 dnsmasq。"""
+    """一键部署到本机: 生成配置 -> 落地 TFTP/HTTP -> 让宿主机真正加载并核对生效。
+
+    与 PXE 的 /deploy 同一口径：**ok=False 必须报错**，不能让"配置写下去了但
+    dnsmasq 还是旧配置"这种状态被当成成功（R4 / RUNBOOK §5.50）。
+    """
     body = body or {}
     srv = body.get("server_ip", "")
     if not srv:
@@ -248,4 +254,13 @@ async def deploy_to_host(tid: str, body: dict = None, db: AsyncSession = Depends
     body.setdefault("server_ip", srv)
     body.setdefault("http_root", ("http://" + srv + ":8000/ztp") if srv else "")
     files = await _gen_ztp_files(tid, body, db)
-    return ztp_server.deploy_files(files, tid)
+    # deploy_files 是同步函数，容器部署路径里它会**阻塞等待**宿主机重载完成
+    # （最长 OPS_HOST_RELOAD_TIMEOUT，默认 25s）。与 api/pxe.py 一样丢到线程里，
+    # 否则并发部署时整个事件循环停摆。
+    res = await asyncio.to_thread(ztp_server.deploy_files, files, tid)
+    if not res.get("supported"):
+        return res
+    if not res.get("ok"):
+        detail = "ZTP 部署失败：" + "；".join(res.get("errors") or ["未知错误"])
+        raise HTTPException(status_code=500, detail=detail[:800])
+    return res

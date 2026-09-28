@@ -122,29 +122,26 @@ def test_conf_sha_matches_bytes_actually_written(tmp_path, monkeypatch):
     assert dhcp.conf_sha(content) == hashlib.sha256(on_disk).hexdigest()
 
 
-def test_write_conf_leaves_old_content_when_the_write_fails(tmp_path, monkeypatch):
-    """R3：写配置必须**原子**替换。
+def test_write_conf_is_in_place_so_the_host_unit_fires(tmp_path, monkeypatch):
+    """R4 真机实测的硬约束：写配置必须**原地写**（inode 不变）。
 
-    原来是 `open(path,"w")` 直接写：一旦写失败（磁盘满/被中断），留下的是**截断的**
-    配置，而它会在 dnsmasq 下一次启动（含开机）时被读取 —— 语法不合法就直接起不来，
-    整个装机网段没有 DHCP/TFTP。原子替换让"写失败"只等于"文件没变"。
+    systemd 的 PathChanged/PathModified 不吃 IN_ATTRIB（`touch`/`os.utime` 不触发），
+    对 rename 替换也不可靠（watch 挂在被换掉的 inode 上，部署会偶发卡到超时）。
+    只有原地写入的 IN_CLOSE_WRITE 稳定触发。曾经为了"原子"改成 tmp+rename，
+    结果是**部署偶发不生效** —— 比半截文件更糟，所以这里钉死 inode 不变。
     """
-    import os as _os
+    import hashlib
     monkeypatch.setattr(dhcp, "CONF_DIR", str(tmp_path))
     assert dhcp.write_conf("opstk-pxe.conf", "OLD\n") is True
-
-    def boom(src, dst):
-        raise OSError(28, "No space left on device")
-
-    real = _os.replace
-    _os.replace = boom
-    try:
-        assert dhcp.write_conf("opstk-pxe.conf", "NEW-and-much-longer\n") is False
-    finally:
-        _os.replace = real
-    assert (tmp_path / "opstk-pxe.conf").read_text(encoding="utf-8") == "OLD\n"
-    # 不许留下临时文件垃圾（下一个部署/读方可能把它当成有效配置）
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["opstk-pxe.conf"]
+    ino = os.stat(str(tmp_path / "opstk-pxe.conf")).st_ino
+    content = "interface=ens19\ndhcp-range=192.168.199.100,192.168.199.200,12h\n"
+    assert dhcp.write_conf("opstk-pxe.conf", content) is True
+    p = tmp_path / "opstk-pxe.conf"
+    if os.name != "nt":
+        assert p.stat().st_ino == ino, "inode 变了 = 用了 rename = 宿主机可能收不到事件"
+    assert dhcp.conf_sha(content) == hashlib.sha256(p.read_bytes()).hexdigest()
+    # 不许留下临时文件垃圾
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["opstk-pxe.conf"]
 
 
 def test_wait_rejects_stale_marker_even_with_matching_sha(state_file):
@@ -284,27 +281,42 @@ def test_preflight_unreadable_link_is_not_reported_as_missing(preflight_env):
 
 
 def test_preflight_probe_succeeds_on_fresh_state(preflight_env):
-    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    # 用应用侧要求的最低版本写标记（而不是写死数字）：抬版本时这些用例不该集体变红
+    preflight_env["link"].write_text(
+        "RUN %d 1699999999\n" % dhcp.HOST_RELOAD_MIN_SCRIPT_VERSION, encoding="utf-8")
     _write_state_later(preflight_env["state"])
     res = _preflight(preflight_env)
     assert res["ok"] is True and res["probed"] is True and res["reason"] == ""
 
 
 def test_preflight_probe_does_not_change_conf_content(preflight_env):
-    """活体探测只能碰 mtime，绝不能动内容（那会被宿主机当成一次真部署）。"""
-    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    """探针只能"写回同样的字节"，绝不能改内容（那会被宿主机当成一次真部署）。
+
+    而且**必须真写**：真机实测 systemd 的 PathChanged/PathModified 不含 IN_ATTRIB，
+    `touch`/`os.utime` 根本不触发 path 单元 → 每个部署都会"预检超时"。
+    """
+    # 用应用侧要求的最低版本写标记（而不是写死数字）：抬版本时这些用例不该集体变红
+    preflight_env["link"].write_text(
+        "RUN %d 1699999999\n" % dhcp.HOST_RELOAD_MIN_SCRIPT_VERSION, encoding="utf-8")
     conf = preflight_env["conf"]
     conf.write_text("interface=ens19\ndhcp-range=192.168.199.100,192.168.199.200,12h\n",
                     encoding="utf-8")
     before = conf.read_bytes()
+    inode_before = os.stat(str(conf)).st_ino
     _write_state_later(preflight_env["state"])
     assert _preflight(preflight_env, make_conf=False)["ok"] is True
     assert conf.read_bytes() == before
+    # 探针必须是**原地写**（inode 不变）—— rename 替换会让宿主机偶发收不到事件
+    if os.name != "nt":
+        assert os.stat(str(conf)).st_ino == inode_before
+
 
 
 def test_preflight_probe_rejects_stale_state(preflight_env):
     """宿主机留下的**旧**标记不算"有响应"（否则单元早死了也照样过）。"""
-    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    # 用应用侧要求的最低版本写标记（而不是写死数字）：抬版本时这些用例不该集体变红
+    preflight_env["link"].write_text(
+        "RUN %d 1699999999\n" % dhcp.HOST_RELOAD_MIN_SCRIPT_VERSION, encoding="utf-8")
     preflight_env["state"].write_text("OK abc 1000\n", encoding="utf-8")
     res = _preflight(preflight_env)
     assert res["ok"] is False and res["reason"] == "no-response"
@@ -319,7 +331,9 @@ def test_preflight_accepts_a_fresh_fail_as_liveness(preflight_env):
     连"重新部署一次即可自愈"这条路都被堵死。
     """
     import time as _time
-    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    # 用应用侧要求的最低版本写标记（而不是写死数字）：抬版本时这些用例不该集体变红
+    preflight_env["link"].write_text(
+        "RUN %d 1699999999\n" % dhcp.HOST_RELOAD_MIN_SCRIPT_VERSION, encoding="utf-8")
     preflight_env["conf"].write_text("interface=ens19\n", encoding="utf-8")
     # 模拟"宿主机脚本跑到 --test 就失败"：只有 FAIL，没有 OK
     _write_state_later(preflight_env["state"], delay=0.15,
@@ -330,14 +344,18 @@ def test_preflight_accepts_a_fresh_fail_as_liveness(preflight_env):
 
 
 def test_preflight_probe_timeout_is_a_failure(preflight_env):
-    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    # 用应用侧要求的最低版本写标记（而不是写死数字）：抬版本时这些用例不该集体变红
+    preflight_env["link"].write_text(
+        "RUN %d 1699999999\n" % dhcp.HOST_RELOAD_MIN_SCRIPT_VERSION, encoding="utf-8")
     res = _preflight(preflight_env)
     assert res["ok"] is False and res["reason"] == "no-response"
 
 
 def test_preflight_skips_probe_when_conf_missing(preflight_env):
     """还没部署过 → 没有可碰的监视目标 → 只做静态判断（不为了探测造假配置）。"""
-    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    # 用应用侧要求的最低版本写标记（而不是写死数字）：抬版本时这些用例不该集体变红
+    preflight_env["link"].write_text(
+        "RUN %d 1699999999\n" % dhcp.HOST_RELOAD_MIN_SCRIPT_VERSION, encoding="utf-8")
     res = _preflight(preflight_env, make_conf=False)
     assert res["ok"] is True and res["probed"] is False
     assert res["reason"] == "no-target-to-probe"
@@ -367,6 +385,51 @@ def test_missing_or_unreadable_state_never_allows_rollback():
     assert dhcp.reload_failure_is_pre_restart({"state": "UNREADABLE", "reason": ""}) is False
     assert dhcp.reload_failure_is_pre_restart(
         {"state": "OK", "sha": "x", "ts": "1"}) is False
+
+
+def test_retrying_wait_nudges_when_the_edge_was_swallowed(state_file, tmp_path):
+    """边沿事件被合并时必须**补触发**（真机实测：部署偶发卡在等重载直到超时）。
+
+    模拟：第一次等待超时（宿主机什么都没写），"补触发"动作把状态写出来，
+    第二次等待就成功 —— 并要求补触发恰好发生一次。
+    """
+    conf = tmp_path / "opstk-pxe.conf"
+    conf.write_text("interface=ens19\n", encoding="utf-8")
+    sha = dhcp.conf_sha("whatever")
+    nudges = []
+
+    def nudge():
+        nudges.append(1)
+        state_file.write_text("OK %s 9999999999\n" % sha, encoding="utf-8")
+        return True
+
+    got, n = dhcp.wait_host_reload_retrying(sha, str(conf), timeout=3.0,
+                                            not_before=1, nudge=nudge)
+    assert got["ok"] is True
+    assert n == 1 and len(nudges) == 1
+    # 补触发过程不能改动配置内容
+    assert conf.read_text(encoding="utf-8") == "interface=ens19\n"
+
+
+def test_retrying_wait_gives_up_and_reports_last_state(state_file, tmp_path):
+    conf = tmp_path / "opstk-pxe.conf"
+    conf.write_text("interface=ens19\n", encoding="utf-8")
+    got, n = dhcp.wait_host_reload_retrying("nope", str(conf), timeout=2.0, not_before=1,
+                                            nudge=lambda: True)
+    assert got["ok"] is False
+    assert n >= 1                      # 至少补触发过一次才算尽力
+
+
+def test_rewrite_conf_unchanged_keeps_bytes_and_inode(tmp_path):
+    p = tmp_path / "opstk-pxe.conf"
+    p.write_text("interface=ens19\nbind-interfaces\n", encoding="utf-8")
+    before = p.read_bytes()
+    ino = p.stat().st_ino
+    ok, err = dhcp.rewrite_conf_unchanged(str(p))
+    assert ok is True and err == ""
+    assert p.read_bytes() == before
+    if os.name != "nt":
+        assert p.stat().st_ino == ino, "必须原地写（rename 会让宿主机收不到事件）"
 
 
 def test_script_version_contract_is_documented():

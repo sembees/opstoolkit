@@ -316,15 +316,22 @@ def _mode_label(mode) -> str:
 
 def _detect_iface():
     """检测物理网络接口名，容器友好，不依赖 ip 命令。
-    优先 ens/eth/enp 开头的物理网卡，跳过 lo/docker/veth/br-。"""
+    优先 ens/eth/enp 开头的物理网卡，跳过 lo/docker/veth/br-。
+
+    **不要拿它去填 dnsmasq 的 interface=**（R4 / RUNBOOK §5.50）：容器里
+    os.listdir 的顺序不保证，实测它返回的是 **ens18 —— 承载企业网 10.128.118.113
+    的那张卡**。用猜出来的网卡配 standalone 的 dhcp-range，等于在骨干网段上开
+    DHCP 池、抢答企业 DHCP。现在只在"模板里明确要求自动探测"时才用，
+    并且 `dhcp.check_dhcp_conf_safety` 会在落盘前把这类配置拦下来。
+    """
     import os
     try:
         preferred = []
         fallback = []
-        for name in os.listdir("/sys/class/net"):
+        for name in sorted(os.listdir("/sys/class/net")):
             if name == "lo" or name.startswith(("docker", "veth", "br-", "virbr")):
                 continue
-            # 仅选择已 UP 且有 IP 的接口
+            # 仅选择已 UP 的接口
             try:
                 if not open(f"/sys/class/net/{name}/operstate").read().strip() == "up":
                     continue
@@ -343,6 +350,22 @@ def _detect_iface():
     return "eth0"
 
 
+def _iface_or_placeholder(p) -> str:
+    """配置里该写哪个网卡：**只认模板里显式填的**，没填就写占位值。
+
+    绝不替运维猜网卡：猜错的两个后果都很重 ——
+      · 猜成骨干网卡 ⇒ 在骨干网段开 DHCP 池（抢答企业 DHCP）；
+      · 猜成不存在的网卡 ⇒ dnsmasq 配了 bind-interfaces 会**起不来**，
+        而它同时服务着 PXE，整个装机网段的 DHCP/TFTP 一起没了。
+    占位值会在**部署**时被 dhcp.check_dhcp_conf_safety 拒绝（下载 ZIP 不受影响，
+    但 README 会提醒必须改）。
+    """
+    v = (p.dhcp_iface or "").strip()
+    if v and v.lower() not in ("auto", "detect"):
+        return v
+    return "eth0"
+
+
 def dnsmasq(p, devices) -> str:
     """按厂商下发 DHCP option，把每台设备指向自己的配置文件。
 
@@ -351,17 +374,37 @@ def dnsmasq(p, devices) -> str:
     """
     vendor = _norm_vendor(p.vendor)
     srv = p.server_ip or "10.0.0.250"
+    # 网卡只用模板里**显式填的**：没填就是占位 eth0（部署时会被红线检查拒绝，
+    # 下载 ZIP 仍然可用）。绝不在这里猜 —— 猜错就是骨干网上开 DHCP 池，
+    # 或者让 dnsmasq 因为 bind-interfaces + 不存在的网卡而直接起不来（连带打死 PXE）。
+    iface = _iface_or_placeholder(p)
     L = [
         "# dnsmasq ZTP 投递配置 (OpsToolkit 生成)",
         f"# 厂商: {vendor}  部署模式: {_mode_label(p.deploy_mode)}",
-        "port=0",
-        f"interface={_detect_iface() if p.dhcp_iface == 'eth0' else p.dhcp_iface}",
+        # **绝不写 `port=0`**（真机实测，RUNBOOK §5.50）：dnsmasq 的 `port` 是
+        # **不可重复**的关键字 —— /etc/dnsmasq.d 下只要有两个文件都写了它，
+        # dnsmasq 就会以 `illegal repeated keyword` 拒绝加载**整份**配置，
+        # 也就是 `dnsmasq --test` 失败 ⇒ 守护进程起不来（开机也起不来）⇒
+        # 整个装机网段没有 DHCP/TFTP。PXE 的配置里已经有 `port=0`，
+        # 关 DNS 属于**守护进程级**设置，不属于这份"投递配置"。
+        # 只跑 ZTP、不跑 PXE 的宿主机若也想关掉 DNS，请在主配置里加一次 `port=0`。
+        f"interface={iface}",
         "bind-interfaces",
         "",
     ]
+    if iface == "eth0":
+        L += [
+            "# ⚠⚠ 未指定 DHCP 网卡：上面的 interface=eth0 是**占位值**，",
+            "#    本文件不能直接部署（部署接口会拒绝，见 dhcp.check_dhcp_conf_safety）。",
+            "#    请在模板里把「DHCP网卡」填成宿主机上真实存在、且**不承载默认路由**的",
+            "#    那张卡（例如专用于开局/装机的 ens19），再重新生成。",
+            "#    自动探测不可靠：容器里实测会探测到承载企业网的那张卡，",
+            "#    而 standalone 模式会在这张卡上开 DHCP 池、抢答企业 DHCP。",
+            "",
+        ]
     if p.deploy_mode == "relay":
         L.append("# 中继模式: 不开 DHCP, 仅 TFTP; 交换机 ip-helper 指向本机")
-        L.append(f"no-dhcp-interface={_detect_iface() if p.dhcp_iface == 'eth0' else p.dhcp_iface}")
+        L.append(f"no-dhcp-interface={iface}")
     elif p.deploy_mode == "proxy":
         L.append("# ProxyDHCP: 不分配 IP, 仅下发 PXE/ZTP 引导, 与现有 DHCP 并存")
         L.append(f"dhcp-range={srv},proxy")
@@ -455,15 +498,29 @@ def intermediate(p, devices):
 
 def _readme(p, devices) -> str:
     v = _norm_vendor(p.vendor)
+    iface = _iface_or_placeholder(p)
+    warn = ""
+    if iface == "eth0":
+        warn = ("!! 警告: 模板里没有填「DHCP网卡」, 生成的 dnsmasq 配置里是占位值 "
+                "interface=eth0。\n"
+                "   这份配置**不能**直接部署: dnsmasq 配了 bind-interfaces, 网卡不存在会\n"
+                "   直接起不来(而它同时服务着 PXE); 若填错成骨干网卡, 则会在骨干网段上\n"
+                "   开 DHCP 池、抢答企业 DHCP。请填好网卡后重新生成。\n\n")
     return (
         "OpsToolkit ZTP 开局部署说明\n"
         "==========================\n\n"
         f"厂商: {v}\n"
         f"ZTP 服务器: {p.server_ip}\n"
-        f"投递模式: {p.deploy_mode}\n\n"
+        f"投递模式: {p.deploy_mode}\n"
+        f"DHCP 网卡: {iface}\n"
+        f"DHCP 地址池: {p.dhcp_start} - {p.dhcp_end}\n\n"
+        + warn +
         "步骤:\n"
-        "1. 安装 dnsmasq, 用生成的 dnsmasq.conf 替换 /etc/dnsmasq.conf\n"
-        f"   systemctl restart dnsmasq\n\n"
+        "1. 安装 dnsmasq, 把生成的 dnsmasq.conf 放进 /etc/dnsmasq.d/ (例如\n"
+        "   /etc/dnsmasq.d/opstk-ztp.conf), 然后 systemctl restart dnsmasq\n"
+        "   注意: 本文件**故意不写** port=0 —— dnsmasq 的 port 关键字不可重复,\n"
+        "   配置目录里两份文件都写它会让 dnsmasq 直接起不来。若这台机器只跑 ZTP,\n"
+        "   请在主配置里自己加一次 port=0 (缺省时 dnsmasq 会同时做 DNS 转发, 无害)。\n\n"
         "2. 建立 TFTP 目录结构:\n"
         f"   {p.tftp_root}/ztp/  放入各设备 .cfg 与 default.cfg\n\n"
         f"3. (可选) HTTP 服务器镜像 {p.http_root} 提供大文件下载\n\n"

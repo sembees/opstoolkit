@@ -25,6 +25,12 @@ install -m 0644 "$HERE/opstk-dnsmasq-reload.service" "$UNIT_DIR/opstk-dnsmasq-re
 # 否则应用侧读不到标记，会把"重载成功"误判成失败。
 mkdir -p /srv/opstk/state
 
+# 两个被监视的配置文件**必须先存在**：systemd 的 path 单元对"还不存在的路径"
+# 监视的是父目录，而 PXE/ZTP 的第一次部署正是"创建这个文件"的时刻 ——
+# 让路径从一开始就存在，触发才可靠（空配置对 dnsmasq 完全无害，--test 也过）。
+touch /etc/dnsmasq.d/opstk-pxe.conf /etc/dnsmasq.d/opstk-ztp.conf
+chmod 0644 /etc/dnsmasq.d/opstk-pxe.conf /etc/dnsmasq.d/opstk-ztp.conf
+
 systemctl daemon-reload
 systemctl enable --now opstk-dnsmasq-reload.path
 
