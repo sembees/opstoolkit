@@ -45,6 +45,15 @@
           </ul>
         </el-alert>
 
+        <!-- 跨模块一致性提示：静态 IP 落在 PXE/ZTP 的 DHCP 池内（可能两台机器同 IP）。
+             只提示不拦 —— 静态 IP 与 DHCP 池在不同网段/不同现场时是正常用法。 -->
+        <el-alert v-if="crossWarnings.length" type="warning" :closable="false" show-icon style="margin-bottom:8px">
+          <template #title>跨模块提示：静态地址与 DHCP 地址池重叠（{{ crossWarnings.length }} 项）</template>
+          <ul class="err-list">
+            <li v-for="(w, i) in crossWarnings" :key="i">{{ w }}</li>
+          </ul>
+        </el-alert>
+
         <el-table :data="items" size="small" stripe border max-height="380">
           <el-table-column label="#" width="36">
             <template #default="{ $index }">{{ $index + 1 }}</template>
@@ -183,6 +192,8 @@ const generating = ref(false)
 const metaLoaded = ref(false)
 const metaError = ref("")
 const serverError = ref("")
+// 跨模块一致性提示（H）：静态 IP 落在 PXE/ZTP 的 DHCP 池内 → 可能两台机器同 IP
+const crossWarnings = ref([])
 
 let previewTimer = null
 function preview() {
@@ -381,6 +392,7 @@ function invalidatePreview() {
   previewScript.value = ""
   previewFilename.value = ""
   previewKey.value = ""
+  crossWarnings.value = []      // 预览失效时提示也得跟着失效，不能留着上一轮的告警
 }
 
 // 把 FastAPI 422 的 detail（list[{loc,msg}] 或 str）拍平成一行，保留字段路径
@@ -422,6 +434,9 @@ async function doGenerate() {
     previewScript.value = resp.script
     previewFilename.value = resp.filename
     previewKey.value = key
+    // H：静态 IP 落在 PXE/ZTP 的 DHCP 池内 ⇒ 可能和装机中的机器撞成同一个地址。
+    // 只是提示（不同网段/不同现场时是正常用法），所以不拦、不清空预览。
+    crossWarnings.value = resp.warnings || []
   } catch (e) {
     // 高1：失败必须让运维看见，并且不能留着上一次的预览假装成功
     invalidatePreview()

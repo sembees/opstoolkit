@@ -32,12 +32,18 @@ from app.it.netconfig.generator import generate_netconfig
 
 
 def _api_client():
-    """只挂 netconfig 路由的最小 app：覆盖掉 JWT 依赖，不触碰 DB/lifespan。"""
+    """只挂 netconfig 路由的最小 app：覆盖掉 JWT 依赖，不触碰 DB/lifespan。
+
+    `/generate` 现在还依赖 DB（用来做 H 的"静态 IP 落在 DHCP 池内"提示），
+    这里把 `get_db` 也覆盖成 None —— 提示性检查对 None 是容忍的（返回空 warnings），
+    所以既有用例不需要真数据库。
+    """
     app = FastAPI()
     app.include_router(netconfig_api.router, prefix="/api/it/netconfig")
     app.dependency_overrides[get_current_user] = lambda: {
         "id": "t", "username": "t", "display_name": "t", "role": "admin",
     }
+    app.dependency_overrides[netconfig_api.get_db] = lambda: None
     return TestClient(app)
 
 
