@@ -473,5 +473,83 @@ class ZtpNtpOptionalTest(unittest.TestCase):
         self.assertEqual(schemas.ZtpTemplateIn(name="t").ntp_server, "")
 
 
+class ZtpZeroTouchTest(unittest.TestCase):
+    """**ZTP 免登记也能开局**（RUNBOOK §5.54）。
+
+    实测暴露的两个缺陷：
+      1. `generate_all()` 里 `default.cfg` 写在 `if devices:` 里 —— 一台设备都没登记时
+         **根本不生成这个文件**，而 dnsmasq 的全局 option 67 一直指向 `ztp/default.cfg`
+         ⇒ 设备去取一个不存在的文件，ZTP 完全不可用（部署却报成功）。
+      2. 那份 `default.cfg` 还把管理 IP 写死成 `p.dhcp_start` ⇒ 两台以上未登记设备
+         **配成同一个地址**（还要和地址池里的租约撞车）。
+    正确做法：default.cfg **永远生成**，管理口**走 DHCP 取址**；要"每台各自的管理 IP"
+    才需要按 MAC 登记（DHCP 是按 MAC 匹配的）。
+    """
+
+    def _gen(self, devices, vendor="h3c", **kw):
+        gen = importlib.import_module("app.ct.ztp.generator")
+        kw.setdefault("vendor", vendor)
+        kw.setdefault("admin_password", "Test@123")
+        kw.setdefault("dhcp_iface", "ens19")
+        kw.setdefault("server_ip", "192.168.199.1")
+        kw.setdefault("dhcp_start", "192.168.199.210")
+        kw.setdefault("dhcp_end", "192.168.199.240")
+        kw.setdefault("mgmt_gateway", "192.168.199.1")
+        p = gen.ZtpProfile(**kw)
+        return gen, gen.generate_all(p, devices)
+
+    def test_default_cfg_always_generated_even_with_zero_devices(self):
+        gen, files = self._gen([])
+        self.assertIn("ztp/default.cfg", files)
+        conf = files["dnsmasq.conf"]
+        # option 67 指向它，文件就必须存在（这就是原来那个缺陷）
+        self.assertIn('option:bootfile-name,"ztp/default.cfg"', conf)
+
+    def test_zero_touch_default_uses_dhcp_not_a_shared_static_ip(self):
+        gen, files = self._gen([])
+        cfg = files["ztp/default.cfg"]
+        self.assertIn("ip address dhcp-alloc", cfg)
+        # 绝不能把地址池的起点写死成管理 IP（多台设备会撞同一个地址）
+        self.assertNotIn("192.168.199.210", cfg)
+        self.assertNotIn("10.0.0.1", cfg)
+        self.assertIn("mgmt=dhcp", cfg)
+        # DHCP 取址时不该再写静态默认路由（路由由 DHCP 给）
+        self.assertNotIn("ip route-static", cfg)
+
+    def test_each_vendor_supports_dhcp_mgmt(self):
+        expect = {"h3c": "ip address dhcp-alloc", "huawei": "ip address dhcp-alloc",
+                  "cisco": "ip address dhcp"}
+        for vendor, line in expect.items():
+            gen, files = self._gen([], vendor=vendor)
+            self.assertIn(line, files["ztp/default.cfg"],
+                          "%s 的免登记默认配置没有走 DHCP" % vendor)
+
+    def test_registered_device_without_mgmt_ip_also_uses_dhcp(self):
+        """先按 MAC 登记、管理 IP 后分配 —— 很常见的顺序，以前会被写死成 10.0.0.1。"""
+        g = importlib.import_module("app.ct.ztp.generator")
+        _, files = self._gen([g.ZtpDevice(hostname="SW1", mac="00:11:22:33:44:55")])
+        cfg = files["ztp/SW1.cfg"]
+        self.assertIn("ip address dhcp-alloc", cfg)
+        self.assertNotIn("10.0.0.1", cfg)
+        self.assertIn('dhcp-host=00:11:22:33:44:55', files["dnsmasq.conf"])
+
+    def test_registered_device_with_mgmt_ip_keeps_static(self):
+        g = importlib.import_module("app.ct.ztp.generator")
+        _, files = self._gen([g.ZtpDevice(hostname="SW1", mac="00:11:22:33:44:55",
+                                          mgmt_ip="192.168.199.30")])
+        cfg = files["ztp/SW1.cfg"]
+        self.assertIn("ip address 192.168.199.30 255.255.255.0", cfg)
+        self.assertIn("ip route-static 0.0.0.0 0 192.168.199.1", cfg)
+        self.assertNotIn("dhcp-alloc", cfg)
+        self.assertIn("mgmt=192.168.199.30/255.255.255.0", cfg)
+
+    def test_readme_documents_both_delivery_modes(self):
+        gen, files = self._gen([])
+        r = files["README.txt"]
+        self.assertIn("免登记", r)
+        self.assertIn("按设备差异化", r)
+        self.assertIn("DHCP 是按 **MAC** 匹配的", r)
+
+
 if __name__ == "__main__":
     unittest.main()

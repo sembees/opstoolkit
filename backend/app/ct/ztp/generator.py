@@ -51,6 +51,27 @@ class ZtpDevice:
     serial: str = ""            # 用于文件命名 (可选)
     mgmt_ip: str = ""           # 该设备管理 IP (可选覆盖)
 
+    @property
+    def mgmt_via_dhcp(self) -> bool:
+        """没有指定管理 IP ⇒ 管理口用 **DHCP 取址**，而不是写死一个假地址。
+
+        这条是"ZTP 免登记也能开局"的关键（RUNBOOK §5.54）：
+          · 不登记设备时，所有设备都拿 `default.cfg`；如果那份配置里写死一个管理 IP，
+            两台以上设备就会**同一个 IP 冲突**；
+          · 登记了设备但还不知道它的管理 IP（很常见的顺序：先按 MAC 登记、IP 后分配）
+            以前会被写死成 `10.0.0.1` —— 一个谁都不在的网段。
+        两者现在都走 DHCP 取址：设备开局后从 ZTP 的地址池拿到地址，
+        运维按地址/MAC 找到它，再决定要不要下发各自的静态配置。
+        """
+        return not (self.mgmt_ip or "").strip()
+
+
+def _mgmt_label(dev, static_ip, p) -> str:
+    """头注释里怎么描述管理地址：DHCP 取址时写 dhcp，别写一个根本没配上去的假 IP。"""
+    if dev.mgmt_via_dhcp:
+        return "dhcp"
+    return "%s/%s" % (static_ip, p.mgmt_netmask)
+
 
 def _ntp(p) -> str:
     """模板里填的 NTP 服务器（没填就是空串）。
@@ -127,7 +148,7 @@ def h3c_config(dev, p) -> str:
     pw = _require_ztp_password(p)
     L = [
         "# H3C Comware 7 开局配置 (OpsToolkit 生成)",
-        f"# host={dev.hostname} mgmt={ip}/{p.mgmt_netmask}",
+        f"# host={dev.hostname} mgmt=" + _mgmt_label(dev, ip, p),
         "sysname " + dev.hostname,
         "#",
         "irf mac-address persistent always",
@@ -135,11 +156,19 @@ def h3c_config(dev, p) -> str:
         "#",
     ]
     L += _vlans_block_h3c(p)
-    L += [
-        f"interface {p.mgmt_interface}",
-        f" ip address {ip} {p.mgmt_netmask}",
-        "#",
-    ]
+    if dev.mgmt_via_dhcp:
+        L += [
+            "# 管理口用 DHCP 取址（没有指定管理 IP，写死会与其它设备/地址池冲突）",
+            f"interface {p.mgmt_interface}",
+            " ip address dhcp-alloc",
+            "#",
+        ]
+    else:
+        L += [
+            f"interface {p.mgmt_interface}",
+            f" ip address {ip} {p.mgmt_netmask}",
+            "#",
+        ]
     if p.access_ports:
         L.append("# 接入端口划入管理 VLAN")
         for port in p.access_ports:
@@ -150,7 +179,9 @@ def h3c_config(dev, p) -> str:
               f" port access vlan {p.mgmt_vlan}", "#"]
     dns = " ".join(p.dns_servers) if p.dns_servers else ""
     L += [
-        f"ip route-static 0.0.0.0 0 {p.mgmt_gateway}",
+        # DHCP 取址时默认路由由 DHCP 给（ZTP 的 dnsmasq 配了 option:router），
+        # 再写一条静态默认路由只会在"网关字段填错"时把流量打进黑洞
+        f"ip route-static 0.0.0.0 0 {p.mgmt_gateway}" if not dev.mgmt_via_dhcp else "",
         "#",
         f"dns server {p.dns_servers[0]}" if p.dns_servers else "",
         "#",
@@ -190,16 +221,24 @@ def huawei_config(dev, p) -> str:
     vlanif = p.mgmt_interface.replace("Vlan-interface", "Vlanif")
     L = [
         "# Huawei VRP 开局配置 (OpsToolkit 生成)",
-        f"# host={dev.hostname} mgmt={ip}/{p.mgmt_netmask}",
+        f"# host={dev.hostname} mgmt=" + _mgmt_label(dev, ip, p),
         "sysname " + dev.hostname,
         "#",
     ]
     L += _vlans_block_huawei(p)
-    L += [
-        f"interface {vlanif}",
-        f" ip address {ip} {p.mgmt_netmask}",
-        "#",
-    ]
+    if dev.mgmt_via_dhcp:
+        L += [
+            "# 管理口用 DHCP 取址（没有指定管理 IP）",
+            f"interface {vlanif}",
+            " ip address dhcp-alloc",
+            "#",
+        ]
+    else:
+        L += [
+            f"interface {vlanif}",
+            f" ip address {ip} {p.mgmt_netmask}",
+            "#",
+        ]
     if p.access_ports:
         L.append("# 接入端口划入管理 VLAN")
         for port in p.access_ports:
@@ -209,7 +248,8 @@ def huawei_config(dev, p) -> str:
         L += [f"interface {p.uplink_port}", " port link-type access",
               f" port default vlan {p.mgmt_vlan}", "#"]
     L += [
-        f"ip route-static 0.0.0.0 0.0.0.0 {p.mgmt_gateway}",
+        # DHCP 取址时默认路由由 DHCP 给，不写静态默认路由（理由同 h3c 分支）
+        f"ip route-static 0.0.0.0 0.0.0.0 {p.mgmt_gateway}" if not dev.mgmt_via_dhcp else "",
         "#",
         "# ---- AAA 本地账号 ----",
         "aaa",
@@ -252,7 +292,7 @@ def cisco_config(dev, p) -> str:
     vlanif = p.mgmt_interface.replace("Vlan-interface", "Vlan")
     L = [
         "! Cisco IOS-XE 开局配置 (OpsToolkit 生成)",
-        f"! host={dev.hostname} mgmt={ip}/{p.mgmt_netmask}",
+        f"! host={dev.hostname} mgmt=" + _mgmt_label(dev, ip, p),
         "hostname " + dev.hostname,
         "!",
         "no ip domain-lookup",
@@ -260,12 +300,21 @@ def cisco_config(dev, p) -> str:
     if p.domain_name:
         L += [f"ip domain-name {p.domain_name}", "!"]
     L += _vlans_block_cisco(p)
-    L += [
-        f"interface {vlanif}",
-        f" ip address {ip} {p.mgmt_netmask}",
-        " no shutdown",
-        "!",
-    ]
+    if dev.mgmt_via_dhcp:
+        L += [
+            "! 管理口用 DHCP 取址（没有指定管理 IP）",
+            f"interface {vlanif}",
+            " ip address dhcp",
+            " no shutdown",
+            "!",
+        ]
+    else:
+        L += [
+            f"interface {vlanif}",
+            f" ip address {ip} {p.mgmt_netmask}",
+            " no shutdown",
+            "!",
+        ]
     if p.access_ports:
         L.append("! 接入端口划入管理 VLAN")
         for port in p.access_ports:
@@ -275,7 +324,8 @@ def cisco_config(dev, p) -> str:
         L += [f"interface {p.uplink_port}", " switchport mode access",
               f" switchport access vlan {p.mgmt_vlan}", " no shutdown", "!"]
     L += [
-        f"ip route 0.0.0.0 0.0.0.0 {p.mgmt_gateway}",
+        # DHCP 取址时默认路由由 DHCP 给，不写静态默认路由（理由同 h3c 分支）
+        f"ip route 0.0.0.0 0.0.0.0 {p.mgmt_gateway}" if not dev.mgmt_via_dhcp else "",
         "!",
         "no service password-encryption",
         f"enable secret {enable}",
@@ -538,6 +588,14 @@ def _readme(p, devices) -> str:
         f"   {p.tftp_root}/ztp/  放入各设备 .cfg 与 default.cfg\n\n"
         f"3. (可选) HTTP 服务器镜像 {p.http_root} 提供大文件下载\n\n"
         "4. 新设备空配置上电, 接入开局网络, 自动获取配置\n\n"
+        "下发方式(两种, 可同时用):\n"
+        "  · **免登记**: 所有设备都拿 ztp/default.cfg — 一份基础配置; 其中管理口用\n"
+        "    DHCP 取址(不写死 IP, 否则多台设备会撞同一个地址), 开局后从地址池\n"
+        "    " + p.dhcp_start + "-" + p.dhcp_end + " 拿到地址(在 DHCP 服务器上按 MAC 认领)。\n"
+        "  · **按设备差异化**: 在模板里登记设备(MAC + 主机名/序列号)后,\n"
+        "    每台设备拿到自己的 ztp/<序列号或主机名>.cfg(含各自的管理 IP/主机名)。\n"
+        "    DHCP 是按 **MAC** 匹配的 ⇒ 只填序列号、不填 MAC 的设备仍会拿 default.cfg。\n\n"
+        f"本批次登记设备: {len(devices)} 台\n"
         "NTP 说明:\n"
         "  NTP 服务器**每个现场都不一样**, 所以这里不代填默认值:\n"
         "  模板里留空 = 设备配置里不出现 NTP 行(设备时间不会同步);\n"
@@ -546,7 +604,13 @@ def _readme(p, devices) -> str:
         "  H3C   : auto-config, DHCP option 66(TFTP) + 67(文件名)\n"
         "  华为  : ZTP, DHCP option 66(TFTP) + 67(中间文件) + 中间文件描述下载项\n"
         "  思科  : IOS-XE ZTP, DHCP option 150(TFTP) + 67(脚本/配置)\n\n"
-        f"本批次设备: {len(devices)} 台\n"
+        "!! 安全提醒:\n"
+        "   生成的设备配置里含**管理员口令**, 而 ztp/ 下的文件是通过 TFTP/HTTP\n"
+        "   **无认证**提供给设备的 ⇒ 开局网段上的任何主机都能读到它。\n"
+        "   请: (1) 把开局网段与生产/办公网段物理或 VLAN 隔离;\n"
+        "       (2) 按现场修改模板里的设备管理员口令, 不要用出厂默认值;\n"
+        "       (3) 开局完成后及时删掉 TFTP/HTTP 上的配置(或撤掉 ZTP 投递配置)。\n"
+        f"本批次登记设备: {len(devices)} 台\n"
     )
 
 
@@ -558,9 +622,15 @@ def generate_all(p, devices=None):
     for d in devices:
         stem = _file_stem(d)
         files[f"ztp/{stem}.{_ext(vendor)}"] = gen(d, p)
-    # 未登记设备的兜底配置
-    if devices:
-        files["ztp/default.cfg"] = gen(ZtpDevice(hostname="default", mgmt_ip=p.dhcp_start), p)
+    # 未登记设备的兜底配置：**无论有没有登记设备都必须生成**。
+    # 为什么（RUNBOOK §5.54）：dnsmasq 的全局 option 67 一直是 `ztp/default.cfg`，
+    # 而这里原来写成 `if devices:` —— 一个设备都没登记时**根本不生成这个文件**，
+    # 于是设备按 option 67 去取一个不存在的文件，ZTP 完全不可用
+    # （表现：部署产物只有 ztp_note.txt + README，看起来"少东西"但接口报成功）。
+    # 另外这份配置**不再写死管理 IP**：以前填的是 `p.dhcp_start`，
+    # 两台以上未登记设备会配成同一个地址（还会和地址池里的租约撞车）；
+    # 现在管理口走 DHCP 取址（ZtpDevice.mgmt_via_dhcp）。
+    files["ztp/default.cfg"] = gen(ZtpDevice(hostname="default"), p)
     files["dnsmasq.conf"] = dnsmasq(p, devices)
     inter, inter_name = intermediate(p, devices)
     files[f"ztp/{inter_name}"] = inter

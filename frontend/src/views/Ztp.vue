@@ -61,10 +61,21 @@
     <el-card shadow="never">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center">
-          <span style="font-weight: 600"><el-icon><Monitor /></el-icon> ZTP 设备清单</span>
+          <span style="font-weight: 600"><el-icon><Monitor /></el-icon> ZTP 设备清单（可选）</span>
           <el-button type="primary" size="small" @click="deviceDialog = true"><el-icon><Plus /></el-icon> 添加设备</el-button>
         </div>
       </template>
+      <!-- R4/§5.54：登记设备是**可选**的，必须写清楚 —— 否则会被当成"必须先登记 MAC 才能开局" -->
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px">
+        <template #title>不登记设备也能开局</template>
+        <div style="font-size:12px;line-height:1.6">
+          没登记的设备统一拿 <code>ztp/default.cfg</code>（管理口用 DHCP 取址，不会写死 IP，
+          否则多台设备会撞同一个地址）；开局后到 DHCP 服务器上按 MAC 认领它们各自的地址。
+          <br />
+          想给**每台不同的**主机名 / 管理 IP，就在这里按 <b>MAC</b> 登记（DHCP 是按 MAC 匹配的；
+          只填序列号不填 MAC 的设备仍会拿 default.cfg）。管理 IP 留空 = 该设备也用 DHCP 取址。
+        </div>
+      </el-alert>
       <el-table :data="devices" stripe size="small">
         <el-table-column prop="hostname" label="主机名" min-width="120" />
         <el-table-column prop="mac" label="MAC 地址" width="160" />
