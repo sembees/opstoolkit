@@ -660,6 +660,23 @@ def _disk_plan(c, dc):
             "wwid": _safe_matcher_value(d["wwid"], "wwid", k) if d.get("wwid") else "",
         })
 
+    # ── 目标盘与数据盘的"身份重叠"校验（生产安全，§5.47）────────────────────
+    # 同一块盘不能**既当系统盘、又被声明为要保护的数据盘** —— 那不是配置笔误这么简单：
+    # 目标盘会被 clearpart/wipe 清掉，等于"你让我别碰的那块盘，正是你让我装系统的那块"。
+    # 为什么不能只比名字：数据盘可以只给 size/serial/wwid（§5.42 之后这是推荐写法），
+    # 那时名字是空的，纯名字比较恒不成立 = 这道防线形同虚设。
+    # 所以凡是**两边都有、语义相同**的身份都比一遍：name 与 serial。
+    _t_ident = {"name": name, "serial": serial}
+    for k, d in enumerate(data):
+        for key in ("name", "serial"):
+            tv = (_t_ident.get(key) or "").strip().lower()
+            dv = str(d.get(key) or "").strip().lower()
+            if tv and dv and tv == dv:
+                raise ValueError(
+                    "disk_config：目标盘与 data_disks[%d] 的 %s 完全相同（%r）—— "
+                    "同一块盘不能既是系统盘、又是声明为要保护的数据盘；"
+                    "目标盘会被清空分区，这等于把要保护的数据盘抹掉。" % (k, key, dv))
+
     # RAID 成员的"盘名前缀"与数据盘同名 = 用户想在这块盘上做 RAID，又声明它是"别碰"的数据盘。
     # 两者的语义在本规格里不可能同时成立（RAID 成员是**目标盘**上的分区），必须拒绝而不是猜。
     for f, tok, disk_prefix in raid_disk_specs:

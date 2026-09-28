@@ -2469,3 +2469,61 @@ class TargetMatchFailSafeTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             generate_all(cfg)
         self.assertIn("serial", str(ctx.exception))
+
+
+class TargetDataDiskOverlapTest(unittest.TestCase):
+    """生产安全：同一块盘不能既当系统盘、又被声明为要保护的数据盘。
+
+    为什么不能只比名字：§5.42 之后数据盘推荐只给 size/serial/wwid，名字是空的，
+    此时纯名字比较恒不成立 —— 这道防线会形同虚设。
+    """
+
+    PARTS = [{"mount": "/boot", "size": "1G", "fstype": "ext4"},
+             {"mount": "/", "size": "rest", "fstype": "ext4"}]
+
+    def _mk(self, dc, os_type="rhel"):
+        import importlib
+        m = importlib.import_module("tests.test_pxe")
+        kw = dict(disk_config=dc, os_type=os_type)
+        if os_type == "rhel":
+            kw.update(os_version="9", mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        else:
+            kw.update(os_version="22.04", mirror="")
+        return m._cfg(**kw)
+
+    def test_target_and_data_disk_same_serial_is_rejected(self):
+        """目标盘按 serial 指定，而某块数据盘声明了同一个 serial。"""
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "match", "serial": "SAME123"},
+              "layout": "custom", "partitions": self.PARTS,
+              "data_disks": [{"serial": "SAME123", "wipe": False}]}
+        with self.assertRaises(ValueError) as ctx:
+            generate_all(self._mk(dc))
+        msg = str(ctx.exception)
+        self.assertIn("serial", msg)
+        self.assertIn("data_disks[0]", msg)
+
+    def test_target_and_data_disk_same_name_is_rejected_even_without_extra_keys(self):
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "name", "name": "sdb"},
+              "layout": "custom", "partitions": self.PARTS,
+              "data_disks": [{"name": "sdb", "size": "30G", "wipe": False}]}
+        with self.assertRaises(ValueError):
+            generate_all(self._mk(dc))
+
+    def test_ubuntu_path_also_checked(self):
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "name", "name": "sda"},
+              "layout": "custom", "partitions": self.PARTS,
+              "data_disks": [{"name": "sda", "wipe": False}]}
+        with self.assertRaises(ValueError):
+            generate_all(self._mk(dc, os_type="ubuntu"))
+
+    def test_different_identity_is_allowed(self):
+        """正常配置不能被误拦：目标盘 sdb、数据盘是另一块（按 size 声明）。"""
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "name", "name": "sdb"},
+              "layout": "custom", "partitions": self.PARTS,
+              "data_disks": [{"size": "30G", "wipe": False}]}
+        ks = generate_all(self._mk(dc))["ks.cfg"]
+        self.assertIn("clearpart --drives=sdb", ks)
