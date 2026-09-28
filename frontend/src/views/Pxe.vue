@@ -229,11 +229,41 @@
                   style="margin-bottom: 12px"
                   title="自动选盘：换硬件不用改模板" />
         <div v-if="form.disk_target_mode === 'auto'" style="margin: -8px 0 12px; font-size: 12px; line-height: 1.6; color: var(--el-text-color-secondary)">
-          Ubuntu 交给 subiquity 的"最大盘"规则；RHEL 系（anaconda 没有现成的自动选盘原语）
-          在 <code>%pre</code> 里按"非可移动、非光驱、容量达标、按盘名排序取第一块"选出目标盘，
+          RHEL 系（anaconda 没有现成的自动选盘原语）在 <code>%pre</code> 里按
+          "非可移动、非光驱、容量达标、按盘名排序取第一块"选出目标盘，
           再 <code>%include</code> 生成出来的分区片段。盘名不再写死，NVMe(<code>nvme0n1</code>) /
-          virtio-blk(<code>vda</code>) 都能装。
+          virtio-blk(<code>vda</code>) 都能装。<br />
+          <b style="color: var(--el-color-warning)">Ubuntu 的 layout=custom 不支持自动选盘</b>：
+          subiquity 没有"自动挑最大盘"的写法，必须显式指定目标盘（否则生成时直接 422 拒绝）。
         </div>
+
+        <el-alert
+          v-if="form.os_type === 'ubuntu' && form.disk_scheme === 'custom'"
+          type="warning" :closable="false" style="margin-bottom: 12px"
+          title="Ubuntu 自定义分区：请用「按盘名」指定目标盘"
+        >
+          <div style="font-size: 12px; line-height: 1.6">
+            subiquity 认目标盘的方式与 RHEL 不同（真机实测，见 RUNBOOK-STATE §5.47）：
+            <ul style="margin: 4px 0 0 16px; padding: 0">
+              <li>
+                <code>serial</code>：subiquity 取的是 sysfs 的
+                <code>/sys/block/sdX/device/serial</code>，而虚拟化（QEMU/virtio-scsi）下该属性为空
+                → 报 <code>matched no disk</code>，装不上；
+              </li>
+              <li><code>wwn</code> / <code>model</code>：盘可能没有 WWN，或同型号多盘时产生歧义；</li>
+              <li>
+                它<b>不认识</b>的键（如 <code>id_path</code>）：<b>不报错</b>，而是退回"匹配第一块盘" ——
+                若数据盘排在前面就<b>直接抹掉数据盘</b>（产品已拒绝此键）。
+              </li>
+            </ul>
+            所以 Ubuntu 侧请选 <b>按盘名</b> 填系统盘设备名（如 <code>sdb</code>）：
+            名字填错会明确报错、不会错装，但<b>务必确认它与「数据盘」不是同一块盘</b>
+            （系统盘会被清空分区）。<br />
+            <b>未验证</b>：真机上若磁盘提供真实序列号 / WWN，
+            <code>serial</code> / <code>wwn</code> 也许可用 —— 本环境无真机，未做验证，
+            因此不作为结论。
+          </div>
+        </el-alert>
 
         <template v-if="form.disk_scheme === 'custom'">
           <el-divider content-position="left">自定义分区表</el-divider>
