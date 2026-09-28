@@ -672,10 +672,11 @@ def _other_conf_has_keyword(keyword, exclude_path, conf_dir=None):
     return ""
 
 
-def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=None):
+def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=None,
+                          iface_v4=None):
     """落盘前的红线检查。返回 (ok, 原因) —— 原因是要显示给运维的中文说明。
 
-    五条，全部 fail-closed：
+    六条，全部 fail-closed：
       1. `interface=` 是占位值（eth0/eth1/空）⇒ 拒绝（说明生成器没拿到真实网卡）；
       2. 目标网卡在宿主机上**不存在** ⇒ 拒绝。这条尤其重要：dnsmasq 配了
          `bind-interfaces` + 不存在的网卡会**起不来**，而 dnsmasq 同时服务着 PXE ——
@@ -685,8 +686,23 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
       5. 用了**不可重复**的关键字（如 `port=`）而配置目录里别的 .conf 已经用过
          ⇒ 拒绝。这条修的是真机实测到的"两份配置互斥"：dnsmasq 会连整份配置一起拒绝，
          结果是守护进程起不来。
+      6. `dhcp-range` 不在目标网卡自己的网段里 ⇒ 拒绝。dnsmasq 是按**网卡地址**推掩码、
+         算广播地址的；池子跨到别的网段时客户端会拿到不可用的地址（或干脆拿不到），
+         而且这通常意味着"池开到了不该开的网段上"。网卡上读不到 IPv4 也算 ⇒ 拒绝。
+
+    `iface_v4` 可注入（测试用），默认取真实的网卡地址/掩码。
     """
     import ipaddress
+    prov = providers or {}
+    # 网卡地址事实：优先用注入的映射（单测用，跨平台确定），其次用可注入的 iface_v4 函数，
+    # 最后才是真实读取。
+    injected_map = prov.get("iface_v4_map")
+    if iface_v4 is not None:
+        get_v4 = iface_v4
+    elif injected_map is not None:
+        get_v4 = lambda name: injected_map.get(name)  # noqa: E731
+    else:
+        get_v4 = _iface_v4
     ifaces, ranges = parse_dnsmasq_dhcp(conf_text)
     if not ifaces:
         return False, "生成的配置里没有 interface=（不知道要服务哪张网卡），拒绝部署"
@@ -727,6 +743,32 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
                 return False, ("dhcp-range " + str(lo) + "-" + str(hi) + " 落在骨干网段 "
                                + str(net) + " 内：这会把骨干网的地址分给客户端，"
                                  "请把池改到专用装机网段。")
+    # 6) 地址池必须落在目标网卡**自己**的网段里（读不到网卡地址也算拒绝）
+    #    只在能列出真实网卡时做（非 Linux / 容器里读不到 /sys/class/net 时跳过，
+    #    与第 2 条同一口径，避免在没有真实网卡事实的环境里误拒）。
+    if present and ranges:
+        nets_by_iface = []
+        for i in ifaces:
+            got = get_v4(i)
+            if not got:
+                continue
+            try:
+                nets_by_iface.append((i, ipaddress.ip_network(
+                    str(got[0]) + "/" + str(got[1]), strict=False)))
+            except (ValueError, TypeError, IndexError):
+                continue
+        if not nets_by_iface:
+            return False, ("读不到 DHCP 网卡（" + ", ".join(ifaces) + "）上的 IPv4 地址/掩码："
+                           "dnsmasq 要按这张卡的网段推掩码与广播地址，读不到就没法确认池子"
+                           "落在正确的网段里。请先给它配上地址（例如 192.168.199.1/24）再部署。")
+        for lo, hi in ranges:
+            if not any((lo in n and hi in n) for _i, n in nets_by_iface):
+                return False, ("dhcp-range " + str(lo) + "-" + str(hi)
+                               + " 不落在 DHCP 网卡（" + ", ".join(ifaces) + "）的网段（"
+                               + ", ".join(str(n) for _i, n in nets_by_iface) + "）内："
+                                 "dnsmasq 按网卡地址推掩码/广播地址，池子跨网段时客户端会拿到"
+                                 "不可用的地址，而且这通常意味着池开到了别的网段上。"
+                                 "请把池改到该网卡自己的网段内。")
     # 5) 不可重复关键字冲突（真机实测：两份配置都写 port=0 ⇒ dnsmasq 拒绝整份配置）
     for kw in _SINGLETON_KEYWORDS:
         used_here = any(

@@ -119,6 +119,42 @@ def _position_device(pos) -> ZtpDevice:
 
 
 # ============ 通用片段 ============
+def _vlan_id_of_interface(iface, fallback):
+    """从 `Vlan-interface10` / `Vlanif10` 里解析出 VLAN 号；解析不出就用 fallback。
+
+    为什么需要它：真机上管理 VLAN **必须先存在**，SVI（Vlan-interfaceX）才配得上、
+    `ip address dhcp-alloc` 才是合法命令（H3C Comware 7 实测）。而模板里
+    "管理 VLAN 号"和"管理接口名"是两个字段，运维很容易只改其中一个 ——
+    如果只按 `mgmt_vlan` 建 VLAN、却按接口名配 SVI，就会出现"建了 VLAN 10、
+    却在配 Vlan-interface100"，设备直接报错。这里以**接口名为准**，
+    并在两者不一致时往配置里写一行醒目注释。
+    """
+    import re
+    m = re.search(r"(\d+)\s*$", str(iface or ""))
+    if m:
+        return int(m.group(1)), True
+    return int(fallback or 1), False
+
+
+def _ensure_vlan_lines_h3c(p) -> list:
+    """保证管理 VLAN 存在（H3C）。返回要插到 SVI 之前的行。"""
+    vid, parsed = _vlan_id_of_interface(p.mgmt_interface, p.mgmt_vlan)
+    lines = []
+    if parsed and int(p.mgmt_vlan or 0) != vid:
+        lines.append("# ⚠ 模板里「管理 VLAN 号=%s」与「管理接口=%s」不一致："
+                     "本配置以接口名为准，按 VLAN %d 生成（请回模板统一，否则接入端口会划错 VLAN）"
+                     % (p.mgmt_vlan, p.mgmt_interface, vid))
+    existing = set()
+    for v in (p.vlans or []):
+        try:
+            existing.add(int(v.get("id", v.get("vlan"))))
+        except (TypeError, ValueError):
+            continue
+    if vid not in existing:
+        lines += [f"vlan {vid}", " description MGMT", "#"]
+    return lines
+
+
 def _vlans_block_h3c(p) -> list:
     lines = []
     for v in p.vlans:
@@ -132,13 +168,35 @@ def _vlans_block_h3c(p) -> list:
 
 
 def _vlans_block_huawei(p) -> list:
-    ids = [str(v.get("id", v.get("vlan"))) for v in p.vlans]
-    if not ids:
-        return []
-    return [f"vlan batch {','.join(ids)}", "#"] + [
-        (f"vlan {v.get('id', v.get('vlan'))}\n description {v.get('name','')}\n#" if v.get("name") else "")
-        for v in p.vlans if v.get("name")
-    ]
+    """华为的 VLAN 创建：**管理 VLAN 必须先进 batch**。
+
+    VRP8（CE/NE 系列）实测：Vlanif 之前没有 `vlan <id>`，接口配不上。
+    另外模板里"管理 VLAN 号"与"管理接口名"不一致时（运维只改了一个），
+    以**接口名**为准并在文件里留一行醒目注释。
+    """
+    vid, parsed = _vlan_id_of_interface(p.mgmt_interface, p.mgmt_vlan)
+    warn = []
+    if parsed and int(p.mgmt_vlan or 0) != vid:
+        warn = ["# ⚠ 模板里「管理 VLAN 号=%s」与「管理接口=%s」不一致："
+                "本配置以接口名为准，按 VLAN %d 生成（请回模板统一）"
+                % (p.mgmt_vlan, p.mgmt_interface, vid)]
+    ids, existing = [], set()
+    for v in (p.vlans or []):
+        try:
+            n = int(v.get("id", v.get("vlan")))
+        except (TypeError, ValueError):
+            continue
+        if n not in existing:
+            existing.add(n)
+            ids.append(str(n))
+    if vid not in existing:
+        ids.insert(0, str(vid))
+    lines = warn + [f"vlan batch {','.join(ids)}", "#"]
+    for v in (p.vlans or []):
+        if v.get("name"):
+            lines += [f"vlan {v.get('id', v.get('vlan'))}",
+                      f" description {v.get('name')}", "#"]
+    return lines
 
 
 def _vlans_block_cisco(p) -> list:
@@ -150,6 +208,26 @@ def _vlans_block_cisco(p) -> list:
         if name:
             lines.append(f" name {name}")
         lines.append("!")
+    return lines
+
+
+def _ensure_vlan_lines_cisco(p) -> list:
+    """思科同样要**先建 VLAN**：IOS-XE 上 SVI 对应的 VLAN 不存在时，
+    接口会一直是 down（这个坑很隐蔽：配置看着全对，就是不通）。"""
+    vid, parsed = _vlan_id_of_interface(p.mgmt_interface, p.mgmt_vlan)
+    lines = []
+    if parsed and int(p.mgmt_vlan or 0) != vid:
+        lines.append("! ⚠ 模板里「管理 VLAN 号=%s」与「管理接口=%s」不一致："
+                     "本配置以接口名为准，按 VLAN %d 生成"
+                     % (p.mgmt_vlan, p.mgmt_interface, vid))
+    existing = set()
+    for v in (p.vlans or []):
+        try:
+            existing.add(int(v.get("id", v.get("vlan"))))
+        except (TypeError, ValueError):
+            continue
+    if vid not in existing:
+        lines += [f"vlan {vid}", "!"]
     return lines
 
 
@@ -185,6 +263,8 @@ def h3c_config(dev, p) -> str:
         "#",
     ]
     L += _vlans_block_h3c(p)
+    # 管理 VLAN 必须先存在，SVI 才配得上（真机实测；这里保证它一定被创建）
+    L += _ensure_vlan_lines_h3c(p)
     if dev.mgmt_via_dhcp:
         L += [
             "# 管理口用 DHCP 取址（没有指定管理 IP，写死会与其它设备/地址池冲突）",
@@ -224,8 +304,14 @@ def h3c_config(dev, p) -> str:
         " authentication-mode scheme",
         " protocol inbound ssh",
         "#",
+        # Comware 7 上**没有** `stelnet server enable` 这条命令（旧版本/别的产品线才有），
+        # 真机上敲下去是报错的；开 SSH 服务就是 `ssh server enable`。
         "ssh server enable",
-        "stelnet server enable",
+        "#",
+        "# ---- 关掉不用的明文/网页管理面（真机验证这几条在 Comware 7 上可用）----",
+        "undo telnet server enable",
+        "undo ip http enable",
+        "undo ip https enable",
         "#",
         "snmp-agent",
         f" snmp-agent community read {p.snmp_community}",
@@ -243,10 +329,67 @@ def h3c_config(dev, p) -> str:
 
 
 # ============ 华为 VRP ============
-def huawei_config(dev, p) -> str:
+def _require_huawei_community(p) -> str:
+    """华为的 SNMP 团体名：**VRP8/CE 系列要求 8-32 个字符**（真机实测）。
+
+    VRP5 上 1-32 都能用，但为了"一份模板在两种平台上都不出错"，这里统一按 8-32 卡。
+    默认值 `public`（6 位）在 CE 上会被设备**拒绝这一行**，于是 SNMP 悄悄用不了 ——
+    与其发一份设备不认的配置，不如在这里显式失败（与本项目"口令绝不代填"同一口径）。
+    """
+    comm = (p.snmp_community or "").strip()
+    if not comm:
+        raise ValueError(
+            "华为模板必须填写 SNMP 团体名（snmp_community）：ZTP 基线里 SNMP 是必配项，"
+            "留空会生成一条设备拒绝的命令。"
+        )
+    if len(comm) < 8 or len(comm) > 32:
+        raise ValueError(
+            "华为设备的 SNMP 团体名必须是 8-32 个字符（VRP8/CE 系列实测要求），"
+            "当前是 %r（%d 个字符）。请改成至少 8 位，例如 Opstk@2026。"
+            % (comm, len(comm))
+        )
+    return comm
+
+
+def _require_vrp8_username(p) -> str:
+    """VRP8（CE/NE）本地用户名**至少 6 个字符**（真机实测）。
+
+    证据（CE6800，V200R005）：`local-user ?` 的帮助是
+        `STRING<6-253>  User name, ... If the user already exists, do not check
+         the minimum length of username`
+    而模板默认的 `admin_user` 就是 `admin`（5 位）——在 CE 上 `local-user admin …`
+    会直接 `Error: Wrong parameter`，**整段建账号的命令全部失败**（SSH 登不上，
+    而配置看着"下发成功"）。这类失败必须在生成期就拦住。
+    """
+    user = (p.admin_user or "").strip()
+    if not user:
+        raise ValueError("模板必须填写设备管理员用户名（admin_user）。")
+    if len(user) < 6:
+        raise ValueError(
+            "华为 VRP8（CE/NE）要求本地用户名**至少 6 个字符**（真机实测："
+            "`local-user ?` 帮助为 STRING<6-253>）。当前是 %r（%d 位），"
+            "在 CE 上设备会拒绝、账号建不出来，请改成 6 位以上（例如 opstkadm）。"
+            % (user, len(user))
+        )
+    return user
+
+
+def huawei_config(dev, p, vrp8=False) -> str:
+    """华为 VRP 开局配置。vrp8=True 时按 **CE/NE（VRP8）** 的语法生成。
+
+    两者在真机上验证到的差异（都别凭印象改）：
+      · 本地账号：VRP5 用 `privilege level 15`；**VRP8 没有这条**（Unrecognized），
+        管理员权限靠内置用户组 `user-group manage-ug`；密码用 `irreversible-cipher`
+        （`cipher` 期望的是**密文**，传明文会被拒）。
+      · 用户名：VRP8 要求 ≥6 位（见 _require_vrp8_username）。
+      · NTP：VRP5 是 `ntp-service unicast-server`；**VRP8 是 `ntp unicast-server`**
+        （`ntp-service …` 在 CE 上是 Unrecognized）。
+      · 结尾：VRP8 有配置提交语义，`return` 会弹 `[Y/N/C]` 交互确认 ⇒ 用 `commit` 收尾。
+    """
     ip = dev.mgmt_ip or "10.0.0.1"
-    user = p.admin_user or "admin"
+    user = _require_vrp8_username(p) if vrp8 else (p.admin_user or "admin")
     pw = _require_ztp_password(p)
+    community = _require_huawei_community(p)
     vlanif = p.mgmt_interface.replace("Vlan-interface", "Vlanif")
     L = [
         "# Huawei VRP 开局配置 (OpsToolkit 生成)",
@@ -280,12 +423,28 @@ def huawei_config(dev, p) -> str:
         # DHCP 取址时默认路由由 DHCP 给，不写静态默认路由（理由同 h3c 分支）
         f"ip route-static 0.0.0.0 0.0.0.0 {p.mgmt_gateway}" if not dev.mgmt_via_dhcp else "",
         "#",
-        "# ---- AAA 本地账号 ----",
-        "aaa",
-        f" local-user {user} password cipher {pw}",
-        f" local-user {user} privilege level 15",
-        f" local-user {user} service-type ssh",
-        "#",
+    ]
+    if vrp8:
+        L += [
+            "# ---- AAA 本地账号（VRP8/CE 语法，真机逐条验过）----",
+            "aaa",
+            # VRP8 用 irreversible-cipher 收**明文**；`cipher` 收的是密文，传明文会被拒
+            f" local-user {user} password irreversible-cipher {pw}",
+            f" local-user {user} service-type ssh",
+            # VRP8 没有 `privilege level`（Unrecognized），管理员权限用内置用户组
+            f" local-user {user} user-group manage-ug",
+            "#",
+        ]
+    else:
+        L += [
+            "# ---- AAA 本地账号 ----",
+            "aaa",
+            f" local-user {user} password cipher {pw}",
+            f" local-user {user} privilege level 15",
+            f" local-user {user} service-type ssh",
+            "#",
+        ]
+    L += [
         "user-interface vty 0 4",
         " authentication-mode aaa",
         " protocol inbound ssh",
@@ -296,19 +455,24 @@ def huawei_config(dev, p) -> str:
         f"ssh user {user} service-type stelnet",
         "#",
         "snmp-agent",
-        f" snmp-agent community read {p.snmp_community}",
+        f" snmp-agent community read {community}",
         " snmp-agent sys-info version v2c",
         "#",
     ]
     if _ntp(p):
-        L += [f"ntp-service unicast-server {_ntp(p)}", "#"]
+        # VRP8（CE）上 `ntp-service …` 是 Unrecognized，只有 `ntp unicast-server`
+        L += [(f"ntp unicast-server {_ntp(p)}" if vrp8
+               else f"ntp-service unicast-server {_ntp(p)}"), "#"]
     if p.dns_servers:
         L.append(f"dns server {p.dns_servers[0]}")
     if p.domain_name:
-        L.append(f"domain {p.domain_name}")
+        # 华为的域名命令是 `dns domain`（VRP5/VRP8 实测都是这条），不是裸 `domain`
+        L.append(f"dns domain {p.domain_name}")
     if p.extra_config:
         L += ["# ---- 自定义配置 ----", p.extra_config]
-    L += ["return", ""]
+    # VRP8 有提交语义：`return` 会弹 [Y/N/C] 交互确认（脚本里会卡住/需要应答），
+    # 用 `commit` 显式提交收尾；VRP5 用惯例的 `return`。
+    L += ["commit", ""] if vrp8 else ["return", ""]
     return "\n".join(x for x in L if x != "")
 
 
@@ -329,6 +493,7 @@ def cisco_config(dev, p) -> str:
     if p.domain_name:
         L += [f"ip domain-name {p.domain_name}", "!"]
     L += _vlans_block_cisco(p)
+    L += _ensure_vlan_lines_cisco(p)
     if dev.mgmt_via_dhcp:
         L += [
             "! 管理口用 DHCP 取址（没有指定管理 IP）",
@@ -356,7 +521,11 @@ def cisco_config(dev, p) -> str:
         # DHCP 取址时默认路由由 DHCP 给，不写静态默认路由（理由同 h3c 分支）
         f"ip route 0.0.0.0 0.0.0.0 {p.mgmt_gateway}" if not dev.mgmt_via_dhcp else "",
         "!",
-        "no service password-encryption",
+        # 这里是 `service password-encryption`（**开**），不是 `no`：
+        # 老代码写的是 `no service password-encryption`，那等于把 line password 之类的
+        # 弱口令以**明文**存进 running-config —— 开局基线里主动降低设备安全等级，是缺陷。
+        # （enable secret / username secret 本身是哈希存储，不受这一行影响。）
+        "service password-encryption",
         f"enable secret {enable}",
         f"username {user} privilege 15 secret {pw}",
         "!",
@@ -382,18 +551,31 @@ def cisco_config(dev, p) -> str:
 VENDOR_CONFIG = {
     "h3c": h3c_config,
     "huawei": huawei_config,
+    # 华为 CE/NE（VRP8）与 VRP5 的命令差异是**真机实测**出来的（见 huawei_config 的说明），
+    # 所以单列一个厂商值，而不是在同一份配置里赌哪条命令通用。
+    "huawei-ce": lambda dev, p: huawei_config(dev, p, vrp8=True),
     "cisco": cisco_config,
+}
+
+# 厂商别名 → 规范值（运维在模板里怎么写都能落到正确的分支）
+_VENDOR_ALIASES = {
+    "h3c": "h3c", "comware": "h3c", "hp": "h3c", "hpe": "h3c",
+    "huawei": "huawei", "vrp5": "huawei", "vrp": "huawei",
+    "huawei-ce": "huawei-ce", "huawei-vrp8": "huawei-ce", "huawei_vrp8": "huawei-ce",
+    "ce": "huawei-ce", "vrp8": "huawei-ce", "cloudengine": "huawei-ce",
+    "cisco": "cisco", "ios": "cisco", "ios-xe": "cisco", "iosxe": "cisco",
 }
 
 
 def _norm_vendor(vendor) -> str:
-    """将厂商统一为小写，未知厂商回落 H3C。"""
+    """将厂商统一为小写规范值（含别名），未知厂商回落 H3C。"""
     v = (vendor or "").strip().lower()
-    return v if v in ("h3c", "huawei", "cisco") else "h3c"
+    return _VENDOR_ALIASES.get(v, "h3c")
 
 
 def _ext(vendor) -> str:
-    return {"h3c": "cfg", "huawei": "cfg", "cisco": "cfg"}.get(_norm_vendor(vendor), "cfg")
+    return {"h3c": "cfg", "huawei": "cfg", "huawei-ce": "cfg",
+            "cisco": "cfg"}.get(_norm_vendor(vendor), "cfg")
 
 
 # ============ dnsmasq 投递配置 ============
@@ -616,7 +798,7 @@ def _h3c_script(p, devices) -> str:
 
 def intermediate(p, devices):
     v = _norm_vendor(p.vendor)
-    if v == "huawei":
+    if v in ("huawei", "huawei-ce"):
         return _huawei_midfile(p, devices), "ztp_intermediate.txt"
     if v == "cisco":
         return _cisco_script(p, devices), "ztp_bootstrap.py"
@@ -680,6 +862,11 @@ def _readme(p, devices, positions=None) -> str:
         "厂商要点:\n"
         "  H3C   : auto-config, DHCP option 66(TFTP) + 67(文件名)\n"
         "  华为  : ZTP, DHCP option 66(TFTP) + 67(中间文件) + 中间文件描述下载项\n"
+        "          华为 VRP5 与 **VRP8(CE/NE)** 命令不同: 模板厂商请选对应的那个\n"
+        "          (`huawei` = VRP5, `huawei-ce` = VRP8/CloudEngine)。\n"
+        "          VRP8 实测差异: 本地账号用 `password irreversible-cipher` + `user-group manage-ug`\n"
+        "          (没有 `privilege level`)、用户名**至少 6 位**、NTP 是 `ntp unicast-server`、\n"
+        "          结尾用 `commit`(不是 `return`, 后者会弹 [Y/N/C] 交互确认)。\n"
         "  思科  : IOS-XE ZTP, DHCP option 150(TFTP) + 67(脚本/配置)\n\n"
         "!! 真机实测坑（H3C S6850，EVE 里第一手验过）:\n"
         "   自动配置的 DHCP 应答**必须是完整的** —— 至少要有 option 51(租期)。\n"

@@ -27,7 +27,10 @@ class ZtpGeneratorTest(unittest.TestCase):
         self.assertNotIn("{p.http_root}", files["README.txt"])
 
     def test_huawei_midfile(self):
-        p = ZtpProfile(vendor="huawei", server_ip="10.0.0.250", admin_password=self.PW)
+        # 华为 SNMP 团体名必须 8-32 位（VRP8 真机要求），生成器对短的会 fail-closed；
+        # 本用例测的是中间文件，所以显式给一个合法团体名。
+        p = ZtpProfile(vendor="huawei", server_ip="10.0.0.250", admin_password=self.PW,
+                       snmp_community="Opstk@2026")
         files = generate_all(p, self.devices)
         self.assertIn("ztp/ztp_intermediate.txt", files)
         self.assertIn('"ZTP file server" : "tftp://10.0.0.250"', files["ztp/ztp_intermediate.txt"])

@@ -23,13 +23,17 @@ dhcp = importlib.import_module("app.core.dhcp")
 
 # 单位：真机上的事实 —— ens18 承载默认路由（企业网 10.128.118.113/24），
 # ens19 是专用装机网（192.168.199.1/24）。
-HOST_FACTS = {"iface_name": "ens18", "iface_v4": ("10.128.118.113", 24)}
+# `iface_v4_map` 让"地址池必须落在网卡自己的网段里"这条检查在 Windows 上也能确定性地测
+# （Windows 上读不到网卡地址，不注入的话就只剩真实 Linux 能跑）。
+HOST_FACTS = {"iface_name": "ens18", "iface_v4": ("10.128.118.113", 24),
+              "iface_v4_map": {"ens18": ("10.128.118.113", 24),
+                               "ens19": ("192.168.199.1", 24)}}
 GOOD = ("interface=ens19\nbind-interfaces\n"
         "dhcp-range=192.168.199.100,192.168.199.200,12h\n")
 
 
 class DhcpConfSafetyTest(unittest.TestCase):
-    """红线检查：五条全部 fail-closed。"""
+    """红线检查：六条全部 fail-closed。"""
 
     def setUp(self):
         # /sys/class/net 在 Windows 上不存在 —— 不 mock 的话"网卡是否存在"这条会被跳过，
@@ -102,6 +106,29 @@ class DhcpConfSafetyTest(unittest.TestCase):
         ok, why = dhcp.check_dhcp_conf_safety(
             "interface=ens19\nbind-interfaces\ndhcp-range=192.168.199.1,proxy\n", HOST_FACTS)
         self.assertTrue(ok, why)
+
+    def test_pool_outside_iface_subnet_is_rejected(self):
+        """第 6 条：地址池不在网卡自己的网段里 ⇒ 拒绝。
+
+        dnsmasq 是按网卡地址推掩码/广播地址的；池子跨网段时客户端会拿到不可用的地址，
+        而且这通常意味着"池开到了别的网段上"（真机上这个错很难查：配置看着全对）。
+        """
+        ok, why = dhcp.check_dhcp_conf_safety(
+            "interface=ens19\nbind-interfaces\ndhcp-range=10.99.99.100,10.99.99.200,12h\n",
+            HOST_FACTS)
+        self.assertFalse(ok)
+        self.assertIn("不落在", why)
+        self.assertIn("192.168.199.0/24", why)
+
+    def test_iface_without_address_is_rejected(self):
+        """读不到网卡地址/掩码时也拒绝（fail-closed），不能靠猜。"""
+        facts = {"iface_name": "ens18", "iface_v4": ("10.128.118.113", 24),
+                 "iface_v4_map": {"ens18": ("10.128.118.113", 24)}}
+        ok, why = dhcp.check_dhcp_conf_safety(
+            "interface=ens19\nbind-interfaces\ndhcp-range=192.168.199.100,192.168.199.200,12h\n",
+            facts)
+        self.assertFalse(ok)
+        self.assertIn("读不到 DHCP 网卡", why)
 
     def test_no_interface_line_is_rejected(self):
         ok, why = dhcp.check_dhcp_conf_safety("port=0\nenable-tftp\n", HOST_FACTS)
@@ -444,7 +471,8 @@ class ZtpNtpOptionalTest(unittest.TestCase):
     def _dev_cfg(self, vendor, ntp):
         gen = importlib.import_module("app.ct.ztp.generator")
         p = gen.ZtpProfile(vendor=vendor, admin_password="Test@123", ntp_server=ntp,
-                           dhcp_iface="ens19", server_ip="192.168.199.1")
+                           dhcp_iface="ens19", server_ip="192.168.199.1",
+                           snmp_community="Opstk@2026")   # 华为要求 8-32 位（见 test_ztp_baseline）
         files = gen.generate_all(p, [gen.ZtpDevice(hostname="SW1", mac="00:11:22:33:44:55")])
         return files["ztp/SW1.cfg"], files["README.txt"]
 
@@ -495,6 +523,9 @@ class ZtpZeroTouchTest(unittest.TestCase):
         kw.setdefault("dhcp_start", "192.168.199.210")
         kw.setdefault("dhcp_end", "192.168.199.240")
         kw.setdefault("mgmt_gateway", "192.168.199.1")
+        # 华为的 SNMP 团体名必须 8-32 位（VRP8/CE 真机要求），默认的 public 只有 6 位、
+        # 生成器会 fail-closed 拦下。这里不是测 SNMP，所以给一个合法值。
+        kw.setdefault("snmp_community", "Opstk@2026")
         p = gen.ZtpProfile(**kw)
         return gen, gen.generate_all(p, devices)
 

@@ -116,7 +116,7 @@
           设备就会拿到自己落位规划的主机名/管理 IP；未认领的落位只会拿到 <code>ztp/default.cfg</code>。
         </div>
       </el-alert>
-      <el-alert v-if="obsNote" type="warning" :closable="false" show-icon style="margin-bottom: 10px" :title="obsNote" />
+      <el-alert v-if="obsNote" :type="obsOk ? 'info' : 'warning'" :closable="false" show-icon style="margin-bottom: 10px" :title="obsNote" />
       <el-divider content-position="left">待认领设备（来自 dnsmasq 租约）</el-divider>
       <el-table :data="observations" stripe size="small" empty-text="租约里暂时没有设备；设备上电接入开局网络后会出现在这里">
         <el-table-column prop="mac" label="MAC" width="160" />
@@ -168,7 +168,8 @@
             <el-form-item label="厂商">
               <el-select v-model="form.vendor" @change="onVendorChange">
                 <el-option label="H3C (推荐)" value="h3c" />
-                <el-option label="华为 (推荐)" value="huawei" />
+                <el-option label="华为 VRP5 (S 系列交换机/AR 路由器)" value="huawei" />
+                <el-option label="华为 VRP8 (CE/NE 系列，CloudEngine)" value="huawei-ce" />
                 <el-option label="思科" value="cisco" />
               </el-select>
             </el-form-item>
@@ -445,13 +446,23 @@ const inlineDev = reactive({ hostname: "", mac: "", serial: "", mgmt_ip: "" })
 
 const genForm = reactive({ deploy_mode: "standalone", server_ip: "10.0.0.250", devices: [] })
 
-function vendorLabel(v) { return { h3c: "H3C", huawei: "华为", cisco: "思科" }[v] || v }
-function vendorType(v) { return { h3c: "primary", huawei: "success", cisco: "warning" }[v] || "info" }
+function vendorLabel(v) { return { h3c: "H3C", huawei: "华为 VRP5", "huawei-ce": "华为 VRP8(CE)", cisco: "思科" }[v] || v }
+function vendorType(v) { return { h3c: "primary", huawei: "success", "huawei-ce": "success", cisco: "warning" }[v] || "info" }
 function modeLabel(m) { return { standalone: "独立DHCP", proxy: "ProxyDHCP", relay: "中继" }[m] || m }
 
 function onVendorChange() {
-  if (form.vendor === "huawei") form.mgmt_interface = form.mgmt_interface.replace("Vlan-interface", "Vlanif")
-  else if (form.vendor === "h3c") form.mgmt_interface = form.mgmt_interface.replace("Vlanif", "Vlan-interface")
+  if (form.vendor === "huawei" || form.vendor === "huawei-ce") {
+    form.mgmt_interface = form.mgmt_interface.replace("Vlan-interface", "Vlanif")
+  } else if (form.vendor === "h3c") {
+    form.mgmt_interface = form.mgmt_interface.replace("Vlanif", "Vlan-interface")
+  }
+  // VRP8(CE) 两条真机约束，提前把默认值补齐，省得生成时才发现（生成期也会 fail-closed 拦住）：
+  //   · 本地用户名至少 6 位（`local-user ?` 帮助是 STRING<6-253>）
+  //   · SNMP 团体名 8-32 位
+  if (form.vendor === "huawei-ce") {
+    if (!form.admin_user || form.admin_user.length < 6) form.admin_user = "opstkadm"
+    if (!form.snmp_community || form.snmp_community.length < 8) form.snmp_community = "Opstk@2026"
+  }
 }
 
 function buildPayload() {
@@ -557,6 +568,7 @@ const posTemplateId = ref("")
 const positions = ref([])
 const observations = ref([])
 const obsNote = ref("")
+const obsOk = ref(true)     // 租约文件读到了=true（正常）；读不到=false（需要运维处理）
 const posDialog = ref(false)
 const editingPosId = ref(null)
 const savingPos = ref(false)
@@ -587,6 +599,10 @@ async function loadObservations() {
     const res = await http.get("/ct/ztp/observations" + q)
     observations.value = res.observations || []
     obsNote.value = res.note || ""
+    // 读到租约文件（leases_path 非空）是**正常**情况，说明里只是"读了哪个文件、几条"；
+    // 只有读不到时才是需要运维处理的告警。以前一律用 warning 黄条 ——
+    // 于是正常部署下页面永远挂一条黄警告，久了就没人看告警了。
+    obsOk.value = !!res.leases_path
   } catch (e) { /* 后端租约读取不会 500；保险起见也不让这里打断页面 */ }
 }
 
