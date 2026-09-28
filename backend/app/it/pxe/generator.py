@@ -619,10 +619,20 @@ def _disk_plan(c, dc):
         #   · Ubuntu：subiquity 的 storage 配置只认 path（/dev/sdX）
         # 这些场景下 name 仍是必填；只有"纯排除用途"（RHEL + wipe=false）才允许只给稳定属性。
         # 加这道护栏是为了不生成"ignoredisk --only-use=  "这种残缺行（那会把目标盘也弄丢）。
-        if not dname and (d.get("wipe") or not is_rhel_family(c.os_type)):
+        # 什么时候仍然必须要盘名：**产物里要显式写到这块盘、又没有 %pre 可以现场反解**。
+        #   · Ubuntu（任意模式）：curtin 的 storage 只认 path=/dev/<name>；
+        #   · RHEL 的 mode=name：没有 %pre，--ondisk= 只能写盘名。
+        # 而 RHEL 的 auto/match 现在会在 %pre 里按该声明自己的稳定条件反解出 $ddevN
+        # （R2-H3），所以**不再需要**盘名 —— 之前那条"wipe=true 就必须要 name"
+        # 在修好 R2-H3 之后反而变成过严的拦截。
+        if not dname and not is_rhel_family(c.os_type):
             raise ValueError(
-                f + ".name：该场景（wipe=true 或 Ubuntu 布局）仍必须给出盘名 —— "
-                "产物里要显式写到这块盘；只有\"排除用途\"才能只给 size/serial/wwid。")
+                f + ".name：Ubuntu 布局必须给出盘名 —— curtin 的 storage 配置只认 "
+                "path=/dev/<name>，只给 size/serial/wwid 无法表达要写到哪块盘。")
+        if not dname and mode == "name" and d.get("wipe"):
+            raise ValueError(
+                f + ".name：target.mode=name 下要格式化（wipe=true）的数据盘必须给出盘名 —— "
+                "该模式下没有 %pre 可以现场反解设备名。")
         # 缺陷 #1 的 schema 侧交叉检查：mode=name 时 target.name 与数据盘同名是自相矛盾
         # （同一块盘既当系统盘又当"别碰"的数据盘）。auto/match 下 name 不参与选盘，不做要求。
         if mode == "name" and name and dname and dname == name:
@@ -937,7 +947,13 @@ def _rhel_lv_ondisk(size) -> str:
     return "--size=1 --grow" if mb is None else "--size=" + str(mb)
 
 
-def _rhel_custom_lines(plan, disk) -> list:
+def _rhel_custom_lines(plan, disk, dd_dev=None) -> list:
+    """dd_dev：{数据盘下标: 设备令牌}。use_pre=True 时传 {"$ddev1": …}，
+    让"要主动清除的数据盘"也走 %pre 反解出来的设备名，而不是写死的盘名（R2-H3）。"""
+    dd_dev = dd_dev or {}
+
+    def _dev(k, d):
+        return dd_dev.get(k) or d["name"]
     """layout=custom 的 ks 行（规格 §3.3/§3.4）：part/volgroup/logvol/raid 全部 --ondisk=<disk>。
 
     **ignoredisk 只能有一条**（本次修复的实测结论）：pykickstart 的 F8_IgnoreDisk.parse 在
@@ -955,7 +971,7 @@ def _rhel_custom_lines(plan, disk) -> list:
         没列出的盘 anaconda 一概不碰（pykickstart: "only disks listed here will be used
         during installation"），比"--drives= 再声明一次"更强也更省事。
     """
-    used = [disk] + [d["name"] for d in plan["data_disks"] if d["wipe"]]
+    used = [disk] + [_dev(k, d) for k, d in enumerate(plan["data_disks"]) if d["wipe"]]
     lines = ["ignoredisk --only-use=" + ",".join(used)]
     if plan["wipe"]:
         lines.append("clearpart --drives=" + ",".join(used) + " --all --initlabel")
@@ -1032,10 +1048,12 @@ def _rhel_custom_lines(plan, disk) -> list:
             opts.append("--fstype=" + p["fstype"])
         lines.append("logvol " + (p["mount"] or p["lv"]) + " " + " ".join(opts))
 
-    for d in plan["data_disks"]:
+    for k, d in enumerate(plan["data_disks"]):
         if d["wipe"] and d["mount"]:
+            # R2-H3：要**主动分区/格式化**的数据盘，盘名必须来自 %pre 的反解结果，
+            # 不能写死 —— 否则枚举顺序一反转就格式化到别的盘上。
             lines.append("part %s --fstype=%s --size=1 --grow --ondisk=%s"
-                         % (d["mount"], d["fstype"] or "ext4", d["name"]))
+                         % (d["mount"], d["fstype"] or "ext4", _dev(k, d)))
     return lines
 
 
@@ -1179,6 +1197,17 @@ _AWK_PICK_BY_KEY = (
     " nm = gv(L, \"NAME\");"
     " if (nm != \"\" && !dmatched(L)) print nm } }"
 )
+# 按"第 gi 个数据盘声明"的条件反解出它的设备名（MiMo R2 的 H3）：
+# 产物里凡是**要主动清除/格式化**某块数据盘的地方，都不能写死盘名 ——
+# 枚举顺序一反转就会作用到别的盘上（与 §5.42 同类，只是从"排除"变成"清除"）。
+_AWK_PICK_BY_GROUP = (
+    "{ L = \" \" $0;"
+    " if (gv(L, \"TYPE\") != \"disk\") next;"
+    " if (gv(L, \"RM\") != \"0\") next;"
+    " nm = gv(L, \"NAME\");"
+    " if (nm == \"\" || nm ~ /^(zram|ram|loop|sr)/) next;"
+    " if (dgrp(L, gi)) print nm }"
+)
 # 选盘留痕 + **逐声明护栏**（一次 awk 同时做，靠退出码传递判定，避免解析数字）：
 # 打出磁盘清单（命中的标 [数据盘]），逐组统计命中数，任一**声明**一块都没命中就 exit 3。
 # 为什么用退出码而不是"回声一个数字再 -eq 0"（MiMo R2 的 M3）：输出为空或非数字时
@@ -1255,6 +1284,27 @@ def _rhel_pick_target_lines(plan) -> list:
         lines.append("target=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | "
                      "awk -v min=%d -v dm='%s' '" % (int(plan["min_size_gb"]) * 1024 ** 3, dm))
         lines.append(_LSBLK_AWK_PRELUDE + _AWK_PICK_BY_SIZE + "' | sort | head -1)")
+    # ★ 对每个 **wipe=true** 的数据盘，用**它自己那条声明的稳定条件**反解出设备名。
+    # 为什么（MiMo R2 的 H3）：`ignoredisk --only-use=` / `clearpart --drives=` /
+    # `part --ondisk=` 这几处是**主动清除**动作，写死 `sdb` 的话，枚举顺序一反转
+    # 就会清到另一块盘上 —— 与 §5.42 同类，只是从"该排除的没排除"变成"主动清错盘"。
+    # 反解不出来就中止：宁可不装，绝不按猜的盘去格式化。
+    groups = _data_disk_matcher_specs(plan)
+    for i, d in enumerate(plan["data_disks"]):
+        if not d["wipe"]:
+            continue
+        g = "|".join(groups[i])
+        lines += [
+            "ddev%d=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | "
+            "awk -v gi=%d -v dm='%s' '%s' | sort | head -1)"
+            % (i + 1, i + 1, g, _LSBLK_AWK_PRELUDE + _AWK_PICK_BY_GROUP),
+            "if [ -z \"$ddev%d\" ]; then" % (i + 1),
+            "  pxelog '!! 第 %d 个数据盘（wipe=true）按稳定条件找不到设备 —— 拒绝继续"
+            "（按猜的盘格式化会清错盘）'" % (i + 1),
+            "  echo 'PXE: 待格式化的数据盘无法按稳定条件定位，装机中止' >&2; exit 1",
+            "fi",
+            "pxelog \"第 %d 个数据盘（wipe=true）解析为 $ddev%d\"" % (i + 1, i + 1),
+        ]
     lines.append("pxelog \"选定目标盘 target='${target:-<空>}'\"")
     lines.append("if [ -z \"$target\" ]; then "
                  "echo 'PXE: 未找到可用的目标磁盘，装机中止' >&2; exit 1; fi")
@@ -1271,7 +1321,10 @@ def _rhel_disk_block(plan, use_pre) -> list:
     disk = "$target" if use_pre else plan["name"]
 
     if custom:
-        body = _rhel_custom_lines(plan, disk)
+        # use_pre 时把"要主动清除的数据盘"也换成 %pre 反解出来的 $ddevN（R2-H3）
+        dd_dev = ({i: "$ddev%d" % (i + 1) for i, d in enumerate(plan["data_disks"])
+                   if d["wipe"]} if use_pre else None)
+        body = _rhel_custom_lines(plan, disk, dd_dev)
         if use_pre:
             boot = "bootloader --location=mbr --boot-drive=$target"
         else:

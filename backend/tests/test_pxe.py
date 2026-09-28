@@ -1165,8 +1165,8 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
                                              "fstype": "xfs", "wipe": True}])
         fragment = generate_all(self._rhel(dc))["ks.cfg"].split(
             "cat > /tmp/disk.ks <<EOF\n", 1)[1].split("\nEOF", 1)[0]
-        self.assertIn("clearpart --drives=$target,sdc --all --initlabel", fragment)
-        self.assertIn("part /backup --fstype=xfs --size=1 --grow --ondisk=sdc", fragment)
+        self.assertIn("clearpart --drives=$target,$ddev1 --all --initlabel", fragment)
+        self.assertIn("part /backup --fstype=xfs --size=1 --grow --ondisk=$ddev1", fragment)
         self.assertNotIn("ignoredisk --drives=sdc", fragment)
 
     def test_wipe_false_target_does_not_clearpart(self):
@@ -1200,7 +1200,7 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
                 self.assertTrue(found[0].startswith("ignoredisk --only-use="), found[0])
         # wipe=true 的数据盘必须在 --only-use 里（它要被 clearpart 并建分区）
         ks = generate_all(self._rhel(cases[1]))["ks.cfg"]
-        self.assertIn("ignoredisk --only-use=$target,sdc", ks)
+        self.assertIn("ignoredisk --only-use=$target,$ddev1", ks)
 
     def test_raid_devices_accept_three_id_spellings(self):
         """§3.3 的 part.01、subiquity 的 part0、§2 示例的 sdaN 都折算到同一套"第 N 个分区"。
@@ -2527,3 +2527,58 @@ class TargetDataDiskOverlapTest(unittest.TestCase):
               "data_disks": [{"size": "30G", "wipe": False}]}
         ks = generate_all(self._mk(dc))["ks.cfg"]
         self.assertIn("clearpart --drives=sdb", ks)
+
+
+class WipedDataDiskUsesStableDeviceTest(unittest.TestCase):
+    """R2-H3：`wipe=true` 的数据盘会让产物里出现**主动清除**它自己的动作
+    （ignoredisk --only-use= / clearpart --drives= / part --ondisk=）。
+    这几处若写死盘名（sdb），枚举顺序一反转就会清到另一块盘上 ——
+    与 §5.42 同类，只是从"该排除的没排除"变成"主动清错盘"。
+    所以必须由 %pre 按**该声明自己的稳定条件**反解出设备名。
+    """
+
+    PARTS = [{"mount": "/boot", "size": "1G", "fstype": "ext4"},
+             {"mount": "/", "size": "rest", "fstype": "ext4"}]
+
+    def _rhel(self, dc):
+        import importlib
+        m = importlib.import_module("tests.test_pxe")
+        return m._cfg(disk_config=dc, os_type="rhel", os_version="9",
+                      mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+
+    def test_wiped_data_disk_resolved_in_pre_not_hardcoded(self):
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "auto"}, "layout": "custom", "partitions": self.PARTS,
+              "data_disks": [{"size": "30G", "mount": "/data", "fstype": "xfs", "wipe": True}]}
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        # %pre 里必须反解出设备名，且解不出来要中止
+        self.assertIn("ddev1=$(lsblk", ks)
+        self.assertIn("-v gi=1", ks)
+        self.assertIn("待格式化的数据盘无法按稳定条件定位", ks)
+        # 产物里不能再出现写死的盘名
+        self.assertNotIn("--ondisk=sda", ks)
+        self.assertNotIn("--ondisk=sdb", ks)
+        self.assertIn("--ondisk=$ddev1", ks)
+        self.assertIn("ignoredisk --only-use=$target,$ddev1", ks)
+        self.assertIn("clearpart --drives=$target,$ddev1", ks)
+
+    def test_wipe_false_data_disk_still_not_touched_and_not_resolved(self):
+        """wipe=false 的数据盘不该出现在 used 里，也不需要反解。"""
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "auto"}, "layout": "custom", "partitions": self.PARTS,
+              "data_disks": [{"size": "30G", "wipe": False}]}
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        self.assertNotIn("ddev1=", ks)
+        self.assertNotIn("--ondisk=$ddev1", ks)
+        self.assertIn("ignoredisk --only-use=$target", ks)
+
+    def test_explicit_name_mode_still_uses_the_given_name(self):
+        """mode=name 是运维显式选择，仍按盘名（此处只锁行为不回归）。"""
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "name", "name": "sdb"}, "layout": "custom",
+              "partitions": self.PARTS,
+              "data_disks": [{"size": "30G", "mount": "/data", "fstype": "xfs", "wipe": True,
+                              "name": "sdc"}]}
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        self.assertNotIn("ddev1=", ks)
+        self.assertIn("--ondisk=sdc", ks)
