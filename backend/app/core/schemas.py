@@ -1550,3 +1550,70 @@ class ZtpTemplateOut(ORMBase):
 class ZtpGenerateResult(BaseModel):
     files: dict[str, str] = {}
 
+
+# ---------- CT ZTP 落位登记（落位 + 认领） ----------
+# 背景：设备到货时只有「落位 + 规划管理 IP + 规划主机名」，没有 MAC（还没上电）。
+# 先按落位登记（MAC 留空）；设备上电后从 dnsmasq 租约里自动学到 MAC，
+# 运维做一步「认领」把它指到落位，之后即可按 MAC 下发各自配置 —— 全程不手抄 MAC。
+class ZtpPositionIn(BaseModel):
+    template_id: str = ""
+    position: str
+    hostname: str = ""
+    mgmt_ip: str
+    serial: str = ""
+    mac: str = ""
+    remark: str = ""
+
+
+class ZtpPositionOut(ORMBase):
+    id: str
+    template_id: str
+    position: str
+    hostname: str
+    mgmt_ip: str
+    serial: str
+    mac: str
+    claimed_at: Optional[datetime] = None
+    source: str
+    remark: str
+    created_at: Optional[datetime] = None
+
+
+class ZtpObservation(BaseModel):
+    """从 dnsmasq 租约里学到的一台上电设备。"""
+    mac: str
+    ip: str = ""
+    hostname: str = ""
+    client_id: str = ""
+    expires: str = ""
+    position_id: str = ""        # 已被某落位认领则填该落位 id
+    position: str = ""           # 落位编码
+    claimed_hostname: str = ""   # 该落位的规划主机名
+
+
+class ZtpObservationsOut(BaseModel):
+    ok: bool = True
+    leases_path: str = ""
+    note: str = ""
+    observations: list[ZtpObservation] = []
+
+
+class ZtpClaimIn(BaseModel):
+    template_id: str
+    position_id: str
+    mac: str
+
+
+class ZtpImportIn(BaseModel):
+    template_id: str
+    csv: str = ""
+    replace: bool = False        # True=先清空该模板已有落位再导入
+
+
+class ZtpImportOut(BaseModel):
+    ok: bool = True
+    created: int = 0
+    updated: int = 0
+    skipped: int = 0
+    errors: list[str] = []
+

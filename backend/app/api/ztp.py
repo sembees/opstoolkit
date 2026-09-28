@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -10,14 +11,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import crypto, models
 from app.core.auth import get_current_user
 from app.core.schemas import (
+    ZtpClaimIn,
     ZtpDeviceIn,
     ZtpDeviceOut,
     ZtpGenerateResult,
+    ZtpImportIn,
+    ZtpImportOut,
+    ZtpObservation,
+    ZtpObservationsOut,
+    ZtpPositionIn,
+    ZtpPositionOut,
     ZtpTemplateIn,
     ZtpTemplateOut,
 )
+from app.core.timeutil import utcnow
 from app.database import get_db
 from app.core.ziputil import files_to_zip_response
+from app.ct.ztp import positions as ztp_positions
 from app.ct.ztp import server as ztp_server
 from app.ct.ztp.generator import ZtpDevice as GenDevice
 from app.ct.ztp.generator import ZtpProfile, generate_all
@@ -176,6 +186,264 @@ async def delete_device(did: str, db: AsyncSession = Depends(get_db), _user=Depe
     return {"ok": True}
 
 
+# ---------- 落位登记（落位 + 认领） ----------
+# 背景：设备到货时只有「落位 + 规划管理 IP + 规划主机名」，没有 MAC（还没上电）。
+# 先按落位登记（MAC 留空）；设备上电后从 dnsmasq 租约里自动学到 MAC（/observations），
+# 运维做一步「认领」（/claim）把它指到落位，之后即可按 MAC 下发各自配置。
+def _check_mgmt_ip(raw: str) -> str:
+    """管理 IP 必须能被 ipaddress 解析；合法时原样保留（strip 过首尾空白）。"""
+    v = (raw or "").strip()
+    try:
+        ipaddress.ip_address(v)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"管理 IP 格式不正确：{v}")
+    return v
+
+
+def _norm_mac_or_422(raw: str) -> str:
+    """MAC 归一；非空但解析不了 → 422（空串 = 待认领，合法）。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    m = ztp_positions.norm_mac(s)
+    if not m:
+        raise HTTPException(status_code=422, detail=f"MAC 格式不正确：{s}")
+    return m
+
+
+def _dup_conflicts(existing, position: str, mgmt_ip: str, mac: str, exclude_id=None):
+    """返回与 (position, mgmt_ip, mac) 冲突的既有落位（供 409 文案点名）。"""
+    for e in existing:
+        if exclude_id and e.id == exclude_id:
+            continue
+        if e.position == position:
+            return e, "落位"
+        if e.mgmt_ip == mgmt_ip:
+            return e, "管理 IP"
+        if mac and e.mac == mac:
+            return e, "MAC"
+    return None, ""
+
+
+@router.get("/positions", response_model=list[ZtpPositionOut])
+# GET /api/ct/ztp/positions — 落位登记列表（template_id 为空返回全部），按落位编码排序
+async def list_positions(template_id: str = "", db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    q = select(models.ZtpPosition)
+    if template_id:
+        q = q.where(models.ZtpPosition.template_id == template_id)
+    res = await db.execute(q.order_by(models.ZtpPosition.position))
+    return list(res.scalars().all())
+
+
+@router.post("/positions", response_model=ZtpPositionOut)
+# POST /api/ct/ztp/positions — 新建落位（MAC 留空 = 待认领，上电后从租约学到再认领）
+async def create_position(body: ZtpPositionIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    t = await db.get(models.ZtpTemplate, body.template_id) if body.template_id else None
+    if not t:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    position = (body.position or "").strip()
+    mgmt_ip = _check_mgmt_ip(body.mgmt_ip)
+    mac = _norm_mac_or_422(body.mac)
+    res = await db.execute(
+        select(models.ZtpPosition).where(models.ZtpPosition.template_id == body.template_id)
+    )
+    owner, what = _dup_conflicts(list(res.scalars().all()), position, mgmt_ip, mac)
+    if owner is not None:
+        if what == "落位":
+            raise HTTPException(status_code=409, detail=f"该模板下已存在落位 {position}")
+        if what == "管理 IP":
+            raise HTTPException(status_code=409, detail=f"该模板下管理 IP {mgmt_ip} 已被落位 {owner.position} 使用")
+        raise HTTPException(status_code=409, detail=f"该 MAC 已被落位 {owner.position} 认领")
+    p = models.ZtpPosition(
+        template_id=body.template_id, position=position,
+        hostname=(body.hostname or "").strip(), mgmt_ip=mgmt_ip,
+        serial=(body.serial or "").strip(), mac=mac, remark=body.remark or "",
+        source="manual", claimed_at=(utcnow() if mac else None),
+    )
+    db.add(p)
+    await db.commit()
+    await db.refresh(p)
+    return p
+
+
+@router.put("/positions/{pid}", response_model=ZtpPositionOut)
+# PUT /api/ct/ztp/positions/{pid} — 编辑落位（同样的唯一性校验；找不到 → 404）
+async def update_position(pid: str, body: ZtpPositionIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    p = await db.get(models.ZtpPosition, pid)
+    if not p:
+        raise HTTPException(status_code=404, detail="落位不存在")
+    tid = (body.template_id or "").strip() or p.template_id
+    if tid != p.template_id:
+        t = await db.get(models.ZtpTemplate, tid)
+        if not t:
+            raise HTTPException(status_code=404, detail="模板不存在")
+    position = (body.position or "").strip()
+    mgmt_ip = _check_mgmt_ip(body.mgmt_ip)
+    mac = _norm_mac_or_422(body.mac)
+    res = await db.execute(
+        select(models.ZtpPosition).where(models.ZtpPosition.template_id == tid)
+    )
+    owner, what = _dup_conflicts(list(res.scalars().all()), position, mgmt_ip, mac, exclude_id=pid)
+    if owner is not None:
+        if what == "落位":
+            raise HTTPException(status_code=409, detail=f"该模板下已存在落位 {position}")
+        if what == "管理 IP":
+            raise HTTPException(status_code=409, detail=f"该模板下管理 IP {mgmt_ip} 已被落位 {owner.position} 使用")
+        raise HTTPException(status_code=409, detail=f"该 MAC 已被落位 {owner.position} 认领")
+    p.template_id = tid
+    p.position = position
+    p.hostname = (body.hostname or "").strip()
+    p.mgmt_ip = mgmt_ip
+    p.serial = (body.serial or "").strip()
+    p.remark = body.remark or ""
+    # MAC 变更时同步认领状态：清空 = 回到待认领；手工填新 MAC = 手工认领。
+    if mac != (p.mac or ""):
+        p.mac = mac
+        p.claimed_at = utcnow() if mac else None
+        p.source = "manual"
+    await db.commit()
+    await db.refresh(p)
+    return p
+
+
+@router.delete("/positions/{pid}")
+# DELETE /api/ct/ztp/positions/{pid} — 删除落位
+async def delete_position(pid: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    p = await db.get(models.ZtpPosition, pid)
+    if p:
+        await db.delete(p)
+        await db.commit()
+    return {"ok": True}
+
+
+@router.post("/positions/import", response_model=ZtpImportOut)
+# POST /api/ct/ztp/positions/import — 批量导入落位。
+# replace=True 先清空该模板下**所有**落位（破坏性操作，由调用方显式指定）；
+# 同一模板内已存在相同 position 的行做更新，否则新增；解析/校验失败的行计入 errors+skipped。
+async def import_positions(body: ZtpImportIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    if not body.template_id:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    t = await db.get(models.ZtpTemplate, body.template_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    rows, errors = ztp_positions.parse_positions_csv(body.csv)
+    if body.replace:
+        res = await db.execute(
+            select(models.ZtpPosition).where(models.ZtpPosition.template_id == body.template_id)
+        )
+        for e in res.scalars().all():
+            await db.delete(e)
+        await db.flush()
+    res = await db.execute(
+        select(models.ZtpPosition).where(models.ZtpPosition.template_id == body.template_id)
+    )
+    existing = list(res.scalars().all())
+    by_position = {e.position: e for e in existing}
+    by_ip = {(e.mgmt_ip or ""): e for e in existing}
+    by_mac = {(e.mac or ""): e for e in existing if e.mac}
+    created = updated = 0
+    for row in rows:
+        lineno = row.get("_line", "?")
+        position, mgmt_ip = row["position"], row["mgmt_ip"]
+        mac = ztp_positions.norm_mac(row["mac"])
+        target = by_position.get(position)
+        # 管理 IP / MAC 撞到**别的**落位（含同批导入的行）→ 报错跳过：
+        # 否则要么 IntegrityError 500，要么悄悄覆盖别人的规划地址。
+        ip_owner = by_ip.get(mgmt_ip)
+        if ip_owner is not None and (target is None or ip_owner.id != target.id):
+            errors.append("第%s行: 管理 IP %s 与落位 %s 重复" % (lineno, mgmt_ip, ip_owner.position))
+            continue
+        if mac:
+            mac_owner = by_mac.get(mac)
+            if mac_owner is not None and (target is None or mac_owner.id != target.id):
+                errors.append("第%s行: MAC %s 已被落位 %s 认领" % (lineno, mac, mac_owner.position))
+                continue
+        if target is not None:
+            target.hostname = row["hostname"]
+            target.serial = row["serial"]
+            target.remark = row["remark"]
+            target.mgmt_ip = mgmt_ip
+            # CSV 行 MAC 留空 = 不动已有认领状态（避免批量导入误清认领）
+            if mac and mac != (target.mac or ""):
+                target.mac = mac
+                if not target.claimed_at:
+                    target.claimed_at = utcnow()
+            updated += 1
+        else:
+            target = models.ZtpPosition(
+                template_id=body.template_id, position=position,
+                hostname=row["hostname"], mgmt_ip=mgmt_ip, serial=row["serial"],
+                mac=mac, remark=row["remark"], source="manual",
+                claimed_at=(utcnow() if mac else None),
+            )
+            db.add(target)
+            created += 1
+        by_position[position] = target
+        by_ip[mgmt_ip] = target
+        if mac:
+            by_mac[mac] = target
+    await db.commit()
+    return ZtpImportOut(created=created, updated=updated, skipped=len(errors), errors=errors)
+
+
+@router.get("/observations", response_model=ZtpObservationsOut)
+# GET /api/ct/ztp/observations — 从 dnsmasq 租约里"学"到的上电设备列表，
+# 并用（该模板的）落位表按 MAC 反查：命中 = 已认领，填 position_id/position/claimed_hostname。
+# 租约文件读不到**不会 500**：positions.read_leases 把异常转成 note 说明文字。
+async def list_observations(template_id: str = "", db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    leases_path, note, records = ztp_positions.read_leases()
+    q = select(models.ZtpPosition)
+    if template_id:
+        q = q.where(models.ZtpPosition.template_id == template_id)
+    res = await db.execute(q)
+    by_mac = {}
+    for pos in res.scalars().all():
+        m = ztp_positions.norm_mac(pos.mac or "")
+        if m:
+            by_mac[m] = pos
+    observations = []
+    for rec in records:
+        obs = ZtpObservation(
+            mac=rec["mac"], ip=rec["ip"], hostname=rec["hostname"],
+            client_id=rec["client_id"], expires=rec["expires"],
+        )
+        pos = by_mac.get(rec["mac"])
+        if pos is not None:
+            obs.position_id = pos.id
+            obs.position = pos.position
+            obs.claimed_hostname = pos.hostname
+        observations.append(obs)
+    return ZtpObservationsOut(leases_path=leases_path, note=note, observations=observations)
+
+
+@router.post("/claim")
+# POST /api/ct/ztp/claim — 认领：把租约里学到的 MAC 指到一条落位。
+# 成功后必须**重新生成并部署**，该设备才会按 MAC 拿到自己落位的配置。
+async def claim_position(body: ZtpClaimIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    p = await db.get(models.ZtpPosition, body.position_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="落位不存在")
+    mac = ztp_positions.norm_mac(body.mac)
+    if not mac:
+        raise HTTPException(status_code=422, detail="MAC 格式不正确")
+    res = await db.execute(
+        select(models.ZtpPosition).where(models.ZtpPosition.template_id == p.template_id)
+    )
+    for e in res.scalars().all():
+        if e.id != p.id and (e.mac or "") == mac:
+            raise HTTPException(status_code=409, detail=f"该 MAC 已被落位 {e.position} 认领")
+    p.mac = mac
+    p.claimed_at = utcnow()
+    p.source = "claim"
+    await db.commit()
+    await db.refresh(p)
+    return {
+        "ok": True,
+        "position": ZtpPositionOut.model_validate(p),
+        "next": ["请重新生成并部署，让该设备取到自己的配置"],
+    }
+
+
 # ---------- 生成 ----------
 async def _gen_ztp_files(tid: str, body: dict, db: AsyncSession) -> dict:
     """生成 ZTP 全部部署文件 (设备配置 + dnsmasq + 中间文件 + README)。"""
@@ -204,8 +472,14 @@ async def _gen_ztp_files(tid: str, body: dict, db: AsyncSession) -> dict:
         for x in body.get("devices", [])
     ]
     devices = db_devices + inline_devices
+    # 落位登记（落位 + 认领）：落位设备排在 devices 之后，一并喂给生成器 ——
+    # 已认领的落位按 MAC 下发各自配置，未认领的落位只生成注释占位。
+    res_pos = await db.execute(
+        select(models.ZtpPosition).where(models.ZtpPosition.template_id == tid)
+    )
+    positions = list(res_pos.scalars().all())
     try:
-        return generate_all(prof, devices)
+        return generate_all(prof, devices, positions=positions)
     except ValueError as e:
         # 生成期校验失败（例如模板没填设备管理员口令）以 4xx + 中文提示暴露，而不是 500。
         # 与 api/pxe.py 的 _gen_pxe_files 同一处理口径。

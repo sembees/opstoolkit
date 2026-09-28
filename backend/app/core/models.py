@@ -5,7 +5,17 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.timeutil import utcnow
@@ -249,4 +259,41 @@ class ZtpDevice(Base):
     serial: Mapped[str] = mapped_column(String(128), default="")
     mgmt_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # ZTP 完成后回填的管理 IP
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ZtpPosition(Base):
+    """ZTP 落位登记表（落位 + 认领）。
+
+    真实流程：设备到货时运维手里只有「落位（机架/机柜/U位）+ 规划好的管理 IP +
+    规划主机名」，**没有 MAC**（设备还没上电）。这里先按落位登记；设备第一次上电
+    向 DHCP 请求地址时，dnsmasq 的租约文件里就记录了它的 MAC —— 系统从租约里
+    自动学到 MAC，运维只需在界面上做一步「认领」（把学到的设备指到某个落位），
+    之后即可按 MAC 下发该落位规划好的配置。全程不需要手抄 MAC。
+
+    mac 为空 / claimed_at 为 NULL = 待认领；认领后 source="claim"，
+    手工直接填 MAC 时 source="manual"。
+    """
+    __tablename__ = "ztp_positions"
+    __table_args__ = (
+        UniqueConstraint("template_id", "position", name="uq_ztp_pos_position"),
+        UniqueConstraint("template_id", "mgmt_ip", name="uq_ztp_pos_mgmt_ip"),
+        # 同一模板内非空 MAC 唯一：partial 唯一索引（SQLite 支持 sqlite_where；
+        # 其它后端会忽略该子句 —— 本项目只用 SQLite）。
+        # 空串表示"还没认领"，必须排除在外，否则所有待认领落位互相冲突。
+        Index("uq_ztp_pos_mac", "template_id", "mac", unique=True,
+              sqlite_where=text("mac <> ''")),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    template_id: Mapped[str] = mapped_column(ForeignKey("ztp_templates.id", ondelete="CASCADE"), index=True)
+    position: Mapped[str] = mapped_column(String(128))                    # 落位编码，例如 A01-03-U12
+    hostname: Mapped[str] = mapped_column(String(128), default="")        # 规划主机名
+    mgmt_ip: Mapped[str] = mapped_column(String(64))                      # 规划管理 IP（核心字段）
+    serial: Mapped[str] = mapped_column(String(128), default="")          # 序列号（可选，来自入库信息）
+    mac: Mapped[str] = mapped_column(String(32), default="", index=True)  # 认领后回填；空 = 还没认领
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="manual")     # manual / claim
+    remark: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

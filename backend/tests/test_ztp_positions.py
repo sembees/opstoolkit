@@ -1,0 +1,521 @@
+# -*- coding: utf-8 -*-
+"""ZTP 落位登记 + MAC 认领测试。
+
+背景：设备到货时只有「落位 + 规划管理 IP + 规划主机名」，没有 MAC（还没上电）。
+覆盖：
+  1. norm_mac 三种写法归一 + 非法输入返回空串；
+  2. parse_leases 解析 dnsmasq 租约（* 主机名 / client-id / 注释行）；
+  3. parse_positions_csv（正常行 + IP 非法 + 落位为空，错误文本含行号）；
+  4. 落位 HTTP 接口（创建 200 / 管理 IP 非法 422 / 落位重复 409 / 模板不存在 404）；
+  5. POST /claim：认领后 mac/claimed_at/source 正确；重复认领到另一落位 → 409；
+  6. generate_all(positions=...)：有 mac 的落位出现 dhcp-host= 且 bootfile 指向正确
+     文件名；无 mac 的落位只有注释、不出现 dhcp-host=；两台落位各自的配置文件都在
+     files 里。ZTP 生成器没有口令就抛 ValueError —— 这里显式给测试口令。
+"""
+import asyncio
+import os
+import pathlib
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import NullPool  # noqa: E402
+
+from app.core import models  # noqa: E402
+from app.ct.ztp import positions as ztp_positions  # noqa: E402
+from app.ct.ztp.generator import ZtpDevice, ZtpProfile, generate_all  # noqa: E402
+
+LEASES_TEXT = (
+    "# 注释行 / duid 行都要忽略\n"
+    "1700000000 aa:bb:cc:dd:ee:01 10.0.0.11 SW01 01:aa:bb:cc:dd:ee:01\n"
+    "1700000001 AA-BB-CC-DD-EE-02 10.0.0.12 *\n"
+    "1700000002 aabb.ccdd.ee03 10.0.0.13 sw03\n"
+    "this line is broken\n"
+)
+
+
+class NormMacTest(unittest.TestCase):
+    def test_three_common_forms_normalize(self):
+        expect = "aa:bb:cc:dd:ee:ff"
+        for raw in ("aabb.ccdd.eeff", "AA:BB:CC:DD:EE:FF", "aabbccddeeff",
+                    "AA-BB-CC-DD-EE-FF"):
+            with self.subTest(raw=raw):
+                self.assertEqual(ztp_positions.norm_mac(raw), expect)
+
+    def test_invalid_inputs_return_empty(self):
+        for raw in ("", None, "hello", "aa:bb:cc:dd:ee", "aabb.ccdd.eefff",
+                    "zz:bb:cc:dd:ee:ff", "12"):
+            with self.subTest(raw=raw):
+                self.assertEqual(ztp_positions.norm_mac(raw), "")
+
+
+class ParseLeasesTest(unittest.TestCase):
+    def test_parse_fixture(self):
+        records = ztp_positions.parse_leases(LEASES_TEXT)
+        self.assertEqual(len(records), 3)
+        r0 = records[0]
+        self.assertEqual(r0["mac"], "aa:bb:cc:dd:ee:01")
+        self.assertEqual(r0["ip"], "10.0.0.11")
+        self.assertEqual(r0["hostname"], "SW01")
+        self.assertEqual(r0["client_id"], "01:aa:bb:cc:dd:ee:01")
+        self.assertEqual(r0["expires"], "1700000000")
+        # `*` 主机名置空；大写连字符写法归一
+        self.assertEqual(records[1]["mac"], "aa:bb:cc:dd:ee:02")
+        self.assertEqual(records[1]["hostname"], "")
+        self.assertEqual(records[1]["client_id"], "")
+        # 点分写法归一
+        self.assertEqual(records[2]["mac"], "aa:bb:cc:dd:ee:03")
+        self.assertEqual(records[2]["hostname"], "sw03")
+
+    def test_empty_input(self):
+        self.assertEqual(ztp_positions.parse_leases(""), [])
+        self.assertEqual(ztp_positions.parse_leases(None), [])
+
+
+class LeasesCandidatesTest(unittest.TestCase):
+    def test_order_with_env_first(self):
+        env = os.environ.get("OPS_DNSMASQ_LEASES")
+        os.environ["OPS_DNSMASQ_LEASES"] = "/x/leases"
+        try:
+            self.assertEqual(ztp_positions.leases_candidates(), [
+                "/x/leases",
+                # 实测（dnsmasq 2.85，/proc/<pid>/fd 取证）：/var/lib/dnsmasq/ 在前
+                "/var/lib/dnsmasq/dnsmasq.leases",
+                "/var/lib/misc/dnsmasq.leases",
+                "/var/lib/misc/dnsmasq/dnsmasq.leases",
+            ])
+        finally:
+            if env is None:
+                os.environ.pop("OPS_DNSMASQ_LEASES", None)
+            else:
+                os.environ["OPS_DNSMASQ_LEASES"] = env
+
+    def test_order_without_env(self):
+        env = os.environ.pop("OPS_DNSMASQ_LEASES", None)
+        try:
+            self.assertEqual(ztp_positions.leases_candidates(), [
+                "/var/lib/dnsmasq/dnsmasq.leases",
+                "/var/lib/misc/dnsmasq.leases",
+                "/var/lib/misc/dnsmasq/dnsmasq.leases",
+            ])
+        finally:
+            if env is not None:
+                os.environ["OPS_DNSMASQ_LEASES"] = env
+
+
+class ReadLeasesTest(unittest.TestCase):
+    def test_reads_first_readable_candidate(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = pathlib.Path(td) / "dnsmasq.leases"
+            f.write_text("1700000000 aa:bb:cc:dd:ee:01 10.0.0.11 SW01\n", encoding="utf-8")
+            orig = ztp_positions.leases_candidates
+            ztp_positions.leases_candidates = lambda: [str(pathlib.Path(td, "no.leases")), str(f)]
+            try:
+                path, note, records = ztp_positions.read_leases()
+            finally:
+                ztp_positions.leases_candidates = orig
+            self.assertEqual(path, str(f))
+            self.assertIn(str(f), note)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["mac"], "aa:bb:cc:dd:ee:01")
+
+    def test_unreadable_returns_note_never_raises(self):
+        orig = ztp_positions.leases_candidates
+        ztp_positions.leases_candidates = lambda: ["Z:/definitely/not/here.leases"]
+        try:
+            path, note, records = ztp_positions.read_leases()
+        finally:
+            ztp_positions.leases_candidates = orig
+        self.assertEqual(path, "")
+        self.assertEqual(records, [])
+        self.assertIn("读取不到 dnsmasq 租约文件", note)
+        self.assertIn("OPS_DNSMASQ_LEASES", note)
+        self.assertIn("Z:/definitely/not/here.leases", note)
+
+
+class ParsePositionsCsvTest(unittest.TestCase):
+    CSV_TEXT = (
+        "落位,管理IP,主机名,序列号,MAC,备注\n"
+        "A01-03-U11,10.0.0.11,sw11,SN11,AA-BB-CC-DD-EE-11,web 接入\n"
+        "A01-03-U12,10.0.0.12,sw12,SN12,,\n"
+        "A01-03-U13,10.0.0.13,sw13,SN13,aabb.ccdd.ee13,核心\n"
+        "A01-03-U14,999.1.1.1,sw14,,,非法 IP\n"
+        ",10.0.0.15,sw15,,,落位为空\n"
+    )
+
+    def test_parse_with_chinese_header(self):
+        rows, errors = ztp_positions.parse_positions_csv(self.CSV_TEXT)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(errors), 2)
+        self.assertEqual(rows[0]["position"], "A01-03-U11")
+        self.assertEqual(rows[0]["mgmt_ip"], "10.0.0.11")  # 保留原字符串
+        self.assertEqual(rows[0]["hostname"], "sw11")
+        self.assertEqual(rows[0]["serial"], "SN11")
+        self.assertEqual(rows[0]["remark"], "web 接入")
+        # 错误文本含行号（N 从 1 起、含表头行）：非法 IP 在第 5 行、落位为空在第 6 行
+        self.assertIn("第5行", errors[0])
+        self.assertIn("999.1.1.1", errors[0])
+        self.assertIn("第6行", errors[1])
+        self.assertIn("落位为空", errors[1])
+
+    def test_parse_with_english_header(self):
+        csv_text = "position,mgmt_ip,hostname,serial,mac,remark\nB02-U01,10.0.1.1,host1,SN1,,x\n"
+        rows, errors = ztp_positions.parse_positions_csv(csv_text)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["position"], "B02-U01")
+        self.assertEqual(rows[0]["mgmt_ip"], "10.0.1.1")
+
+    def test_parse_without_header_fixed_columns(self):
+        csv_text = "A01-01-U01,10.9.9.9,sw9,SN9,aa:bb:cc:dd:ee:09,备注\n"
+        rows, errors = ztp_positions.parse_positions_csv(csv_text)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["position"], "A01-01-U01")
+        self.assertEqual(rows[0]["hostname"], "sw9")
+        self.assertEqual(rows[0]["remark"], "备注")
+
+
+class _ApiTestBase(unittest.TestCase):
+    """落位 HTTP 接口测试：临时文件 SQLite + 覆盖 JWT/DB 依赖，不碰真实库。
+
+    NullPool 的原因：TestClient 的每个请求跑在**自己的事件循环**里，而测试里用
+    asyncio.run 播种数据又是另一个循环 —— 池化的 aiosqlite 连接会绑死在创建它的
+    循环上（跨循环复用直接报错），所以连接即用即建、用完即关。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        db_path = pathlib.Path(cls._tmp.name) / "positions-test.db"
+        cls.engine = create_async_engine(
+            "sqlite+aiosqlite:///" + db_path.as_posix(), poolclass=NullPool)
+        cls.SessionLocal = async_sessionmaker(cls.engine, class_=AsyncSession, expire_on_commit=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        asyncio.run(cls.engine.dispose())
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        async def _reset():
+            async with self.engine.begin() as conn:
+                await conn.run_sync(models.Base.metadata.drop_all)
+                await conn.run_sync(models.Base.metadata.create_all)
+        asyncio.run(_reset())
+
+    def _seed_template(self, name="t") -> str:
+        async def _go():
+            async with self.SessionLocal() as s:
+                t = models.ZtpTemplate(name=name, vendor="h3c")
+                s.add(t)
+                await s.commit()
+                await s.refresh(t)
+                return t.id
+        return asyncio.run(_go())
+
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.api import ztp as ztp_api
+        from app.core.auth import get_current_user
+        from app.database import get_db
+
+        app = FastAPI()
+        app.include_router(ztp_api.router, prefix="/api/ct/ztp")
+
+        async def _override_db():
+            async with self.SessionLocal() as session:
+                yield session
+
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": "t", "username": "t", "display_name": "t", "role": "admin"}
+        app.dependency_overrides[get_db] = _override_db
+        return TestClient(app)
+
+    def _create(self, client, tid, position="A01-03-U12", mgmt_ip="10.0.0.12", **kw):
+        payload = {"template_id": tid, "position": position, "mgmt_ip": mgmt_ip,
+                   "hostname": kw.get("hostname", "sw12"), "serial": kw.get("serial", "SN12"),
+                   "mac": kw.get("mac", ""), "remark": kw.get("remark", "")}
+        return client.post("/api/ct/ztp/positions", json=payload)
+
+
+class ZtpPositionsApiTest(_ApiTestBase):
+    def test_create_position_returns_200_and_defaults(self):
+        client = self._client()
+        tid = self._seed_template("T1")
+        r = self._create(client, tid)
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        self.assertEqual(data["position"], "A01-03-U12")
+        self.assertEqual(data["template_id"], tid)
+        self.assertEqual(data["mgmt_ip"], "10.0.0.12")
+        self.assertEqual(data["mac"], "")
+        self.assertIsNone(data["claimed_at"])
+        self.assertEqual(data["source"], "manual")
+        r = client.get("/api/ct/ztp/positions", params={"template_id": tid})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([x["position"] for x in r.json()], ["A01-03-U12"])
+        r = client.get("/api/ct/ztp/positions")
+        self.assertEqual(len(r.json()), 1)
+
+    def test_mgmt_ip_invalid_is_422(self):
+        client = self._client()
+        tid = self._seed_template("T2")
+        r = self._create(client, tid, mgmt_ip="999.1.1.1")
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("管理 IP 格式不正确", r.json()["detail"])
+
+    def test_duplicate_position_is_409(self):
+        client = self._client()
+        tid = self._seed_template("T3")
+        self.assertEqual(self._create(client, tid).status_code, 200)
+        r = self._create(client, tid, mgmt_ip="10.0.0.99")
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("已存在落位 A01-03-U12", r.json()["detail"])
+
+    def test_template_missing_is_404(self):
+        client = self._client()
+        r = self._create(client, "no-such-template")
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertEqual(r.json()["detail"], "模板不存在")
+        r = client.post("/api/ct/ztp/positions",
+                        json={"template_id": "", "position": "X", "mgmt_ip": "10.0.0.1"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_update_and_delete_position(self):
+        client = self._client()
+        tid = self._seed_template("T8")
+        pid = self._create(client, tid, position="A01-03-U51", mgmt_ip="10.0.0.51").json()["id"]
+        r = client.put("/api/ct/ztp/positions/" + pid,
+                       json={"template_id": tid, "position": "A01-03-U52", "mgmt_ip": "10.0.0.52"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["position"], "A01-03-U52")
+        self._create(client, tid, position="A01-03-U53", mgmt_ip="10.0.0.53")
+        r = client.put("/api/ct/ztp/positions/" + pid,
+                       json={"template_id": tid, "position": "A01-03-U53", "mgmt_ip": "10.0.0.52"})
+        self.assertEqual(r.status_code, 409, r.text)
+        r = client.delete("/api/ct/ztp/positions/" + pid)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["ok"])
+        r = client.get("/api/ct/ztp/positions", params={"template_id": tid})
+        self.assertEqual([x["position"] for x in r.json()], ["A01-03-U53"])
+
+    def test_import_create_update_and_errors(self):
+        client = self._client()
+        tid = self._seed_template("T5")
+        csv_text = (
+            "落位,管理IP,主机名,序列号,MAC,备注\n"
+            "A01-03-U31,10.0.0.31,sw31,SN31,,\n"
+            "A01-03-U32,999.9.9.9,sw32,,,\n"
+            ",10.0.0.33,sw33,,,\n"
+        )
+        r = client.post("/api/ct/ztp/positions/import",
+                        json={"template_id": tid, "csv": csv_text})
+        self.assertEqual(r.status_code, 200, r.text)
+        out = r.json()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["created"], 1)
+        self.assertEqual(out["updated"], 0)
+        self.assertEqual(out["skipped"], 2)
+        self.assertEqual(len(out["errors"]), 2)
+        self.assertIn("第3行", out["errors"][0])
+        self.assertIn("第4行", out["errors"][1])
+        # 相同落位再导 → 更新
+        csv2 = "A01-03-U31,10.0.0.31,sw31x,SN31,,改名\n"
+        r = client.post("/api/ct/ztp/positions/import", json={"template_id": tid, "csv": csv2})
+        out = r.json()
+        self.assertEqual(out["created"], 0)
+        self.assertEqual(out["updated"], 1)
+        # replace=True：先清空再导入
+        r = client.post("/api/ct/ztp/positions/import",
+                        json={"template_id": tid, "csv": csv2, "replace": True})
+        out = r.json()
+        self.assertEqual(out["created"], 1)
+        r = client.get("/api/ct/ztp/positions", params={"template_id": tid})
+        self.assertEqual(len(r.json()), 1)
+        self.assertEqual(r.json()[0]["hostname"], "sw31x")
+        # 模板不存在 → 404
+        r = client.post("/api/ct/ztp/positions/import", json={"template_id": "nope", "csv": "a,b"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_observations_match_claimed_positions(self):
+        from app.api import ztp as ztp_api
+        client = self._client()
+        tid = self._seed_template("T6")
+        self._create(client, tid, position="A01-03-U41", mgmt_ip="10.0.0.41", hostname="sw41")
+        positions = client.get("/api/ct/ztp/positions", params={"template_id": tid}).json()
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": positions[0]["id"], "mac": "aa:bb:cc:dd:ee:41"})
+        self.assertEqual(r.status_code, 200, r.text)
+        leases = (
+            "1700000000 aa:bb:cc:dd:ee:41 10.0.0.77 sw41-lease 01:aa:bb:cc:dd:ee:41\n"
+            "1700000000 aa:bb:cc:dd:ee:99 10.0.0.99 *\n"
+        )
+        records = ztp_positions.parse_leases(leases)
+        orig = ztp_positions.read_leases
+        ztp_positions.read_leases = lambda: ("/tmp/leases", "读取 dnsmasq 租约文件：/tmp/leases（2 条）", records)
+        try:
+            r = client.get("/api/ct/ztp/observations", params={"template_id": tid})
+        finally:
+            ztp_positions.read_leases = orig
+        self.assertEqual(r.status_code, 200, r.text)
+        out = r.json()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["leases_path"], "/tmp/leases")
+        self.assertEqual(len(out["observations"]), 2)
+        obs0 = next(o for o in out["observations"] if o["mac"] == "aa:bb:cc:dd:ee:41")
+        self.assertEqual(obs0["ip"], "10.0.0.77")
+        self.assertEqual(obs0["hostname"], "sw41-lease")
+        self.assertEqual(obs0["client_id"], "01:aa:bb:cc:dd:ee:41")
+        self.assertEqual(obs0["position_id"], positions[0]["id"])
+        self.assertEqual(obs0["position"], "A01-03-U41")
+        self.assertEqual(obs0["claimed_hostname"], "sw41")
+        obs1 = next(o for o in out["observations"] if o["mac"] == "aa:bb:cc:dd:ee:99")
+        self.assertEqual(obs1["position_id"], "")
+        self.assertEqual(obs1["position"], "")
+
+    def test_observations_without_leases_file_is_note_not_500(self):
+        client = self._client()
+        self._seed_template("T7")
+        orig = ztp_positions.read_leases
+        ztp_positions.read_leases = lambda: ("", "读取不到 dnsmasq 租约文件（…）：Z:/nope", [])
+        try:
+            r = client.get("/api/ct/ztp/observations")
+        finally:
+            ztp_positions.read_leases = orig
+        self.assertEqual(r.status_code, 200, r.text)
+        out = r.json()
+        self.assertEqual(out["leases_path"], "")
+        self.assertIn("读取不到 dnsmasq 租约文件", out["note"])
+        self.assertEqual(out["observations"], [])
+
+
+class ZtpClaimApiTest(_ApiTestBase):
+    def test_claim_fills_mac_source_and_blocks_second_use(self):
+        client = self._client()
+        tid = self._seed_template("T4")
+        id1 = self._create(client, tid, position="A01-03-U21", mgmt_ip="10.0.0.21").json()["id"]
+        id2 = self._create(client, tid, position="A01-03-U22", mgmt_ip="10.0.0.22").json()["id"]
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": id1, "mac": "AA-BB-CC-DD-EE-66"})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["position"]["mac"], "aa:bb:cc:dd:ee:66")  # 归一化回填
+        self.assertEqual(body["position"]["source"], "claim")
+        self.assertIsNotNone(body["position"]["claimed_at"])
+        self.assertTrue(any("重新生成并部署" in x for x in body["next"]))
+        # 同一 MAC 认领到同模板另一条落位 → 409
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": id2, "mac": "aa:bb:cc:dd:ee:66"})
+        self.assertEqual(r.status_code, 409, r.text)
+        # MAC 格式不正确 → 422；落位不存在 → 404
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": id2, "mac": "hello"})
+        self.assertEqual(r.status_code, 422)
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": "nope", "mac": "aa:bb:cc:dd:ee:66"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_claimed_mac_conflicts_with_new_position_too(self):
+        client = self._client()
+        tid = self._seed_template("T10")
+        id1 = self._create(client, tid, position="A01-03-U71", mgmt_ip="10.0.0.71").json()["id"]
+        client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": id1, "mac": "aa:bb:cc:dd:ee:77"})
+        # 新建落位带同一 MAC（手工登记）→ 409
+        r = self._create(client, tid, position="A01-03-U72", mgmt_ip="10.0.0.72",
+                         mac="AA:BB:CC:DD:EE:77")
+        self.assertEqual(r.status_code, 409, r.text)
+
+
+class ZtpPositionsGeneratorTest(unittest.TestCase):
+    """generate_all(positions=...)：落位设备排在 devices 之后，同名文件后者覆盖前者。"""
+
+    PW = "TestPw@123"
+
+    def _profile(self):
+        return ZtpProfile(vendor="h3c", admin_password=self.PW, dhcp_iface="ens19",
+                          server_ip="192.168.199.1", tftp_root="/srv/tftp",
+                          http_root="http://192.168.199.1:8000/ztp",
+                          dhcp_start="192.168.199.210", dhcp_end="192.168.199.240",
+                          mgmt_gateway="192.168.199.1")
+
+    def test_generate_all_with_positions(self):
+        claimed = {"position": "A01-03-U12", "hostname": "", "mgmt_ip": "192.168.199.30",
+                   "serial": "SN012", "mac": "AA:BB:CC:DD:EE:02"}
+        pending = {"position": "A01-03-U13", "hostname": "sw13", "mgmt_ip": "192.168.199.31",
+                   "serial": "", "mac": ""}
+        files = generate_all(self._profile(), [], positions=[claimed, pending])
+        conf = files["dnsmasq.conf"]
+        # 有 mac 的落位：dhcp-host + bootfile 指向与配置文件一致的名字
+        self.assertIn("dhcp-host=aa:bb:cc:dd:ee:02,set:pos_aabbccddee02", conf)
+        self.assertIn('dhcp-option=tag:pos_aabbccddee02,option:bootfile-name,"ztp/SN012.cfg"', conf)
+        # 无 mac 的落位：只有注释，整个文件里不该出现第二台设备的 dhcp-host=
+        self.assertIn("A01-03-U13: 待认领", conf)
+        hosts = [ln for ln in conf.splitlines() if ln.startswith("dhcp-host=")]
+        self.assertEqual(hosts, ["dhcp-host=aa:bb:cc:dd:ee:02,set:pos_aabbccddee02"])
+        # 两台落位各自的配置文件都在 files 里；主机名空 → 落位编码兜底；规划 IP 生效
+        self.assertIn("ztp/SN012.cfg", files)
+        self.assertIn("ztp/sw13.cfg", files)
+        self.assertIn("sysname A01-03-U12", files["ztp/SN012.cfg"])
+        self.assertIn("sysname sw13", files["ztp/sw13.cfg"])
+        self.assertIn("ip address 192.168.199.30 255.255.255.0", files["ztp/SN012.cfg"])
+        self.assertIn("ip address 192.168.199.31 255.255.255.0", files["ztp/sw13.cfg"])
+
+    def test_positions_accepted_as_objects(self):
+        """API 传的是 ORM 对象 —— 生成器必须同时吃 dict 和属性访问。"""
+
+        class _Pos:
+            position = "A01-03-U14"
+            hostname = ""
+            mgmt_ip = "192.168.199.40"
+            serial = ""
+            mac = "AA-BB-CC-DD-EE-14"
+
+        files = generate_all(self._profile(), [], positions=[_Pos()])
+        conf = files["dnsmasq.conf"]
+        self.assertIn("dhcp-host=aa:bb:cc:dd:ee:14,set:pos_aabbccddee14", conf)
+        self.assertIn('option:bootfile-name,"ztp/A01-03-U14.cfg"', conf)
+        self.assertIn("ztp/A01-03-U14.cfg", files)
+
+    def test_position_overrides_same_stem_device(self):
+        """落位排在 devices 之后：同文件名（同 stem）时落位规划覆盖手工登记。"""
+        dev = ZtpDevice(hostname="SW01", mac="00:11:22:33:44:55", mgmt_ip="10.9.9.9")
+        pos = {"position": "A01-03-U15", "hostname": "SW01", "mgmt_ip": "192.168.199.50",
+               "serial": "", "mac": ""}
+        files = generate_all(self._profile(), [dev], positions=[pos])
+        cfg = files["ztp/SW01.cfg"]
+        self.assertIn("ip address 192.168.199.50 255.255.255.0", cfg)
+        self.assertNotIn("10.9.9.9", cfg)
+
+    def test_readme_documents_position_flow_and_counts(self):
+        claimed = {"position": "A01-03-U12", "hostname": "", "mgmt_ip": "192.168.199.30",
+                   "serial": "SN012", "mac": "AA:BB:CC:DD:EE:02"}
+        pending = {"position": "A01-03-U13", "hostname": "sw13", "mgmt_ip": "192.168.199.31",
+                   "serial": "", "mac": ""}
+        files = generate_all(self._profile(), [], positions=[claimed, pending])
+        r = files["README.txt"]
+        self.assertIn("落位登记 + 认领", r)
+        self.assertIn("不需要手抄", r)
+        self.assertIn("只会拿到 ztp/default.cfg", r)
+        self.assertIn("落位: 2 个（其中已认领 1 个）", r)
+        self.assertIn("本批次登记设备: 0 台", r)
+
+    def test_generate_all_without_positions_keeps_old_behavior(self):
+        p = self._profile()
+        files = generate_all(p, [ZtpDevice(hostname="SW1", mac="00:11:22:33:44:55")])
+        conf = files["dnsmasq.conf"]
+        self.assertIn("dhcp-host=00:11:22:33:44:55", conf)
+        self.assertNotIn("落位登记（认领后按 MAC 下发各自配置）", conf)
+        self.assertIn("本批次登记设备: 1 台", files["README.txt"])
+        self.assertIn("落位: 0 个（其中已认领 0 个）", files["README.txt"])
+
+
+if __name__ == "__main__":
+    unittest.main()

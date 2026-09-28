@@ -35,6 +35,13 @@ services:
       # "刚写的配置到底有没有被正在跑的 dnsmasq 加载"。不挂的后果实测过 ——
       # 宿主机明明重载成功，容器里 open() 永远 ENOENT，部署报失败。
       - /srv/opstk/state:/srv/opstk/state
+      # dnsmasq 的租约文件目录。**ZTP 的「落位认领」要靠它**：设备到货时运维
+      # 手里只有落位和规划 IP、没有 MAC，而设备一上电 dnsmasq 就把它的 MAC 记进
+      # 租约里 —— 容器读得到这个文件，才能把"上电了但还没认领"的设备列出来，
+      # 运维点一下认领即可（不用手抄 MAC）。路径按宿主机原样挂（只读），
+      # 换发行版把租约放别处时用环境变量 OPS_DNSMASQ_LEASES 指定即可。
+      # 实测本机（dnsmasq 2.85）真实路径是 /var/lib/dnsmasq/dnsmasq.leases。
+      - /var/lib/dnsmasq:/var/lib/dnsmasq:ro
     restart: unless-stopped
 
 volumes:

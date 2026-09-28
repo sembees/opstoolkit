@@ -91,6 +91,73 @@
       </el-table>
     </el-card>
 
+    <!-- 落位登记（落位 + 认领）：设备到货时只有落位/规划IP/主机名，没有 MAC ——
+         MAC 由系统从 dnsmasq 租约里自动学到，运维只做一步「认领」，全程不手抄 MAC -->
+    <el-card shadow="never" style="margin-top: 16px">
+      <template #header>
+        <div style="display: flex; justify-content: space-between; align-items: center">
+          <span style="font-weight: 600"><el-icon><Location /></el-icon> ZTP 落位登记（落位 + 认领）</span>
+          <div>
+            <el-select v-model="posTemplateId" filterable placeholder="选择模板" size="small" style="width: 210px; margin-right: 8px" @change="loadPositionData">
+              <el-option v-for="t in templates" :key="t.id" :label="t.name + ' (' + vendorLabel(t.vendor) + ')'" :value="t.id" />
+            </el-select>
+            <el-button type="primary" size="small" @click="openPosDialog()"><el-icon><Plus /></el-icon> 新增落位</el-button>
+            <el-button size="small" @click="openImportDialog"><el-icon><Upload /></el-icon> 批量导入</el-button>
+            <el-button size="small" @click="loadPositionData"><el-icon><Refresh /></el-icon> 刷新</el-button>
+          </div>
+        </div>
+      </template>
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px">
+        <template #title>不需要手抄 MAC</template>
+        <div style="font-size:12px;line-height:1.6">
+          设备到货时只有落位（机架/机柜/U位）和规划好的管理 IP/主机名 —— 先按落位登记（MAC 留空）；
+          设备第一次上电向 DHCP 请求地址时，dnsmasq 的租约里就记录了它的 MAC，
+          在下方「待认领设备」里点「认领到落位」即可。认领后<b>重新生成并部署</b>，
+          设备就会拿到自己落位规划的主机名/管理 IP；未认领的落位只会拿到 <code>ztp/default.cfg</code>。
+        </div>
+      </el-alert>
+      <el-alert v-if="obsNote" type="warning" :closable="false" show-icon style="margin-bottom: 10px" :title="obsNote" />
+      <el-divider content-position="left">待认领设备（来自 dnsmasq 租约）</el-divider>
+      <el-table :data="observations" stripe size="small" empty-text="租约里暂时没有设备；设备上电接入开局网络后会出现在这里">
+        <el-table-column prop="mac" label="MAC" width="160" />
+        <el-table-column prop="ip" label="拿到的IP" width="130" />
+        <el-table-column prop="hostname" label="租约主机名" min-width="120" />
+        <el-table-column label="状态" width="190">
+          <template #default="{ row }">
+            <el-tag v-if="row.position" type="success" size="small">已指向落位 {{ row.position }}</el-tag>
+            <el-tag v-else type="info" size="small">未认领</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" fixed="right">
+          <template #default="{ row }">
+            <el-button type="primary" link size="small" :disabled="!!row.position_id" @click="openClaimDialog(row)">认领到落位</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-divider content-position="left">落位表</el-divider>
+      <el-table :data="positions" stripe size="small">
+        <el-table-column prop="position" label="落位" min-width="120" />
+        <el-table-column prop="hostname" label="主机名" min-width="110" />
+        <el-table-column prop="mgmt_ip" label="规划管理IP" width="130" />
+        <el-table-column prop="serial" label="序列号" width="130" />
+        <el-table-column prop="mac" label="MAC" width="160" />
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="row.mac" type="success" size="small">已认领</el-tag>
+            <el-tag v-else type="warning" size="small">待认领</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" @click="openPosDialog(row)">编辑</el-button>
+            <el-popconfirm title="确定删除?" @confirm="delPosition(row.id)">
+              <template #reference><el-button type="danger" link size="small">删除</el-button></template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
     <!-- 模板编辑弹窗 -->
     <el-dialog v-model="templateDialog" :title="editingId ? '编辑开局模板' : '新建开局模板'" width="820px" :close-on-click-modal="false">
       <el-form :model="form" label-width="100px" size="default">
@@ -254,6 +321,84 @@
         <el-button type="primary" @click="confirmInlineDevice">添加</el-button>
       </template>
     </el-dialog>
+
+    <!-- 落位新增/编辑弹窗 -->
+    <el-dialog v-model="posDialog" :title="editingPosId ? '编辑落位' : '新增落位'" width="520px">
+      <el-form :model="posForm" label-width="100px" size="default">
+        <el-form-item label="所属模板">
+          <el-select v-model="posForm.template_id" filterable placeholder="选择模板" style="width:100%">
+            <el-option v-for="t in templates" :key="t.id" :label="t.name + ' (' + vendorLabel(t.vendor) + ')'" :value="t.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="落位"><el-input v-model="posForm.position" placeholder="例如 A01-03-U12" /></el-form-item>
+        <el-form-item label="规划管理IP"><el-input v-model="posForm.mgmt_ip" placeholder="规划好的管理 IP，例如 10.0.0.12" /></el-form-item>
+        <el-form-item label="主机名"><el-input v-model="posForm.hostname" placeholder="可选，留空用落位编码兜底" /></el-form-item>
+        <el-form-item label="序列号"><el-input v-model="posForm.serial" placeholder="可选" /></el-form-item>
+        <el-form-item label="MAC"><el-input v-model="posForm.mac" placeholder="选填；留空 = 待认领（上电后从租约学到）" /></el-form-item>
+        <el-form-item label="备注"><el-input v-model="posForm.remark" type="textarea" :rows="2" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="posDialog = false">取消</el-button>
+        <el-button type="primary" :loading="savingPos" @click="savePosition">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 落位批量导入弹窗 -->
+    <el-dialog v-model="importDialog" title="批量导入落位" width="640px">
+      <el-alert type="info" :closable="false" style="margin-bottom: 8px">
+        <div style="font-size:12px;line-height:1.6">
+          每行一条，逗号分隔：<code>落位,管理IP,主机名,序列号,MAC,备注</code>；
+          带表头也可以（自动跳过）；MAC 留空 = 待认领。
+        </div>
+      </el-alert>
+      <el-form label-width="100px" size="default">
+        <el-form-item label="所属模板">
+          <el-select v-model="importForm.template_id" filterable placeholder="选择模板" style="width:100%">
+            <el-option v-for="t in templates" :key="t.id" :label="t.name + ' (' + vendorLabel(t.vendor) + ')'" :value="t.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="清空再导入">
+          <el-switch v-model="importForm.replace" />
+          <span style="margin-left:8px;font-size:12px;color:#909399">开启 = 先删除该模板已有全部落位（不可恢复）</span>
+        </el-form-item>
+        <el-form-item label="CSV 内容">
+          <el-input v-model="importForm.csv" type="textarea" :rows="8" placeholder="A01-03-U12,10.0.0.12,sw12,SN12,,备注" />
+        </el-form-item>
+      </el-form>
+      <el-alert v-if="importResult" :type="importResult.errors && importResult.errors.length ? 'warning' : 'success'" :closable="false">
+        <div style="font-size:12px;line-height:1.6">
+          新增 {{ importResult.created }} 条，更新 {{ importResult.updated }} 条，跳过 {{ importResult.skipped }} 条
+          <div v-for="(e, i) in importResult.errors" :key="i" style="color:#b8860b">{{ e }}</div>
+        </div>
+      </el-alert>
+      <template #footer>
+        <el-button @click="importDialog = false">关闭</el-button>
+        <el-button type="primary" :loading="importing" @click="doImport">导入</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 认领到落位弹窗 -->
+    <el-dialog v-model="claimDialog" title="认领到落位" width="520px" append-to-body>
+      <div v-if="claimTarget" style="margin-bottom: 12px; font-size: 13px">
+        设备 MAC：<b>{{ claimTarget.mac }}</b>
+        <span v-if="claimTarget.ip">（拿到 IP {{ claimTarget.ip }}）</span>
+      </div>
+      <el-form label-width="100px" size="default">
+        <el-form-item label="选择落位">
+          <el-select v-model="claimPosId" filterable placeholder="选择一条待认领落位" style="width:100%">
+            <el-option v-for="p in claimablePositions" :key="p.id"
+                       :label="p.position + ' / ' + p.mgmt_ip + (p.hostname ? ' / ' + p.hostname : '')"
+                       :value="p.id" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <el-alert v-if="claimTarget && !claimablePositions.length" type="warning" :closable="false"
+                title="该模板下没有「待认领」落位，请先新增落位（MAC 留空）" />
+      <template #footer>
+        <el-button @click="claimDialog = false">取消</el-button>
+        <el-button type="primary" :loading="claiming" @click="confirmClaim">认领</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -407,6 +552,112 @@ async function delDevice(id) {
   loadDevices()
 }
 
+// ---------- 落位登记（落位 + 认领） ----------
+const posTemplateId = ref("")
+const positions = ref([])
+const observations = ref([])
+const obsNote = ref("")
+const posDialog = ref(false)
+const editingPosId = ref(null)
+const savingPos = ref(false)
+const posForm = reactive({ template_id: "", position: "", hostname: "", mgmt_ip: "", serial: "", mac: "", remark: "" })
+const importDialog = ref(false)
+const importing = ref(false)
+const importForm = reactive({ template_id: "", csv: "", replace: false })
+const importResult = ref(null)
+const claimDialog = ref(false)
+const claimTarget = ref(null)
+const claimPosId = ref("")
+const claiming = ref(false)
+const claimablePositions = computed(() => positions.value.filter(p => !p.mac))
+
+function validIpv4(s) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec((s || "").trim())
+  return !!m && m.slice(1).every(x => parseInt(x, 10) <= 255)
+}
+
+async function loadPositions() {
+  const q = posTemplateId.value ? "?template_id=" + posTemplateId.value : ""
+  positions.value = await http.get("/ct/ztp/positions" + q)
+}
+
+async function loadObservations() {
+  const q = posTemplateId.value ? "?template_id=" + posTemplateId.value : ""
+  try {
+    const res = await http.get("/ct/ztp/observations" + q)
+    observations.value = res.observations || []
+    obsNote.value = res.note || ""
+  } catch (e) { /* 后端租约读取不会 500；保险起见也不让这里打断页面 */ }
+}
+
+function loadPositionData() { loadPositions(); loadObservations() }
+
+function openPosDialog(row) {
+  editingPosId.value = row ? row.id : null
+  Object.assign(posForm, { template_id: posTemplateId.value, position: "", hostname: "", mgmt_ip: "", serial: "", mac: "", remark: "" })
+  if (row) Object.assign(posForm, {
+    template_id: row.template_id, position: row.position, hostname: row.hostname || "",
+    mgmt_ip: row.mgmt_ip || "", serial: row.serial || "", mac: row.mac || "", remark: row.remark || "",
+  })
+  posDialog.value = true
+}
+
+async function savePosition() {
+  if (!posForm.template_id) { ElMessage.warning("请选择模板"); return }
+  if (!posForm.position.trim()) { ElMessage.warning("请输入落位编码，例如 A01-03-U12"); return }
+  if (!validIpv4(posForm.mgmt_ip)) { ElMessage.warning("规划管理IP 需为合法 IPv4，例如 10.0.0.12"); return }
+  savingPos.value = true
+  try {
+    if (editingPosId.value) await http.put("/ct/ztp/positions/" + editingPosId.value, { ...posForm })
+    else await http.post("/ct/ztp/positions", { ...posForm })
+    ElMessage.success("保存成功")
+    posDialog.value = false
+    loadPositions()
+  } finally { savingPos.value = false }
+}
+
+async function delPosition(id) {
+  await http.delete("/ct/ztp/positions/" + id)
+  ElMessage.success("已删除")
+  loadPositions()
+}
+
+function openImportDialog() {
+  importForm.template_id = posTemplateId.value
+  importResult.value = null
+  importDialog.value = true
+}
+
+async function doImport() {
+  if (!importForm.template_id) { ElMessage.warning("请选择模板"); return }
+  importing.value = true
+  try {
+    importResult.value = await http.post("/ct/ztp/positions/import", { ...importForm })
+    ElMessage.success("导入完成：新增 " + importResult.value.created + "，更新 " + importResult.value.updated + "，跳过 " + importResult.value.skipped)
+    loadPositions()
+  } finally { importing.value = false }
+}
+
+function openClaimDialog(row) {
+  claimTarget.value = row
+  claimPosId.value = ""
+  claimDialog.value = true
+}
+
+async function confirmClaim() {
+  if (!claimPosId.value) { ElMessage.warning("请选择一条待认领落位"); return }
+  claiming.value = true
+  try {
+    await http.post("/ct/ztp/claim", {
+      template_id: posTemplateId.value, position_id: claimPosId.value, mac: claimTarget.value.mac,
+    })
+    ElMessage.success("已认领，请重新生成并部署")
+    claimDialog.value = false
+    loadPositions()
+    loadObservations()
+  } finally { claiming.value = false }
+}
+
 function openGenDialog(row) {
   genForm.deploy_mode = row.deploy_mode || "standalone"
   genForm.server_ip = row.server_ip || "10.0.0.250"
@@ -504,5 +755,14 @@ async function controlService(action) {
 
 let serverPollTimer = null
 onBeforeUnmount(() => { clearTimeout(serverPollTimer) })
-onMounted(() => { loadTemplates(); loadDevices(); loadServerStatus(); serverPollTimer = setTimeout(loadServerStatus, 5000) })
+onMounted(async () => {
+  loadTemplates(); loadDevices(); loadServerStatus(); serverPollTimer = setTimeout(loadServerStatus, 5000)
+  // 落位登记默认定位到「生成配置」用过的那个模板（没有就用第一个）
+  await loadTemplates()
+  const remembered = sessionStorage.getItem("ztp_template_id")
+  posTemplateId.value = remembered && templates.value.some(t => t.id === remembered)
+    ? remembered
+    : (templates.value[0] ? templates.value[0].id : "")
+  loadPositionData()
+})
 </script>

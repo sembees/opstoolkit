@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from app.ct.ztp.positions import norm_mac as _norm_mac_text
+
 
 @dataclass
 class ZtpProfile:
@@ -50,6 +52,7 @@ class ZtpDevice:
     mac: str = ""               # 用于 DHCP 映射
     serial: str = ""            # 用于文件命名 (可选)
     mgmt_ip: str = ""           # 该设备管理 IP (可选覆盖)
+    position: str = ""          # 落位编码（来自落位登记；仅用于注释/兜底主机名）
 
     @property
     def mgmt_via_dhcp(self) -> bool:
@@ -87,6 +90,32 @@ def _ntp(p) -> str:
 def _file_stem(dev) -> str:
     """配置文件名主干：优先 serial，其次 hostname。"""
     return (dev.serial or dev.hostname or "device").strip()
+
+
+def _position_device(pos) -> ZtpDevice:
+    """把一条落位记录（dict 或 ORM 对象）转成生成器设备。
+
+    主机名为空时用**落位编码**兜底 —— 生成的配置里 sysname 不能是空；
+    落位编码本身记进 ZtpDevice.position，dnsmasq 注释/文件名规则都可引用。
+    落位记录的 mac 统一过 norm_mac：解析不了就当"待认领"处理（绝不把
+    乱码 MAC 写进 dnsmasq）。
+    """
+
+    def _get(key) -> str:
+        if isinstance(pos, dict):
+            v = pos.get(key, "")
+        else:
+            v = getattr(pos, key, "")
+        return (v or "").strip() if isinstance(v, str) else ""
+
+    position = _get("position")
+    return ZtpDevice(
+        hostname=_get("hostname") or position,
+        mac=_norm_mac_text(_get("mac")),
+        serial=_get("serial"),
+        mgmt_ip=_get("mgmt_ip"),
+        position=position,
+    )
 
 
 # ============ 通用片段 ============
@@ -428,7 +457,40 @@ def _iface_or_placeholder(p) -> str:
     return "eth0"
 
 
-def dnsmasq(p, devices) -> str:
+def build_dnsmasq_lines(positions, vendor="h3c") -> list:
+    """落位记录 → dnsmasq 行（落位登记 + 认领的投递侧）。
+
+    有 MAC 的落位（已认领）：
+        dhcp-host=<mac>,set:pos_<mac去冒号小写>
+        dhcp-option=tag:pos_<mac去冒号小写>,option:bootfile-name,"ztp/<stem>.<ext>"
+    stem 用 _file_stem 同一套规则，保证与 generate_all 写出的配置文件名一致。
+    没有 MAC 的落位（待认领）：只输出一行注释占位 —— 设备上电后从 DHCP 租约里
+    学到 MAC，在界面上认领后重新生成即可。
+
+    （备注：若接入交换机插 option 82，也可以改用
+    `--dhcp-circuitid=set:<tag>,<circuit-id>` 按「接入交换机端口」精确匹配选配置，
+    原理与按 MAC 的 tag 相同。）
+    """
+    lines = []
+    if not (positions or []):
+        return lines
+    lines.append("# ---- 落位登记（认领后按 MAC 下发各自配置） ----")
+    for pos in positions:
+        dev = _position_device(pos)
+        if not dev.mac:
+            pos_name = dev.position or dev.hostname or "未命名落位"
+            lines.append(
+                "# %s: 待认领（设备上电后从 DHCP 租约里学到 MAC，再在界面上认领）" % pos_name
+            )
+            continue
+        tag = "pos_" + dev.mac.replace(":", "")
+        fname = "ztp/%s.%s" % (_file_stem(dev), _ext(vendor))
+        lines.append("dhcp-host=%s,set:%s" % (dev.mac, tag))
+        lines.append('dhcp-option=tag:%s,option:bootfile-name,"%s"' % (tag, fname))
+    return lines
+
+
+def dnsmasq(p, devices, positions=None) -> str:
     """按厂商下发 DHCP option，把每台设备指向自己的配置文件。
 
     H3C/华为: option 66 = TFTP server, option 67 = 配置文件名
@@ -501,6 +563,9 @@ def dnsmasq(p, devices) -> str:
             L.append(f'dhcp-option={tag},option:bootfile-name,"{fname}"')
         else:
             L.append(f'# {d.hostname}: 缺少 MAC, 使用 default.cfg')
+    # 落位登记（认领后按 MAC 下发各自配置）：设备清单靠手抄 MAC，落位登记不需要 ——
+    # MAC 是设备上电后从 DHCP 租约里自动学来的。
+    L += build_dnsmasq_lines(positions, vendor=vendor)
     L.append("")
     return "\n".join(L) + "\n"
 
@@ -558,9 +623,11 @@ def intermediate(p, devices):
     return _h3c_script(p, devices), "ztp_note.txt"
 
 
-def _readme(p, devices) -> str:
+def _readme(p, devices, positions=None) -> str:
     v = _norm_vendor(p.vendor)
     iface = _iface_or_placeholder(p)
+    positions = list(positions or [])
+    n_claimed = sum(1 for x in positions if _position_device(x).mac)
     warn = ""
     if iface == "eth0":
         warn = ("!! 警告: 模板里没有填「DHCP网卡」, 生成的 dnsmasq 配置里是占位值 "
@@ -595,7 +662,17 @@ def _readme(p, devices) -> str:
         "  · **按设备差异化**: 在模板里登记设备(MAC + 主机名/序列号)后,\n"
         "    每台设备拿到自己的 ztp/<序列号或主机名>.cfg(含各自的管理 IP/主机名)。\n"
         "    DHCP 是按 **MAC** 匹配的 ⇒ 只填序列号、不填 MAC 的设备仍会拿 default.cfg。\n\n"
+        "**落位登记 + 认领(推荐的登记方式)**:\n"
+        "  设备到货时手里只有落位(机架/机柜/U位)和规划好的管理 IP/主机名, 还没有 MAC ——\n"
+        "  而且不需要手抄。先在「落位登记」里按落位录入(支持批量粘贴 CSV:\n"
+        "  落位,管理IP,主机名,序列号,MAC,备注), MAC 一栏留空;\n"
+        "  设备第一次上电向 DHCP 请求地址时, dnsmasq 的租约文件里就记录了它的 MAC,\n"
+        "  到「待认领设备」列表里点「认领到落位」, 把学到的 MAC 指到对应落位即可,\n"
+        "  全程不需要到机器上抄 MAC。\n"
+        "  认领后**重新生成并部署**, 该设备就会按 MAC 拿到自己落位规划的主机名/管理 IP;\n"
+        "  未认领的落位不参与按 MAC 匹配, 对应设备上电后只会拿到 ztp/default.cfg。\n\n"
         f"本批次登记设备: {len(devices)} 台\n"
+        f"落位: {len(positions)} 个（其中已认领 {n_claimed} 个）\n"
         "NTP 说明:\n"
         "  NTP 服务器**每个现场都不一样**, 所以这里不代填默认值:\n"
         "  模板里留空 = 设备配置里不出现 NTP 行(设备时间不会同步);\n"
@@ -604,6 +681,14 @@ def _readme(p, devices) -> str:
         "  H3C   : auto-config, DHCP option 66(TFTP) + 67(文件名)\n"
         "  华为  : ZTP, DHCP option 66(TFTP) + 67(中间文件) + 中间文件描述下载项\n"
         "  思科  : IOS-XE ZTP, DHCP option 150(TFTP) + 67(脚本/配置)\n\n"
+        "!! 真机实测坑（H3C S6850，EVE 里第一手验过）:\n"
+        "   自动配置的 DHCP 应答**必须是完整的** —— 至少要有 option 51(租期)。\n"
+        "   用只带 66/67 的\"精简\"应答时, 设备会**静默丢弃**这个 OFFER:\n"
+        "   不 DECLINE、不报错, 只是每 8~20 秒重发 DISCOVER, 永远不去 TFTP 取文件,\n"
+        "   从服务端看就是\"它收得到但不用\"。补齐成标准应答(51/58/59/1/28/3/6/54)后,\n"
+        "   DISCOVER→OFFER→REQUEST→ACK→TFTP 一次走通(设备 sysname 也被改成配置里的值)。\n"
+        "   ⇒ 本工具用 dnsmasq 投递, 它天然会带全这些选项, 无需额外配置;\n"
+        "     但若现场改用交换机自带的 DHCP 服务器或第三方 DHCP, 请确认应答里有 option 51。\n\n"
         "!! 安全提醒:\n"
         "   生成的设备配置里含**管理员口令**, 而 ztp/ 下的文件是通过 TFTP/HTTP\n"
         "   **无认证**提供给设备的 ⇒ 开局网段上的任何主机都能读到它。\n"
@@ -611,15 +696,24 @@ def _readme(p, devices) -> str:
         "       (2) 按现场修改模板里的设备管理员口令, 不要用出厂默认值;\n"
         "       (3) 开局完成后及时删掉 TFTP/HTTP 上的配置(或撤掉 ZTP 投递配置)。\n"
         f"本批次登记设备: {len(devices)} 台\n"
+        f"落位: {len(positions)} 个（其中已认领 {n_claimed} 个）\n"
     )
 
 
-def generate_all(p, devices=None):
+def generate_all(p, devices=None, positions=None):
+    """生成 ZTP 全部部署文件。
+
+    positions：落位登记记录（dict 或 ORM 对象均可）。**向后兼容**：不传
+    positions 时行为与旧版完全一致。落位设备排在 devices 之后生成 ——
+    同一个文件名（_file_stem 相同）以后者为准，落位规划覆盖手工登记。
+    """
     devices = devices or []
+    positions = list(positions or [])
+    pos_devices = [_position_device(x) for x in positions]
     files = {}
     vendor = _norm_vendor(p.vendor)
     gen = VENDOR_CONFIG.get(vendor, h3c_config)
-    for d in devices:
+    for d in list(devices) + pos_devices:
         stem = _file_stem(d)
         files[f"ztp/{stem}.{_ext(vendor)}"] = gen(d, p)
     # 未登记设备的兜底配置：**无论有没有登记设备都必须生成**。
@@ -631,8 +725,8 @@ def generate_all(p, devices=None):
     # 两台以上未登记设备会配成同一个地址（还会和地址池里的租约撞车）；
     # 现在管理口走 DHCP 取址（ZtpDevice.mgmt_via_dhcp）。
     files["ztp/default.cfg"] = gen(ZtpDevice(hostname="default"), p)
-    files["dnsmasq.conf"] = dnsmasq(p, devices)
+    files["dnsmasq.conf"] = dnsmasq(p, devices, positions=positions)
     inter, inter_name = intermediate(p, devices)
     files[f"ztp/{inter_name}"] = inter
-    files["README.txt"] = _readme(p, devices)
+    files["README.txt"] = _readme(p, devices, positions)
     return files
