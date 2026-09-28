@@ -905,7 +905,7 @@ class PxeCustomLayoutTest(unittest.TestCase):
         storage = doc["autoinstall"]["storage"]
         self.assertEqual(storage["version"], 1)
         self.assertEqual(storage["config"], [
-            {"type": "disk", "id": "disk0", "path": "/dev/sda", "wipe": True,
+            {"type": "disk", "id": "disk0", "path": "/dev/sda", "wipe": "superblock",
              # §5.46：grub_device 必需（漏了会报 did not create needed bootloader
              # partition）；有 ESP 用 gpt，没有则 msdos(与 RHEL 侧 MBR 一致)
              "grub_device": True, "ptable": "gpt"},
@@ -1123,7 +1123,7 @@ class PxeRaidAndDataDiskTest(unittest.TestCase):
         # 目标盘走 serial（§3.1 match 模式）；数据盘 sdc 没有 wipe → 完全不碰
         disk = [c for c in cfg if c["type"] == "disk"]
         self.assertEqual(disk, [{"type": "disk", "id": "disk0",
-                                 "serial": "S3Z1NB0K123456", "wipe": True,
+                                 "serial": "S3Z1NB0K123456", "wipe": "superblock",
                                  "grub_device": True, "ptable": "gpt"}])
         self.assertNotIn("sdc", json.dumps(cfg))
 
@@ -1390,11 +1390,11 @@ class PxeDataDiskTest(unittest.TestCase):
         cfg = yaml.safe_load(generate_all(_cfg(disk_config=self.WIPE_DD))["user-data"])[
             "autoinstall"]["storage"]["config"]
         self.assertEqual([c for c in cfg if c["type"] == "disk"], [
-            {"type": "disk", "id": "disk0", "path": "/dev/sda", "wipe": True,
+            {"type": "disk", "id": "disk0", "path": "/dev/sda", "wipe": "superblock",
              # §5.46：grub_device 必需（漏了会报 did not create needed bootloader
              # partition）；有 ESP 用 gpt，没有则 msdos(与 RHEL 侧 MBR 一致)
              "grub_device": True, "ptable": "gpt"},
-            {"type": "disk", "id": "data0", "path": "/dev/sdc", "wipe": True},
+            {"type": "disk", "id": "data0", "path": "/dev/sdc", "wipe": "superblock"},
         ])
         self.assertIn({"type": "partition", "id": "datap0", "device": "data0",
                        "size": "rest"}, cfg)

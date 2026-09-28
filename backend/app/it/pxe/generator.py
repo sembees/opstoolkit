@@ -741,7 +741,15 @@ def _ubuntu_storage_obj(plan):
     cfg = []
     disk = {"type": "disk", "id": "disk0"}
     disk.update(_ubuntu_disk_match(plan))
-    disk["wipe"] = bool(plan["wipe"])
+    # ★ curtin 的 disk.wipe 是**模式字符串**，不是布尔！
+    #   传 `true` 会让整个 curtin install 失败：
+    #     ValueError - wipe mode True not supported
+    #     curtin/commands/block_meta.py disk_handler -> block.wipe_volume(disk, mode=info.get('wipe'))
+    #   （§5.46 缺陷 4，真机取证）。"superblock" 是 curtin 的标准模式：
+    #   清掉分区表/文件系统签名，不做整盘清零（正是重装系统想要的语义）。
+    #   plan["wipe"]=False 时**不要**写这个键（而不是写 False —— 同一处类型问题）。
+    if plan["wipe"]:
+        disk["wipe"] = "superblock"
     # ★ grub_device 是**必需**的：curtin/subiquity 靠它知道把引导装到哪块盘。
     #   漏掉就报 "autoinstall config did not create needed bootloader partition" 并拒绝装机。
     #   这正是 §5.46 缺陷 3 的真正原因 —— 用 ~200 秒一轮的真机迭代（e_try_ptable.py）
@@ -831,7 +839,9 @@ def _ubuntu_storage_obj(plan):
         if not d["wipe"]:
             continue
         did = "data%d" % n
-        cfg.append({"type": "disk", "id": did, "path": "/dev/" + d["name"], "wipe": True})
+        # 同目标盘：curtin 的 wipe 必须是模式字符串（"superblock"），传 True 会 ValueError
+        cfg.append({"type": "disk", "id": did, "path": "/dev/" + d["name"],
+                    "wipe": "superblock"})
         if not d["mount"]:
             continue                      # 只清盘不建分区（与 RHEL 侧 clearpart 的语义一致）
         pid = "datap%d" % n
