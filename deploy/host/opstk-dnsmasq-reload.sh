@@ -18,6 +18,13 @@ STATE=$STATE_DIR/.dnsmasq-reload.state
 # 为什么不复用 STATE：应用侧每次部署前会**删掉** STATE（防止陈旧标记让同内容的
 # 二次部署假成功），所以 STATE 不能用来判断"是不是已经加载过了"。
 APPLIED=$STATE_DIR/.dnsmasq-applied
+# 应用侧部署前的预检要读的两样东西：本脚本的"版本标记"。
+# 它同时证明"单元被触发过、脚本跑得起来"和"装的不是旧版脚本"。
+# 改脚本协议（或需要强制运维重跑 install）时把它 +1，并在应用侧同步
+# HOST_RELOAD_MIN_SCRIPT_VERSION —— 这样旧安装会在**落盘之前**被明确指出来，
+# 而不是每次部署都等到超时、留下不一致的磁盘状态（实测踩过两次）。
+SCRIPT_VERSION=2
+LINK=$STATE_DIR/.dnsmasq-reload.link
 
 mkdir -p "$STATE_DIR"
 
@@ -41,6 +48,10 @@ fail() {
 # 实测踩过：`set -o pipefail` 下 `reason=$(... | head -1 ...)` 因 head 提前关管道
 # 让 printf 收到 SIGPIPE、整条管道非零，`set -e` 在写 FAIL 之前就退出，留下旧的 OK。
 trap 'fail "script-error-line${LINENO}"' ERR
+
+# 版本标记：写在**任何可能失败的动作之前**（包括 flock 和 missing-conf 检查）——
+# 一台还没部署过、连 conf 文件都还不存在的宿主机，也必须能通过应用侧预检的静态部分。
+printf 'RUN %s %s\n' "$SCRIPT_VERSION" "$(date +%s)" > "$LINK.tmp.$$" && mv -f "$LINK.tmp.$$" "$LINK"
 
 # 串行化：path 单元可能在应用部署的同时触发，我们自己也常被手动再调一次。
 # 两次 `systemctl restart dnsmasq` 交叠会让其中一次拿到 systemd 事务冲突而假失败。

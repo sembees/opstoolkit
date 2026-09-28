@@ -530,7 +530,7 @@ def _web_dest(base_abs: str, name):
     return dst
 
 
-def _atomic_write(dst: str, content: str) -> None:
+def _atomic_write(dst: str, content) -> None:
     """写临时文件 + os.replace：原子替换，读方永远看不到"写了一半"的文件。
 
     装机中的机器随时可能在 GET 这些文件（iPXE 取 boot/<mac>.ipxe、casper 取
@@ -540,13 +540,21 @@ def _atomic_write(dst: str, content: str) -> None:
 
     统一用 LF：这些文件在 Linux 上被 iPXE / dnsmasq / cloud-init 读取，
     在 Windows 上开发测试时也不该因为换行翻译而与实际落盘内容不一致。
+    content 传 bytes 时**逐字节原样落盘**（不做换行翻译）—— 回滚要把旧文件恢复成
+    部署前的字节，若经过一次换行翻译，"恢复"出来的就不是原来那份了。
     """
     tmp = "%s.tmp.%d.%s" % (dst, os.getpid(), uuid.uuid4().hex[:8])
     try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
+        if isinstance(content, bytes):
+            with open(tmp, "wb") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+        else:
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp, dst)
     except BaseException:
         # 失败不许留下 .tmp 垃圾（也不能让半个文件被下一次部署/读方当成有效文件）
@@ -558,7 +566,26 @@ def _atomic_write(dst: str, content: str) -> None:
         raise
 
 
-def _make_room(dst: str, base_abs: str, log) -> None:
+def _snapshot(path: str) -> dict:
+    """记下某个落盘目标在**本次部署之前**的内容，供失败回滚使用。
+
+    返回 {"existed": bool, "data": bytes|None, "why": str}。
+    data=None 且 existed=True 表示"存在，但不是本工具能原样还原的普通文件"（目录、
+    读不了的东西）—— 此时回滚必须**整体放弃**：半套回滚比不回滚更难解释，
+    而运维要能相信"它说回滚了就是回到了原样"。
+    """
+    try:
+        if os.path.isdir(path):
+            return {"existed": True, "data": None, "why": "部署前它是目录"}
+        if not os.path.exists(path):
+            return {"existed": False, "data": None, "why": ""}
+        with open(path, "rb") as fh:
+            return {"existed": True, "data": fh.read(), "why": ""}
+    except OSError as e:
+        return {"existed": True, "data": None, "why": (e.strerror or str(e))}
+
+
+def _make_room(dst: str, base_abs: str, log) -> list:
     """让 dst 与其父目录就位；挡住路的**旧布局残留**会被移除并记日志。
 
     为什么必须做：生成物键里 `user-data`（基准应答文件）与
@@ -570,7 +597,11 @@ def _make_room(dst: str, base_abs: str, log) -> None:
     且每一处删除都写进日志，不做无声的破坏。
     目录→文件的迁移只对生成器自己的扁平文件生效（_GENERATED_FLAT_FILES），
     其它同名目录（媒体 <os_type>/<version>/、仓库 repo/）一律拒绝删除 —— 宁可报错。
+
+    返回**被删掉的路径列表**：调用方据此判断"这次部署做过不可逆的删除"，
+    从而在需要回滚时整体放弃（R3：删掉的东西恢复不了，就不能声称回滚成功）。
     """
+    removed = []
     parent = os.path.dirname(dst)
     rel = os.path.relpath(parent, base_abs)
     cur = base_abs
@@ -578,18 +609,127 @@ def _make_room(dst: str, base_abs: str, log) -> None:
         cur = os.path.join(cur, part)
         if os.path.exists(cur) and not os.path.isdir(cur):
             os.remove(cur)
+            removed.append(cur)
             log.append("Migrated: 删除旧文件 " + cur + "（本次需要它是目录）")
     os.makedirs(parent, exist_ok=True)
     if os.path.isdir(dst):
         if os.path.relpath(dst, base_abs) not in _GENERATED_FLAT_FILES:
             raise OSError("目标已存在且是目录，拒绝删除（不是生成器产出的扁平文件）：" + dst)
         shutil.rmtree(dst)
+        removed.append(dst)
         log.append("Migrated: 删除旧目录 " + dst + "（本次需要它是文件）")
+    return removed
 
 
-def _deploy_fail(log, errors, scope="", written=None):
+def _restore_previous(prev, removed_paths, conf_prev, flat_default, log) -> dict:
+    """把本次部署已经写下的文件恢复成部署前的内容（R3 的"零落盘"补救）。
+
+    只在**能证明宿主机的 dnsmasq 没被重启过**时才调用（见
+    dhcp.reload_failure_is_pre_restart）：那时把磁盘恢复成原样就等于回到部署前，
+    网络是完全一致的。若重启可能已经发生，恢复磁盘只会让"磁盘 vs 守护进程"
+    更不一致 —— 那种情况必须**保持现状并大声报告**，交给运维决定。
+
+    整体成败：只要能还原的路径都还原成功，返回 ok=True；任何一处失败，
+    返回 ok=False + why，并且**不做**部分回滚（见 _snapshot 的说明）。
+    """
+    # 1) 先判定能不能整体回滚：有任何一个目标不可还原就直接放弃
+    why = ""
+    if prev:
+        blockers = [(p, s["why"]) for p, s in prev.items() if s["existed"] and s["data"] is None]
+        if blockers:
+            why = "；".join(p + "：" + w for p, w in blockers[:3])
+    if removed_paths:
+        why = (why + "；" if why else "") + ("本次部署为让路删除过 " + str(len(removed_paths))
+                                            + " 个路径（" + ", ".join(sorted(removed_paths)[:3]) + "），删掉的内容无法恢复")
+    conf_text = None
+    if conf_prev is not None and conf_prev["existed"]:
+        if conf_prev["data"] is None:
+            why = (why + "；" if why else "") + "/etc/dnsmasq.d/opstk-pxe.conf 在部署前不可读"
+        else:
+            try:
+                conf_text = conf_prev["data"].decode("utf-8")
+            except UnicodeDecodeError:
+                why = (why + "；" if why else "") + "/etc/dnsmasq.d/opstk-pxe.conf 在部署前不是 UTF-8 文本"
+    if why:
+        return {"ok": False, "restored": 0, "why": why, "conf_text": None, "conf_existed": False}
+
+    # 2) 全部还原
+    failed = []
+    restored = 0
+    for path, snap in prev.items():
+        guard = _FLAT_DEFAULT_LOCK if path == flat_default else nullcontext()
+        try:
+            with guard:
+                if snap["existed"]:
+                    _atomic_write(path, snap["data"])
+                elif os.path.exists(path):
+                    os.remove(path)
+            restored += 1
+            log.append("Rolled back: " + path)
+        except OSError as e:
+            failed.append(path + "（" + (e.strerror or str(e)) + "）")
+    conf_existed = bool(conf_prev is not None and conf_prev["existed"])
+    if conf_prev is not None:
+        try:
+            if conf_text is not None:
+                if _dhcp.write_conf("opstk-pxe.conf", conf_text):
+                    restored += 1
+                    log.append("Rolled back: /etc/dnsmasq.d/opstk-pxe.conf")
+                else:
+                    failed.append("/etc/dnsmasq.d/opstk-pxe.conf（写入失败）")
+            else:
+                # 部署前不存在 → 删掉本次新建的这份，回到"没有这个配置文件"的状态
+                if _dhcp.remove_conf("opstk-pxe.conf"):
+                    restored += 1
+                    log.append("Rolled back: 删除本次新建的 /etc/dnsmasq.d/opstk-pxe.conf")
+                else:
+                    failed.append("/etc/dnsmasq.d/opstk-pxe.conf（删除失败）")
+        except Exception as e:  # noqa: BLE001  回滚路径绝不能因为异常而崩掉
+            failed.append("/etc/dnsmasq.d/opstk-pxe.conf（" + str(e)[:60] + "）")
+    if failed:
+        return {"ok": False, "restored": restored, "why": "；".join(failed[:3]),
+                "conf_text": conf_text, "conf_existed": conf_existed}
+    return {"ok": True, "restored": restored, "why": "", "conf_text": conf_text,
+            "conf_existed": conf_existed}
+
+
+def _try_rollback(log, errors, prev, removed_paths, conf_prev, flat_default, written):
+    """失败收尾：把本次已经写下的东西恢复成部署前的内容（R3）。
+
+    **只在能证明宿主机没有重启过 dnsmasq 时才调用**（见 dhcp.reload_failure_is_pre_restart
+    以及两处调用点的说明）—— 回滚的正确性完全建立在这条前提上。
+
+    返回 (errors, written, extra)：
+      · 回滚成功 → written 清空（本次没有净写入任何东西）、extra["rolled_back"]=True
+      · 回滚放弃/失败 → written 原样保留，并追加一条说明为什么没回滚，
+        绝不让调用方以为"已经恢复原样了"。
+    """
+    if not written and conf_prev is None:
+        return errors, written, {}
+    rb = _restore_previous(prev, removed_paths, conf_prev, flat_default, log)
+    if rb["ok"]:
+        errs = list(errors) + [
+            "【已回滚】本次已写入的 " + str(rb["restored"])
+            + " 个文件（含 dnsmasq 配置）已全部恢复成部署前的内容；宿主机没有被重启过，"
+              "因此网络状态与部署前完全一致 —— 本次部署没有任何实际效果。"
+        ]
+        extra = {"rolled_back": True, "files_restored": rb["restored"]}
+        if rb.get("conf_text"):
+            # 回滚把旧配置写回去了 ⇒ 宿主机脚本会再触发一次。调用方可以用这个 sha
+            # 去确认"宿主机重新与磁盘一致"（旧配置内容未变，通常不会重启 dnsmasq）。
+            extra["rollback_conf_sha"] = _dhcp.conf_sha(rb["conf_text"])
+        return errs, [], extra
+    errs = list(errors) + [
+        "【无法回滚】" + (rb["why"] or "未知原因")
+        + "。已写入的文件保持现状（**不做**半套回滚，以免运维以为已经恢复原样）；"
+          "请按上面的路径人工核对内容。"
+    ]
+    return errs, written, {"rolled_back": False, "rollback_error": rb["why"]}
+
+
+def _deploy_fail(log, errors, scope="", written=None, extra=None):
     """部署失败的统一返回结构（ok=False + 可读的 errors，调用方必须据此报错）。"""
-    return {
+    out = {
         "ok": False,
         "supported": True,
         "errors": list(errors),
@@ -599,6 +739,9 @@ def _deploy_fail(log, errors, scope="", written=None):
         "tftp_root": TFTP_ROOT,
         "web_root": WEB_ROOT,
     }
+    if extra:
+        out.update(extra)
+    return out
 
 
 def deploy_files(files, pid="") -> dict:
@@ -607,6 +750,16 @@ def deploy_files(files, pid="") -> dict:
     返回值 {"ok", "supported", "errors", "log", "scope", "files_written", ...}。
     **ok=False 是硬失败**：调用方（api/pxe.py::deploy_to_host）必须据此报错，
     绝不能让"配置指向不存在的文件"这种坏状态被当成部署成功。
+
+    R3 —— 失败时宁可什么都不做，也不要留下半新半旧的状态：
+      · **预检**（容器部署路径）：写任何文件**之前**先确认宿主机重载链路可用
+        （dhcp.reload_preflight）。没装单元/脚本是旧版/目录没挂/单元不响应，
+        都在这里失败，磁盘**一个字节都没动**（返回值带 preflight_failed=True）。
+      · **回滚**：写完之后才发现的失败，只要**能证明**宿主机没重启过 dnsmasq
+        （宿主机脚本在 --test 校验阶段失败 ⇒ 它压根没走到 restart），
+        就把本次写入的每个文件恢复成部署前的字节（返回值带 rolled_back=True、
+        files_written 清空）。证明不了就保持现状并**明确写着没回滚** ——
+        那比"改回去让磁盘与守护进程更不一致"要安全。
 
     按模板隔离（修掉共享引导文件的竞态）：
       · pid 非空 → user-data / ks.cfg / iPXE 菜单落到 WEB_ROOT/profiles/<pid>/；
@@ -646,7 +799,25 @@ def deploy_files(files, pid="") -> dict:
                 ["非法作用域，拒绝部署：" + base_abs], ["非法作用域，拒绝部署：" + base_abs]
             )
 
-    log = list(prepare_dirs())
+    # R3：预检必须发生在**任何落盘之前** —— 包括 prepare_dirs()/prepare_firmware()
+    # 这些"看起来无害"的副作用。老顺序是"先把文件全改完，再等宿主机确认重载"，
+    # 于是重载链路坏掉时（没装单元、脚本是旧版、目录没挂）要等到超时才失败，
+    # 而那时磁盘已经是半新半旧的状态。预检把这几种失败变成"零落盘"。
+    dnsmasq_content = files.get("dnsmasq.conf", "")
+    log = []
+    if dnsmasq_content:
+        pf = _dhcp.reload_preflight(_dhcp.PXE_CONF)
+        log += pf["log"]
+        if not pf["ok"]:
+            return _deploy_fail(
+                log,
+                ["部署前预检失败【本次未写入任何文件】：原因 " + (pf["reason"] or "unknown")
+                 + " —— " + pf["hint"]],
+                scope,
+                extra={"preflight_failed": True, "preflight_reason": pf["reason"]},
+            )
+
+    log += list(prepare_dirs())
     log += prepare_firmware()
     errors = []
     if not _dhcp.sudo_ok():
@@ -666,6 +837,11 @@ def deploy_files(files, pid="") -> dict:
                    + "（与按 MAC 的应答目录同名冲突，已被按 MAC 的那份取代）")
 
     written = []
+    # 每个落盘目标的"部署前内容"快照 —— 失败时据此把磁盘恢复成原样（R3 的回滚）。
+    # removed_paths 记录 _make_room 为让路删掉的东西：删掉的恢复不了，
+    # 所以只要有它就整体放弃回滚（见 _restore_previous）。
+    prev = {}
+    removed_paths = []
     # 全局唯一的那份默认菜单（未登记机器用）的绝对路径：只有它需要串行化，见 _FLAT_DEFAULT_LOCK
     flat_default = _web_dest(web_root_abs, FLAT_DEFAULT_BOOT)
     for name, content in files.items():
@@ -691,7 +867,9 @@ def deploy_files(files, pid="") -> dict:
             guard = _FLAT_DEFAULT_LOCK if d == flat_default else nullcontext()
             try:
                 with guard:
-                    _make_room(d, base_abs, log)
+                    if d not in prev:
+                        prev[d] = _snapshot(d)
+                    removed_paths += _make_room(d, base_abs, log)
                     _atomic_write(d, content)
             except OSError as e:
                 errors.append("写入失败 " + rel + "：" + str(e)[:120])
@@ -708,20 +886,25 @@ def deploy_files(files, pid="") -> dict:
                 "多模板同网段请为每台机器建装机记录，才会各自拿到 boot/<mac>.ipxe）"
             )
     if errors:
-        return _deploy_fail(log, errors, scope, written)
+        # 还没碰 dnsmasq（配置一个字都没写），所以回滚是**无条件安全**的：
+        # 把已经换掉的 HTTP 文件恢复成原样，就等于什么都没发生。
+        errs, written, extra = _try_rollback(
+            log, errors, prev, removed_paths, None, flat_default, written)
+        return _deploy_fail(log, errs, scope, written, extra)
 
     # 2) 文件全部就位后才写 dnsmasq 配置、才重启
-    dnsmasq_content = files.get("dnsmasq.conf", "")
     want_sha = ""
     # not_before 必须是**整数秒**：宿主机脚本的 ts 是 `date +%s`（整数），
     # 若这里留成 float，同秒内的两次部署会出现 `ts(整数) >= not_before(x.5)` 为假
     # → 明明重载成功了却一直等到超时（假失败）。取整后这个窗口只有 1 秒，
     # 而且写之前已经作废旧标记，陈旧标记根本不存在。
     not_before = int(time.time())
+    conf_prev = None
     if dnsmasq_content:
         # 写之前先作废旧标记：只比对 sha 的话，**连续两次部署内容相同**时第二次会在
         # 宿主机还没做任何事之前就命中上一次的 OK 标记，整条校验等于被跳过。
         _dhcp.invalidate_host_reload_state()
+        conf_prev = _snapshot(_dhcp.PXE_CONF)
         if _dhcp.write_conf("opstk-pxe.conf", dnsmasq_content):
             log.append("Written: /etc/dnsmasq.d/opstk-pxe.conf")
             # conf_sha 算的是**将要落盘的字符串**。write_conf 在 Linux 上以 utf-8、
@@ -731,7 +914,10 @@ def deploy_files(files, pid="") -> dict:
             want_sha = _dhcp.conf_sha(dnsmasq_content)
         else:
             errors.append("FAILED: write dnsmasq config /etc/dnsmasq.d/opstk-pxe.conf")
-            return _deploy_fail(log, errors, scope, written)
+            # 配置没写下去 ⇒ 宿主机不会重载 ⇒ 回滚同样无条件安全
+            errs, written, extra = _try_rollback(
+                log, errors, prev, removed_paths, None, flat_default, written)
+            return _deploy_fail(log, errs, scope, written, extra)
 
     svc = _dhcp.dhcp_control("restart")
     log.append("dnsmasq restart: " + svc.get("msg", "unknown"))
@@ -743,15 +929,40 @@ def deploy_files(files, pid="") -> dict:
             log.append("宿主机 dnsmasq 已重载，配置 sha 核对一致（生效）")
         else:
             st = got.get("state") or {}
-            errors.append(
+            detail = (
                 _dhcp.HOST_RELOAD_HINT
                 + ("（宿主机重载脚本报：" + str(st.get("reason"))[:120] + "）" if st.get("reason") else "")
                 + ("（读状态文件失败：" + str(st.get("err"))[:80] + "）" if st.get("err") else "")
+                + ("" if st else "（状态文件在超时前后都不存在：说明宿主机那个服务根本没能跑起来，"
+                                "最常见的两个原因是 " + _dhcp.HOST_RELOAD_UNIT + " 没启用、"
+                                "以及 systemd 的启动限流（journalctl -u opstk-dnsmasq-reload "
+                                "里会看到 start-limit-hit）。）")
+            )
+            if _dhcp.reload_failure_is_pre_restart(st):
+                # 宿主机在 "--test 校验"阶段就失败了 ⇒ **能证明** dnsmasq 没被重启过
+                # ⇒ 把磁盘恢复成部署前 = 回到完全一致的旧状态（R3）。
+                errs, written, extra = _try_rollback(
+                    log, [detail], prev, removed_paths, conf_prev, flat_default, written)
+                if extra.get("rolled_back") and extra.get("rollback_conf_sha"):
+                    # 回滚会把旧配置写回去，从而再触发一次宿主脚本；宿主机本来就跑着
+                    # 这份配置（内容未变 ⇒ 不重启），等一小会儿只为把结论说实。
+                    back = _dhcp.wait_host_reload(
+                        extra["rollback_conf_sha"],
+                        timeout=min(8.0, _dhcp.HOST_RELOAD_WAIT),
+                        not_before=int(time.time()))
+                    log.append("回滚确认：宿主机" + (
+                        "已确认重新加载，sha 核对一致" if back.get("ok")
+                        else "未在 8s 内确认；它本来就在运行部署前的配置，通常无碍"))
+                return _deploy_fail(log, errs, scope, written, extra)
+            errors.append(
+                detail
                 # 失败时磁盘**已经改过**了，必须说清楚：只说"请装单元"会让运维以为
                 # 什么都没发生，然后一直重试（MiMo R1 的 #7）。
-                + "【注意】本次的文件已落盘：正在运行的 dnsmasq 仍是旧配置，"
-                  "而 /pxe/serve/boot.ipxe 等文件已更新，装机网络处于不一致状态，"
-                  "未登记的机器可能卡在 PXE 循环。修复重载链路后**重新部署一次**即可恢复。"
+                + "【未回滚】宿主机没有给出「可以安全回滚」的证据（它可能已经重启过 dnsmasq），"
+                  "此时把磁盘改回旧内容只会让「磁盘 vs 正在运行的守护进程」更不一致。"
+                  "现状：正在运行的 dnsmasq 与 /pxe/serve/boot.ipxe 等文件可能不是同一套配置，"
+                  "未登记的机器可能卡在 PXE 循环。请先按上面的提示修好重载链路，"
+                  "然后**重新部署一次**即可恢复一致。"
             )
     elif not svc.get("ok"):
         errors.append("dnsmasq 重启失败：" + str(svc.get("msg", ""))[:120])

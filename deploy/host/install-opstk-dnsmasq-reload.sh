@@ -38,6 +38,10 @@ systemctl is-enabled opstk-dnsmasq-reload.path
 systemctl is-active opstk-dnsmasq-reload.path
 echo "状态文件："
 cat /srv/opstk/state/.dnsmasq-reload.state 2>/dev/null || echo "  （还没有，说明上一步没跑成功，看 journalctl -u opstk-dnsmasq-reload）"
+echo "版本标记（应用侧部署前的预检要读它，见 backend/app/core/dhcp.py 的 HOST_RELOAD_LINK）："
+cat /srv/opstk/state/.dnsmasq-reload.link 2>/dev/null || echo "  （还没有 —— 应用侧会拒绝部署，并且会明确告诉你重跑本脚本）"
 echo
 echo "自检：改一下 /etc/dnsmasq.d/opstk-pxe.conf，几秒内该文件应变为 OK <sha> <时间>。"
 echo "注意：容器要能看到这个标记，docker-compose.yml 必须挂载 /srv/opstk/state。"
+echo "注意：**每次改过 deploy/host/ 下的脚本或单元后都必须重跑本脚本** —— 应用侧会在"
+echo "      部署前核对版本标记（SCRIPT_VERSION），装的是旧版就直接拒绝部署（不落任何文件）。"

@@ -8,6 +8,7 @@
   · 标记缺失/不匹配时必须报失败，绝不能默默当成功。
 """
 import importlib
+import os
 import pathlib
 import sys
 
@@ -46,6 +47,24 @@ def test_status_parses_ok_and_fail(state_file):
     state_file.write_text("FAIL test-failed 1699999999\n", encoding="utf-8")
     st = dhcp.host_reload_status()
     assert st["state"] == "FAIL" and "test-failed" in st["reason"]
+
+
+def test_fail_line_timestamp_is_parsed(state_file):
+    """真机实测的缺陷：FAIL 行不解析时刻 ⇒ 预检无法判断"这个 FAIL 是不是我这次探测
+    引起的"，只能等满超时，把"配置本身非法"报成"重载单元没反应"。
+
+    宿主脚本写的是 `FAIL <原因> <时刻>`，原因不含空格（脚本用 bash 参数展开抹掉了空白）。
+    """
+    state_file.write_text(
+        "FAIL test-failed:dnsmasq:badoptionatline1 1790582574\n", encoding="utf-8")
+    st = dhcp.host_reload_status()
+    assert st["state"] == "FAIL"
+    assert st["reason"] == "test-failed:dnsmasq:badoptionatline1"
+    assert st["ts"] == "1790582574"
+    # 格式意外时不能把尾部乱码当时刻（宁可空着）
+    state_file.write_text("FAIL some-reason not-a-time\n", encoding="utf-8")
+    st = dhcp.host_reload_status()
+    assert st["ts"] == "" and st["reason"] == "some-reason not-a-time"
 
 
 def test_wait_ok_on_matching_sha(state_file):
@@ -103,6 +122,31 @@ def test_conf_sha_matches_bytes_actually_written(tmp_path, monkeypatch):
     assert dhcp.conf_sha(content) == hashlib.sha256(on_disk).hexdigest()
 
 
+def test_write_conf_leaves_old_content_when_the_write_fails(tmp_path, monkeypatch):
+    """R3：写配置必须**原子**替换。
+
+    原来是 `open(path,"w")` 直接写：一旦写失败（磁盘满/被中断），留下的是**截断的**
+    配置，而它会在 dnsmasq 下一次启动（含开机）时被读取 —— 语法不合法就直接起不来，
+    整个装机网段没有 DHCP/TFTP。原子替换让"写失败"只等于"文件没变"。
+    """
+    import os as _os
+    monkeypatch.setattr(dhcp, "CONF_DIR", str(tmp_path))
+    assert dhcp.write_conf("opstk-pxe.conf", "OLD\n") is True
+
+    def boom(src, dst):
+        raise OSError(28, "No space left on device")
+
+    real = _os.replace
+    _os.replace = boom
+    try:
+        assert dhcp.write_conf("opstk-pxe.conf", "NEW-and-much-longer\n") is False
+    finally:
+        _os.replace = real
+    assert (tmp_path / "opstk-pxe.conf").read_text(encoding="utf-8") == "OLD\n"
+    # 不许留下临时文件垃圾（下一个部署/读方可能把它当成有效配置）
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["opstk-pxe.conf"]
+
+
 def test_wait_rejects_stale_marker_even_with_matching_sha(state_file):
     """R1 的 #2：内容相同的连续两次部署不能命中上一次的陈旧标记。
 
@@ -142,3 +186,235 @@ def test_malformed_ok_line_is_not_accepted(state_file):
     state_file.write_text("OK 1699999999\n", encoding="utf-8")
     st = dhcp.host_reload_status()
     assert st["state"] == "UNREADABLE"
+
+
+# ── R3：部署前的预检（dhcp.reload_preflight）────────────────────────────────
+# 为什么要有它：原来的顺序是"先落盘、再核对重载"，链路坏掉时调用方要等到超时才
+# 失败，而**文件已经改完**（磁盘上一半新一半旧，网络处于不一致状态）。
+# 预检把这类失败挪到落盘之前：状态目录没挂、单元没装/是旧版、单元不响应，
+# 都能在写任何文件之前判定，失败即"什么都没动"。
+
+
+@pytest.fixture()
+def preflight_env(tmp_path, monkeypatch):
+    """把预检会碰的三样东西全部指向 tmp：状态目录、标记文件、被监视的配置。
+
+    必须这样做：预检的活体探测会去碰 /etc/dnsmasq.d/opstk-pxe.conf 的 mtime，
+    测试绝不能在真实的宿主机配置上做这件事。
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(dhcp, "HOST_RELOAD_STATE_DIR", str(state))
+    monkeypatch.setattr(dhcp, "HOST_RELOAD_STATE", str(state / ".dnsmasq-reload.state"))
+    monkeypatch.setattr(dhcp, "HOST_RELOAD_LINK", str(state / ".dnsmasq-reload.link"))
+    monkeypatch.setattr(dhcp, "_in_container", lambda: True)
+    return {
+        "dir": state,
+        "conf": tmp_path / "opstk-pxe.conf",
+        "state": state / ".dnsmasq-reload.state",
+        "link": state / ".dnsmasq-reload.link",
+    }
+
+
+def _write_state_later(path, delay=0.15, line=None):
+    """模拟宿主机脚本：过一会儿写出状态文件（活体探测要等的就是它）。"""
+    import threading
+    import time as _time
+
+    def run():
+        _time.sleep(delay)
+        pathlib.Path(path).write_text(
+            line if line is not None else ("OK deadbeef %d\n" % int(_time.time())),
+            encoding="utf-8")
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
+def _preflight(env, timeout=0.6, make_conf=True):
+    if make_conf and not env["conf"].exists():
+        env["conf"].write_text("interface=ens19\n", encoding="utf-8")
+    return dhcp.reload_preflight(str(env["conf"]), timeout=timeout)
+
+
+def test_link_status_parsing(preflight_env):
+    link = preflight_env["link"]
+    assert dhcp.host_reload_link_status()["version"] == 0        # 不存在
+    link.write_text("RUN 2 1699999999\n", encoding="utf-8")
+    st = dhcp.host_reload_link_status()
+    assert st["version"] == 2 and st["ts"] == "1699999999"
+    link.write_text("garbage\n", encoding="utf-8")
+    assert dhcp.host_reload_link_status()["version"] < 0
+
+
+def test_preflight_skipped_outside_container(preflight_env, monkeypatch):
+    monkeypatch.setattr(dhcp, "_in_container", lambda: False)
+    res = _preflight(preflight_env)
+    assert res["ok"] is True and res["skipped"] is True
+    assert res["reason"] == "not-delegated"
+
+
+def test_preflight_reports_missing_state_dir(preflight_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(dhcp, "HOST_RELOAD_STATE_DIR", str(tmp_path / "nope"))
+    res = _preflight(preflight_env)
+    assert res["ok"] is False and res["reason"] == "state-dir-missing"
+    assert "compose" in res["hint"]          # 提示要能照做
+
+
+def test_preflight_requires_link_marker(preflight_env):
+    """没装单元 / 装的是不写标记的旧脚本 —— 都必须在**落盘之前**挡住。"""
+    res = _preflight(preflight_env)
+    assert res["ok"] is False and res["reason"] == "unit-not-installed"
+    assert "install-opstk-dnsmasq-reload.sh" in res["hint"]
+
+
+def test_preflight_rejects_old_script_version(preflight_env):
+    preflight_env["link"].write_text("RUN 1 1699999999\n", encoding="utf-8")
+    res = _preflight(preflight_env)
+    assert res["ok"] is False and res["reason"] == "script-outdated"
+    assert "旧版" in res["hint"]
+
+
+def test_preflight_unreadable_link_is_not_reported_as_missing(preflight_env):
+    """读不了 ≠ 没装：把排查引到"去装单元"会完全走错方向。"""
+    preflight_env["link"].mkdir()
+    res = _preflight(preflight_env)
+    assert res["ok"] is False and res["reason"] == "link-unreadable"
+
+
+def test_preflight_probe_succeeds_on_fresh_state(preflight_env):
+    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    _write_state_later(preflight_env["state"])
+    res = _preflight(preflight_env)
+    assert res["ok"] is True and res["probed"] is True and res["reason"] == ""
+
+
+def test_preflight_probe_does_not_change_conf_content(preflight_env):
+    """活体探测只能碰 mtime，绝不能动内容（那会被宿主机当成一次真部署）。"""
+    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    conf = preflight_env["conf"]
+    conf.write_text("interface=ens19\ndhcp-range=192.168.199.100,192.168.199.200,12h\n",
+                    encoding="utf-8")
+    before = conf.read_bytes()
+    _write_state_later(preflight_env["state"])
+    assert _preflight(preflight_env, make_conf=False)["ok"] is True
+    assert conf.read_bytes() == before
+
+
+def test_preflight_probe_rejects_stale_state(preflight_env):
+    """宿主机留下的**旧**标记不算"有响应"（否则单元早死了也照样过）。"""
+    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    preflight_env["state"].write_text("OK abc 1000\n", encoding="utf-8")
+    res = _preflight(preflight_env)
+    assert res["ok"] is False and res["reason"] == "no-response"
+    assert "journalctl" in res["hint"]
+
+
+def test_preflight_accepts_a_fresh_fail_as_liveness(preflight_env):
+    """链路"活着"不等于"配置合法"：宿主机报 FAIL（--test 不通过）也证明
+    单元在触发、脚本在跑 —— 预检必须放行，把"新配置合不合法"留给后面那一步。
+
+    真机实测：不认 FAIL 时，磁盘上一份坏配置会让**每次**部署都卡在预检超时，
+    连"重新部署一次即可自愈"这条路都被堵死。
+    """
+    import time as _time
+    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    preflight_env["conf"].write_text("interface=ens19\n", encoding="utf-8")
+    # 模拟"宿主机脚本跑到 --test 就失败"：只有 FAIL，没有 OK
+    _write_state_later(preflight_env["state"], delay=0.15,
+                       line="FAIL test-failed:badoption %d\n" % int(_time.time() + 1))
+    res = _preflight(preflight_env, make_conf=False)
+    assert res["ok"] is True and res["probed"] is True
+    assert res["state"]["state"] == "FAIL"
+
+
+def test_preflight_probe_timeout_is_a_failure(preflight_env):
+    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    res = _preflight(preflight_env)
+    assert res["ok"] is False and res["reason"] == "no-response"
+
+
+def test_preflight_skips_probe_when_conf_missing(preflight_env):
+    """还没部署过 → 没有可碰的监视目标 → 只做静态判断（不为了探测造假配置）。"""
+    preflight_env["link"].write_text("RUN 2 1699999999\n", encoding="utf-8")
+    res = _preflight(preflight_env, make_conf=False)
+    assert res["ok"] is True and res["probed"] is False
+    assert res["reason"] == "no-target-to-probe"
+    assert not preflight_env["conf"].exists()
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("test-failed:badoption", True),
+    ("test-failed:bad-address", True),
+    ("missing-conf", True),
+    ("empty-sha", True),
+    # 这些都不能证明"没重启过" —— 回滚会让磁盘与守护进程更不一致
+    ("restart-failed", False),
+    ("not-active", False),
+    ("config-changed", False),
+    ("lock-timeout", False),
+    ("script-error-line47", False),
+    ("", False),
+])
+def test_only_pre_restart_failures_allow_rollback(reason, expected):
+    assert dhcp.reload_failure_is_pre_restart(
+        {"state": "FAIL", "reason": reason}) is expected
+
+
+def test_missing_or_unreadable_state_never_allows_rollback():
+    assert dhcp.reload_failure_is_pre_restart(None) is False
+    assert dhcp.reload_failure_is_pre_restart({"state": "UNREADABLE", "reason": ""}) is False
+    assert dhcp.reload_failure_is_pre_restart(
+        {"state": "OK", "sha": "x", "ts": "1"}) is False
+
+
+def test_script_version_contract_is_documented():
+    """宿主脚本里写的 SCRIPT_VERSION 必须 >= 应用侧要求的最低版本，
+    否则部署会永远卡在 preflight（这条约束很容易在改脚本时忘掉）。
+
+    容器里只挂了 backend/app 与 backend/tests，`deploy/host/` 根本不在容器内 ——
+    找不到就 skip（而不是失败）：这是"开发机/CI 上跑全仓用例"才有的检查。
+    """
+    import re as _re
+    here = pathlib.Path(__file__).resolve()
+    roots = [here.parents[2], pathlib.Path("/app")]
+    if os.environ.get("OPSTK_REPO"):
+        roots.insert(0, pathlib.Path(os.environ["OPSTK_REPO"]))
+    sh_text = None
+    for r in roots:
+        f = r / "deploy" / "host" / "opstk-dnsmasq-reload.sh"
+        if f.is_file():
+            sh_text = f.read_text(encoding="utf-8")
+            break
+    if sh_text is None:
+        pytest.skip("宿主脚本不在本环境（容器只挂了 backend/），该契约检查只在完整仓库里跑")
+    # 注意行尾：检出到 Windows 时是 CRLF，正则必须容忍 `\r`（踩过：`$` 卡在 \r 前）
+    m = _re.search(r"^SCRIPT_VERSION=(\d+)\s*$", sh_text, _re.M)
+    assert m, "宿主脚本里没有 SCRIPT_VERSION"
+    assert int(m.group(1)) >= dhcp.HOST_RELOAD_MIN_SCRIPT_VERSION
+    assert "HOST_RELOAD_LINK" in sh_text or ".dnsmasq-reload.link" in sh_text
+
+
+def test_reload_service_disables_start_rate_limit():
+    """真机实测（2026-09）：systemd 默认"10 秒内最多启动 5 次"，而一次 /deploy 就会
+    触发重载服务两次（预检碰 mtime + 真正写 conf），撞上限流后服务**根本不跑** ——
+    状态文件没人写，应用读不到 FAIL，于是"无法证明没重启过 → 不能回滚"，
+    磁盘被留在不一致状态。这条用例钉死那个开关（很容易被人"清理"掉）。
+    """
+    here = pathlib.Path(__file__).resolve()
+    roots = [here.parents[2], pathlib.Path("/app")]
+    if os.environ.get("OPSTK_REPO"):
+        roots.insert(0, pathlib.Path(os.environ["OPSTK_REPO"]))
+    unit = None
+    for r in roots:
+        f = r / "deploy" / "host" / "opstk-dnsmasq-reload.service"
+        if f.is_file():
+            unit = f.read_text(encoding="utf-8")
+            break
+    if unit is None:
+        pytest.skip("宿主单元不在本环境（容器只挂了 backend/）")
+    assert "StartLimitIntervalSec=0" in unit
+    # SuccessExitStatus=0 1 也必须在：脚本"失败"是设计的一部分（写 FAIL 状态），
+    # 不能让它因为退出码 1 触发 systemd 的失败处理。
+    assert "SuccessExitStatus=0 1" in unit

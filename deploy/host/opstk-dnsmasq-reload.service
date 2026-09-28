@@ -1,6 +1,18 @@
 [Unit]
 Description=OpsToolkit: 校验并重载 dnsmasq（PXE 配置变更后）
 Documentation=file:/opt/opstk/deploy/host/README.md
+# **必须关掉启动限流**（真机实测，2026-09）：systemd 默认"10 秒内最多启动 5 次"，
+# 而一次 /deploy 就会触发这个服务两次（部署前的活体探测碰一下 conf 的 mtime、
+# 真正写入 conf 各一次），叠加 install 脚本自己那次 start 与并发部署，
+# 很快撞上 `Start request repeated too quickly` / `start-limit-hit`。
+# 后果不是"慢一点"，而是**服务根本不跑**：状态文件没人写 →
+#   · 应用侧等满超时后报"宿主机未加载新配置"（这条还算对，没有假成功）；
+#   · 但它读不到 FAIL，于是**无法证明 dnsmasq 没被重启过 → 不能回滚**，
+#     磁盘被留在"配置非法、守护进程还是旧配置"的不一致状态里。
+# 关掉限流是安全的：脚本自己有 flock 串行化，且"内容与上次加载的一致就跳过 restart"，
+# 所以多触发几次只是多跑几遍校验，不会反复重启 dnsmasq。
+# （旧版 systemd < 230 请改用 [Service] 的 StartLimitInterval=0）
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

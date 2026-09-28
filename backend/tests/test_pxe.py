@@ -1869,6 +1869,10 @@ class DeployIsolationTest(unittest.TestCase):
             (server._dhcp, "ensure_dirs", lambda dirs=None: []),
             (server._dhcp, "write_conf", self.write_conf),
             (server._dhcp, "dhcp_control", self.dhcp_control),
+            # R3：部署前的预检按"是不是容器"决定要不要跑（容器里必须走宿主机重载握手）。
+            # 这里固定成"非容器"，让预检走它自己的跳过分支 —— 测试是 hermetic 的，
+            # 绝不能在跑用例时去碰真实的 /etc/dnsmasq.d/opstk-pxe.conf。
+            (server._dhcp, "_in_container", lambda: False),
         ):
             p = mock.patch.object(target, attr, value)
             p.start()
@@ -2582,3 +2586,274 @@ class WipedDataDiskUsesStableDeviceTest(unittest.TestCase):
         ks = generate_all(self._rhel(dc))["ks.cfg"]
         self.assertNotIn("ddev1=", ks)
         self.assertIn("--ondisk=sdc", ks)
+
+
+class DeployPreflightAndRollbackTest(unittest.TestCase):
+    """R3：/deploy 的"预检 + 回滚"。
+
+    背景（MiMo R3）：/deploy 原本是"先落盘、再核对重载"。重载链路坏掉时，调用方
+    要等到超时才失败，而**磁盘已经改过**：正在跑的 dnsmasq 是旧配置，
+    /pxe/serve/boot.ipxe 却是新的 —— 未登记的机器卡在 PXE 循环里。
+    这里钉死两条：
+      a) 链路坏掉时**零落盘**（预检在所有写动作之前，连目录/固件都不碰）；
+      b) 写完才发现失败时：**能证明** dnsmasq 没被重启过就回滚成部署前的字节；
+         证明不了就保持现状，并明确写着"未回滚"（不含糊其辞）。
+    """
+
+    ANSWER = "http://10.0.0.1:8000/pxe/serve"
+
+    def setUp(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        import app.core.dhcp as dhcp
+        from app.it.pxe import server
+
+        self.os = os
+        self.mock = mock
+        self.server = server
+        self.dhcp = dhcp
+        self._tmp = tempfile.TemporaryDirectory()
+        t = self._tmp.name
+        self.web = os.path.join(t, "pxe-web")
+        self.tftp = os.path.join(t, "tftp")
+        self.confdir = os.path.join(t, "dnsmasq.d")
+        self.statedir = os.path.join(t, "state")
+        for d in (self.web, self.tftp, self.confdir, self.statedir):
+            os.makedirs(d)
+        self.conf = os.path.join(self.confdir, "opstk-pxe.conf")
+        # dhcp_control 默认**不是**委托路径：需要测重载握手的用例自己改返回值
+        self.dhcp_control = mock.Mock(
+            return_value={"ok": True, "action": "restart", "msg": "ok", "running": True}
+        )
+        for target, attr, value in (
+            (server, "WEB_ROOT", self.web),
+            (server, "TFTP_ROOT", self.tftp),
+            (dhcp, "CONF_DIR", self.confdir),          # 真实的 write_conf，写进临时目录
+            (dhcp, "PXE_CONF", self.conf),
+            (dhcp, "_in_container", lambda: False),    # 默认：预检走"跳过"分支
+            (dhcp, "is_linux", lambda: True),
+            (dhcp, "sudo_ok", lambda: True),
+            (dhcp, "ensure_dirs", lambda dirs=None: []),
+            (dhcp, "dhcp_control", self.dhcp_control),
+        ):
+            p = mock.patch.object(target, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    # ── 辅助 ──
+
+    def _cfg(self, **kw):
+        kw.setdefault("admin_password", "Test@123")
+        kw.setdefault("iso_url", "http://10.0.0.1:8000/pxe/iso/test.iso")
+        kw.setdefault("http_root", self.ANSWER)
+        kw.setdefault("server_ip", "10.0.0.1")
+        return PxeConfig(**kw)
+
+    def _files(self, pid, mac="00:11:22:33:44:55", hostname="web-01"):
+        self._make_media()
+        return generate_all(self._cfg(answer_root=self.ANSWER + "/profiles/" + pid),
+                            [{"mac": mac, "hostname": hostname}])
+
+    def _make_media(self):
+        d = self.os.path.join(self.web, "ubuntu", "22.04")
+        self.os.makedirs(d, exist_ok=True)
+        for f in ("vmlinuz", "initrd"):
+            with open(self.os.path.join(d, f), "w", encoding="utf-8") as fh:
+                fh.write("media\n")
+
+    def _tree(self):
+        """web 根 + 配置文件的**字节**快照：回滚正确与否只能这样机械复算。"""
+        out = {}
+        for root, _dirs, names in self.os.walk(self.web):
+            for n in names:
+                p = self.os.path.join(root, n)
+                rel = self.os.path.relpath(p, self.web)
+                with open(p, "rb") as fh:
+                    out[rel] = fh.read()
+        if self.os.path.exists(self.conf):
+            with open(self.conf, "rb") as fh:
+                out["<conf>"] = fh.read()
+        return out
+
+    def _delegate(self, preflight_ok=True):
+        """把部署切成"容器 + 宿主机重载委托"那条路径。"""
+        self.mock.patch.object(self.dhcp, "_in_container", lambda: True).start()
+        self.addCleanup(self.mock.patch.stopall)
+        self.mock.patch.object(
+            self.dhcp, "reload_preflight",
+            lambda *a, **k: ({"ok": True, "skipped": False, "probed": True, "reason": "",
+                              "hint": "", "state": None, "log": ["预检：测试桩"]}
+                             if preflight_ok else
+                             {"ok": False, "skipped": False, "probed": False,
+                              "reason": "unit-not-installed", "hint": "测试桩：没装单元",
+                              "state": None, "log": ["预检失败：测试桩"]}),
+        ).start()
+        self.dhcp_control.return_value = {
+            "ok": True, "action": "restart", "managed": False, "reload_delegated": True,
+            "msg": "容器内，等待宿主机重载", "running": True,
+        }
+
+    def _wait(self, *results):
+        m = self.mock.Mock(side_effect=list(results))
+        self.mock.patch.object(self.dhcp, "wait_host_reload", m).start()
+        self.addCleanup(self.mock.patch.stopall)
+        return m
+
+    WAIT_OK = {"ok": True, "state": {"state": "OK", "sha": "x", "ts": "1", "reason": "", "err": ""}}
+    WAIT_TEST_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": "1",
+                                              "reason": "test-failed:badoption", "err": ""}}
+    WAIT_RESTART_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": "1",
+                                                  "reason": "restart-failed", "err": ""}}
+
+    # ── 1. 预检失败 ⇒ 零落盘 ──
+
+    def test_preflight_failure_writes_nothing(self):
+        pid = "a" * 32
+        self._delegate(preflight_ok=False)
+        res = self.server.deploy_files(self._files(pid), pid)
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["preflight_failed"])
+        self.assertEqual(res["preflight_reason"], "unit-not-installed")
+        self.assertEqual(res["files_written"], [])
+        self.assertIn("本次未写入任何文件", res["errors"][0])
+        # 磁盘上什么都没变：没有配置、没有应答文件、连 profiles/<pid> 目录都不该存在
+        self.assertFalse(self.os.path.exists(self.conf))
+        self.assertFalse(self.os.path.exists(
+            self.os.path.join(self.web, self.server.PROFILE_SCOPE_DIR, pid)))
+        # 只该有测试自己铺的媒体文件
+        self.assertEqual(sorted(self._tree()), ["ubuntu/22.04/initrd", "ubuntu/22.04/vmlinuz"])
+
+    def test_preflight_reports_missing_state_dir(self):
+        """状态目录没挂上（compose 漏挂载）也要在落盘前挡住。"""
+        self.mock.patch.object(self.dhcp, "_in_container", lambda: True).start()
+        self.addCleanup(self.mock.patch.stopall)
+        self.mock.patch.object(self.dhcp, "HOST_RELOAD_STATE_DIR",
+                               self.os.path.join(self._tmp.name, "nope")).start()
+        self.addCleanup(self.mock.patch.stopall)
+        pid = "a" * 32
+        res = self.server.deploy_files(self._files(pid), pid)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["preflight_reason"], "state-dir-missing")
+        self.assertEqual(res["files_written"], [])
+        self.assertFalse(self.os.path.exists(self.conf))
+
+    def test_preflight_skipped_without_dnsmasq_config(self):
+        """没有 dnsmasq.conf 就没有"重载"这回事，不该白等预检。"""
+        pre = self.mock.Mock(return_value={"ok": True, "log": [], "reason": ""})
+        self.mock.patch.object(self.dhcp, "reload_preflight", pre).start()
+        self.addCleanup(self.mock.patch.stopall)
+        res = self.server.deploy_files({"boot.ipxe": "#!ipxe\nexit\n"}, "")
+        self.assertFalse(pre.called)
+        self.assertTrue(res["ok"])
+
+    # ── 2. 写完才发现失败 ⇒ 能证明就回滚 ──
+
+    def test_rollback_on_pre_restart_failure_restores_bytes(self):
+        pid = "a" * 32
+        self._delegate()
+        self._wait(self.WAIT_OK)
+        res1 = self.server.deploy_files(self._files(pid), pid)
+        self.assertTrue(res1["ok"], res1)
+        before = self._tree()
+
+        # 第二次部署：换一台机器（按 MAC 的应答文件集合会变）+ 宿主机在 --test 阶段失败
+        self._wait(self.WAIT_TEST_FAILED, self.WAIT_OK)
+        res2 = self.server.deploy_files(
+            self._files(pid, mac="aa:bb:cc:dd:ee:ff", hostname="db-02"), pid)
+        self.assertFalse(res2["ok"])
+        self.assertTrue(res2["rolled_back"])
+        self.assertEqual(res2["files_written"], [])
+        self.assertTrue(any("已回滚" in e for e in res2["errors"]), res2["errors"])
+        self.assertTrue(any("test-failed" in e for e in res2["errors"]), res2["errors"])
+        # 关键断言：磁盘逐字节回到部署前（含 dnsmasq 配置，且新增的文件要被删掉）
+        self.assertEqual(self._tree(), before)
+
+    def test_rollback_removes_files_that_did_not_exist_before(self):
+        """第一次部署就失败时，回滚要把这次**新建**的文件删掉。
+
+        只删文件、不删目录：空目录不承载任何配置内容（HTTP 侧对缺失文件就是 404），
+        而"删目录"会和并发的另一次部署抢同一条路径。所以这里断言的是 scope 下
+        **没有任何文件**残留，而不是整个目录不存在（`user-data/` 本来就是目录）。
+        """
+        pid = "a" * 32
+        self._delegate()
+        self._wait(self.WAIT_TEST_FAILED)
+        res = self.server.deploy_files(self._files(pid), pid)
+        self.assertTrue(res["rolled_back"])
+        self.assertFalse(self.os.path.exists(self.conf))
+        scope = self.os.path.join(self.web, self.server.PROFILE_SCOPE_DIR, pid)
+        left = [self.os.path.relpath(self.os.path.join(r, n), scope)
+                for r, _dirs, ns in self.os.walk(scope) for n in ns]
+        self.assertEqual(left, [], "回滚后不该留下文件：" + str(left))
+
+    def test_no_rollback_when_restart_may_have_happened(self):
+        """报的是 restart-failed ⇒ 无法证明守护进程没被重启 ⇒ **绝不**回滚。"""
+        pid = "a" * 32
+        self._delegate()
+        self._wait(self.WAIT_OK)
+        self.assertTrue(self.server.deploy_files(self._files(pid), pid)["ok"])
+        before = self._tree()
+
+        self._wait(self.WAIT_RESTART_FAILED)
+        res = self.server.deploy_files(
+            self._files(pid, mac="aa:bb:cc:dd:ee:ff", hostname="db-02"), pid)
+        self.assertFalse(res["ok"])
+        self.assertFalse(res.get("rolled_back"))
+        self.assertTrue(res["files_written"])
+        self.assertTrue(any("未回滚" in e for e in res["errors"]), res["errors"])
+        # 新内容保持原样（不回滚）
+        self.assertNotEqual(self._tree(), before)
+
+    def test_rollback_refused_when_a_target_was_a_directory(self):
+        """为让路删掉过东西（旧布局迁移）⇒ 恢复不了 ⇒ 整体放弃回滚并说清楚。"""
+        d = self.os.path.join(self.web, "boot.ipxe")
+        self.os.makedirs(d)
+        with open(self.os.path.join(d, "old"), "w", encoding="utf-8") as fh:
+            fh.write("旧布局残留\n")
+        res = self.server.deploy_files({"boot.ipxe": "#!ipxe\nnew\n", "../evil": "x"}, "")
+        self.assertFalse(res["ok"])
+        self.assertFalse(res.get("rolled_back"))
+        self.assertTrue(any("无法回滚" in e for e in res["errors"]), res["errors"])
+        with open(self.os.path.join(self.web, "boot.ipxe"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "#!ipxe\nnew\n")
+
+    # ── 3. 还没碰 dnsmasq 就失败 ⇒ 无条件回滚 ──
+
+    def test_write_failure_rolls_back_already_written_files(self):
+        self._delegate()
+        with open(self.os.path.join(self.web, "boot.ipxe"), "w", encoding="utf-8") as fh:
+            fh.write("OLD\n")
+        # dict 顺序：boot.ipxe 先写成功，第二个键非法 → 中途失败
+        res = self.server.deploy_files({"boot.ipxe": "NEW\n", "../evil": "x"}, "")
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["rolled_back"])
+        self.assertEqual(res["files_written"], [])
+        with open(self.os.path.join(self.web, "boot.ipxe"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "OLD\n")
+
+    def test_conf_write_failure_rolls_back_http_files(self):
+        self._delegate()
+        self.mock.patch.object(
+            self.dhcp, "write_conf", self.mock.Mock(return_value=False)).start()
+        self.addCleanup(self.mock.patch.stopall)
+        with open(self.os.path.join(self.web, "boot.ipxe"), "w", encoding="utf-8") as fh:
+            fh.write("OLD\n")
+        res = self.server.deploy_files(
+            {"boot.ipxe": "NEW\n", "dnsmasq.conf": "interface=ens19\n"}, "")
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["rolled_back"])
+        with open(self.os.path.join(self.web, "boot.ipxe"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "OLD\n")
+
+    def test_successful_deploy_reports_no_rollback(self):
+        pid = "a" * 32
+        self._delegate()
+        self._wait(self.WAIT_OK)
+        res = self.server.deploy_files(self._files(pid), pid)
+        self.assertTrue(res["ok"], res)
+        self.assertNotIn("rolled_back", res)
+        self.assertTrue(res["files_written"])
+        self.assertTrue(self.os.path.exists(self.conf))
