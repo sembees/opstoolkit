@@ -742,6 +742,16 @@ def _ubuntu_storage_obj(plan):
     disk = {"type": "disk", "id": "disk0"}
     disk.update(_ubuntu_disk_match(plan))
     disk["wipe"] = bool(plan["wipe"])
+    # ★ grub_device 是**必需**的：curtin/subiquity 靠它知道把引导装到哪块盘。
+    #   漏掉就报 "autoinstall config did not create needed bootloader partition" 并拒绝装机。
+    #   这正是 §5.46 缺陷 3 的真正原因 —— 用 ~200 秒一轮的真机迭代（e_try_ptable.py）
+    #   试出来的：先试过 bios_grub 分区、ptable=msdos，都不是；grub_device 才是。
+    #   subiquity 自己生成的简单布局里一直带着这个键，手写 storage.config 时极易漏。
+    disk["grub_device"] = True
+    # 分区表：有 ESP ⇒ 必须 GPT（UEFI）；否则用 msdos(MBR) —— 与 RHEL 侧的
+    # `bootloader --location=mbr` 保持一致，BIOS 下也就不需要额外的 bios_grub 分区。
+    disk["ptable"] = "gpt" if any(
+        p["mount"] == "/boot/efi" for p in plan["partitions"]) else "msdos"
     cfg.append(disk)
 
     raid_members = set()
