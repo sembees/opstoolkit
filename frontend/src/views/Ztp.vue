@@ -275,11 +275,14 @@
           </el-col>
           <el-col :span="8"><el-form-item label="服务器IP"><el-input v-model="genForm.server_ip" /></el-form-item></el-col>
           <el-col :span="8" style="text-align:right">
-            <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> 生成文件</el-button>
-          <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
-          <el-button type="warning" size="small" @click="doDeploy" :loading="deploying" :disabled="!Object.keys(genFiles).length"><el-icon><Promotion /></el-icon> 部署到本机</el-button>
+            <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
+          <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
+          <el-button type="warning" size="small" @click="doDeploy" :loading="deploying" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Promotion /></el-icon> 部署到本机</el-button>
           </el-col>
         </el-row>
+        <!-- 参数改过而没重新生成：预览是旧的、下载/部署却按新参数走 ⇒ 必须显式挡住 -->
+        <el-alert v-if="genStale" type="warning" :closable="false" show-icon style="margin-bottom:8px"
+                  title="参数已修改，下面的预览是**上一次**生成的内容 —— 下载/部署已禁用，请先点「重新生成」" />
         <el-form-item label="临时设备" v-if="genForm.devices.length">
           <el-tag v-for="(d, i) in genForm.devices" :key="i" closable @close="genForm.devices.splice(i,1)" size="small" style="margin-right:6px">
             {{ d.hostname }} / {{ d.mac || '无MAC' }}
@@ -447,6 +450,23 @@ const devForm = reactive({ template_id: "", hostname: "", mac: "", serial: "", m
 const inlineDev = reactive({ hostname: "", mac: "", serial: "", mgmt_ip: "" })
 
 const genForm = reactive({ deploy_mode: "standalone", server_ip: "10.0.0.250", devices: [] })
+// ★ 外部审查 U5-F1（高）：生成弹窗里的参数随时可改，而"下载/部署"用的是**当前**参数。
+//   没有这个指纹时，改完参数不重新生成就会出现"屏幕上看到的 ≠ 实际写进宿主机的"，
+//   特别是把投递模式 proxy→standalone 再部署，会在装机网段开出完整 DHCP 池。
+const genKey = ref("")        // 上一次成功生成所用的参数指纹
+let genSeq = 0                // 生成请求序号（丢旧响应，避免后发先至）
+
+function buildGenBody() {
+  return {
+    deploy_mode: genForm.deploy_mode,
+    server_ip: genForm.server_ip,
+    devices: genForm.devices,
+  }
+}
+
+const genBodyKey = computed(() => JSON.stringify(buildGenBody()))
+const genStale = computed(() => !!Object.keys(genFiles.value).length
+  && genKey.value !== genBodyKey.value)
 
 function vendorLabel(v) { return { h3c: "H3C", huawei: "华为 VRP5", "huawei-ce": "华为 VRP8(CE)", cisco: "思科" }[v] || v }
 function vendorType(v) { return { h3c: "primary", huawei: "success", "huawei-ce": "success", cisco: "warning" }[v] || "info" }
@@ -708,34 +728,34 @@ function confirmInlineDevice() {
 
 async function doGenerate() {
   generating.value = true
+  const seq = ++genSeq          // 请求序号：防止"后发先至"用旧响应覆盖新预览
   try {
     const tid = sessionStorage.getItem("ztp_template_id")
-    const body = {
-      deploy_mode: genForm.deploy_mode,
-      server_ip: genForm.server_ip,
-      devices: genForm.devices,
-    }
+    const body = buildGenBody()
+    const key = JSON.stringify(body)
     const res = await http.post("/ct/ztp/templates/" + tid + "/generate", body)
+    if (seq !== genSeq) return   // 期间又发起了新的生成 ⇒ 丢弃这次响应
     genFiles.value = res.files
+    genKey.value = key           // 记下"这份预览对应哪套参数"（所见即所部署）
     const keys = Object.keys(res.files)
     if (keys.length) activeFile.value = keys[0]
     ElMessage.success("生成完成: " + keys.length + " 个文件")
-  } finally { generating.value = false }
+  } finally { if (seq === genSeq) generating.value = false }
 }
 
 async function doDownload() {
+  // ★ 外部审查 U5-F1：参数改过就必须先重新生成 —— 否则预览是旧的、而 ZIP 按新参数生成
+  //   （把投递模式从 proxy 改成 standalone 再下载/部署，等于"审核的不是部署的"）。
+  if (genStale.value) { ElMessage.warning("参数已修改，请先点「重新生成」再下载"); return }
   const tid = sessionStorage.getItem("ztp_template_id")
   // 只有真拿到 ZIP 才提示"下载已开始"（外部审查 U5-F3：以前失败也提示成功）
-  const ok = await downloadZip("/ct/ztp/templates/" + tid + "/download", {
-    deploy_mode: genForm.deploy_mode,
-    server_ip: genForm.server_ip,
-    devices: genForm.devices,
-  })
+  const ok = await downloadZip("/ct/ztp/templates/" + tid + "/download", buildGenBody())
   if (ok !== true) return
   ElMessage.success("下载已开始")
 }
 
 async function doDeploy() {
+  if (genStale.value) { ElMessage.warning("参数已修改，请先点「重新生成」再部署"); return }
   deploying.value = true
   deployResult.value = []
   deployOk.value = true
