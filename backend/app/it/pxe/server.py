@@ -792,9 +792,19 @@ def deploy_files(files, pid="") -> dict:
             want_sha = _dhcp.conf_sha(dnsmasq_content)
         else:
             errors.append("FAILED: write dnsmasq config /etc/dnsmasq.d/opstk-pxe.conf")
-            # 配置没写下去 ⇒ 宿主机不会重载 ⇒ 回滚同样无条件安全
+            # ★ 外部审查 U2-F1：write_conf 失败**不等于"没动过这份文件"** ——
+            #   `open(path,"w")` 在 open 那一刻已经把它截断，后续 write 才失败的话，
+            #   磁盘上留的是半截/0 字节配置（而 0 字节能过 dnsmasq --test ⇒ 下次重载
+            #   就把 DHCP/TFTP 全弄丢）。所以这里必须把**已经取好的 conf_prev 快照**
+            #   交给回滚（以前传 None，等于把截断的文件留在原地），并且文案要说实话。
             errs, written, extra = _try_rollback(
-                log, errors, prev, removed_paths, None, flat_default, written)
+                log, errors, prev, removed_paths, conf_prev, flat_default, written)
+            errs = list(errs) + [
+                "配置写入失败，且**文件可能已被截断**（open('w') 会先清空）："
+                "已尝试用部署前的快照恢复 dnsmasq 配置；若恢复也失败，"
+                "请立刻人工核对 /etc/dnsmasq.d/opstk-pxe.conf（0 字节配置能通过"
+                " `dnsmasq --test`，会导致整个装机网段失去 DHCP/TFTP）。"
+            ]
             return _deploy_fail(log, errs, scope, written, extra)
 
     svc = _dhcp.dhcp_control("restart")
@@ -809,7 +819,14 @@ def deploy_files(files, pid="") -> dict:
             want_sha, _dhcp.PXE_CONF, not_before=not_before)
         if nudges:
             log.append("等重载超时，已补触发 %d 次（边沿事件被合并）" % nudges)
-        if got.get("ok"):
+        if got.get("ok") and not _dhcp.conf_sha_matches(_dhcp.PXE_CONF, want_sha):
+            # ★ 外部审查 U2-F6：宿主机确认的是"某一次写入"，而磁盘可能已被
+            #   后一次并发部署覆盖 ⇒ 不能报成功（守护进程跑的是别人那份）。
+            errors.append(
+                "宿主机重载确认成功，但**磁盘上的 opstk-pxe.conf 已不是本次写入的内容**"
+                "（很可能有另一个部署并发覆盖了它）。本次部署**不报成功**："
+                "请确认最终要生效的是哪一份，然后重新部署一次。")
+        elif got.get("ok"):
             log.append("宿主机 dnsmasq 已重载，配置 sha 核对一致（生效）")
         else:
             st = got.get("state") or {}
@@ -822,9 +839,11 @@ def deploy_files(files, pid="") -> dict:
                                 "以及 systemd 的启动限流（journalctl -u opstk-dnsmasq-reload "
                                 "里会看到 start-limit-hit）。）")
             )
-            if _dhcp.reload_failure_is_pre_restart(st):
+            if _dhcp.reload_failure_is_pre_restart(st, not_before=not_before):
                 # 宿主机在 "--test 校验"阶段就失败了 ⇒ **能证明** dnsmasq 没被重启过
                 # ⇒ 把磁盘恢复成部署前 = 回到完全一致的旧状态（R3）。
+                # （not_before：只认本次部署之后写下的 FAIL；陈旧的/别人的 FAIL 不算数，
+                #   那时宿主机可能早已因别的事件重启过 —— 外部审查 U2-F8）
                 errs, written, extra = _try_rollback(
                     log, [detail], prev, removed_paths, conf_prev, flat_default, written)
                 if extra.get("rolled_back") and extra.get("rollback_conf_sha"):

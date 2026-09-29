@@ -216,8 +216,14 @@ def deploy_files(files: dict, tid: str = "") -> dict:
             want_sha = _dhcp.conf_sha(dnsmasq_content)
         else:
             errors.append("FAILED: write dnsmasq config /etc/dnsmasq.d/opstk-ztp.conf")
+            # 同 PXE 侧（外部审查 U2-F1）：write_conf 失败时文件**可能已被截断**，
+            # 必须把已取好的 conf_prev 交给回滚，而不是传 None 把半截配置留在原地。
             errs, written, extra = _filestore.try_rollback(
-                log, errors, prev, removed_paths, None, "opstk-ztp.conf", written)
+                log, errors, prev, removed_paths, conf_prev, "opstk-ztp.conf", written)
+            errs = list(errs) + [
+                "配置写入失败，且**文件可能已被截断**（open('w') 会先清空）："
+                "已尝试用部署前的快照恢复 dnsmasq 配置。",
+            ]
             return _deploy_fail(log, errs, written, extra)
 
     svc = _dhcp.dhcp_control("restart")
@@ -243,7 +249,7 @@ def deploy_files(files: dict, tid: str = "") -> dict:
                                 "最常见的是 " + _dhcp.HOST_RELOAD_UNIT + " 没启用，或者装的还是"
                                 "只监视 PXE 配置的旧版脚本。）")
             )
-            if _dhcp.reload_failure_is_pre_restart(st):
+            if _dhcp.reload_failure_is_pre_restart(st, not_before=not_before):
                 errs, written, extra = _filestore.try_rollback(
                     log, [detail], prev, removed_paths, conf_prev, "opstk-ztp.conf", written)
                 if extra.get("rolled_back") and extra.get("rollback_conf_sha"):

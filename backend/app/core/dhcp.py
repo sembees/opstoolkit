@@ -88,6 +88,18 @@ def write_conf(name, content):
     """
     os.makedirs(CONF_DIR, exist_ok=True)
     path = os.path.join(CONF_DIR, name)
+    # ★ 外部审查 U2-F1（我复核确认，踩的正是那条红线）：`open(path,"w")` 在 open(2)
+    #   那一刻就把文件截成 0 字节。若随后 write/flush/fsync 失败（ENOSPC/EIO/编码错误），
+    #   磁盘上留下的是**半截甚至 0 字节**的配置 —— 而空配置能通过 `dnsmasq --test`
+    #   （空配置语法合法），宿主机下一次重载（ZTP 部署、开机、人工 restart）就会加载它：
+    #   enable-tftp/tftp-root/dhcp-boot 全没了，**整个装机网段失去 DHCP/TFTP**。
+    #   所以：先留一份原内容，失败时尽力写回；同时调用方要按"可能已被截断"处理并回滚。
+    orig = None
+    try:
+        with open(path, "rb") as f:
+            orig = f.read()
+    except OSError:
+        orig = None
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -97,8 +109,26 @@ def write_conf(name, content):
     except PermissionError:
         # 非 root：退化成 sudo tee（tee 也是原地写，同样触发 IN_CLOSE_WRITE）
         rc, _, _ = _run(["tee", path], sudo=True, stdin_data=content)
-        return rc == 0
+        if rc == 0:
+            return True
+        _restore_bytes(path, orig)
+        return False
     except Exception:
+        _restore_bytes(path, orig)
+        return False
+
+
+def _restore_bytes(path, data):
+    """把原内容尽力写回（失败就放弃 —— 这是"挽回截断"的最后一步，不能再抛异常）。"""
+    if data is None:
+        return False
+    try:
+        with open(path, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        return True
+    except Exception:      # noqa: BLE001
         return False
 
 
@@ -371,15 +401,43 @@ def wait_host_reload_retrying(sha, conf_path, state_path=None, not_before=None,
     return (got or {"ok": False, "state": None}), attempts
 
 
-def reload_failure_is_pre_restart(state) -> bool:
+def conf_sha_matches(path, want_sha) -> bool:
+    """磁盘上这份配置的 sha 是否仍等于我们刚写的那份。
+
+    用途（外部审查 U2-F6）：并发部署时，宿主机重载单元确认的是"**某一次**写入"，
+    而磁盘可能已经被后一次部署覆盖 —— 报成功之前必须再核对一次磁盘内容，
+    否则会出现"守护进程跑的是别人那份，我这个接口却报成功"。
+    """
+    if not want_sha:
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return conf_sha(f.read()) == want_sha
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def reload_failure_is_pre_restart(state, not_before=None) -> bool:
     """宿主机报的这个失败能否**证明** dnsmasq 没被重启过。
 
     只有能证明时才允许应用侧回滚磁盘内容（见 HOST_RELOAD_PRE_RESTART_FAILURES）。
     状态文件缺失/读不了（state 为 None 或 UNREADABLE）一律算"不能证明"：
     那说明链路本身有问题，重启到底发没发生过无从判断。
+
+    ★ 外部审查 U2-F8：还要看**新鲜度**。状态槽里的 FAIL 可能是上一次运行（或并发部署
+    的另一次运行）留下的陈旧标记 —— 那时宿主机可能早已因为别的事件重启过 dnsmasq，
+    据此授权回滚会正好制造这个判据想避免的"磁盘 vs 守护进程更不一致"。
+    传了 `not_before`（本次部署开始的时间戳）时，比它旧的 FAIL 一律不算数。
     """
     if not state or state.get("state") != "FAIL":
         return False
+    if not_before is not None:
+        try:
+            ts = int(str(state.get("ts") or "0"))
+        except (TypeError, ValueError):
+            ts = 0
+        if ts < int(not_before):
+            return False
     return (state.get("reason") or "").startswith(HOST_RELOAD_PRE_RESTART_FAILURES)
 
 
@@ -714,8 +772,14 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
                            "实测会猜到承载企业网的那张卡）。")
     try:
         present = set(os.listdir("/sys/class/net"))
-    except OSError:
-        present = set()
+    except OSError as e:
+        # ★ 外部审查 U2-F3：这里原来是 `present = set()` 然后靠 `if present:` 跳过第 2/6 条
+        #   —— 也就是**读不到网卡事实时反而放行**（fail-open），与 docstring 里
+        #   "六条全部 fail-closed" 自相矛盾。后果是把"网卡名笔误"这种配置放过去，
+        #   而 bind-interfaces + 不存在的网卡会让 dnsmasq 起不来（它同时服务着 PXE）。
+        return False, ("读不到 /sys/class/net（" + type(e).__name__ + "）：无法确认配置里的 "
+                       "interface= 指的是真实存在的网卡。dnsmasq 配 bind-interfaces 时网卡不存在会"
+                       "**启动失败**，而它同时服务着 PXE 与 ZTP ⇒ 按 fail-closed 口径拒绝部署。")
     if present:
         for i in ifaces:
             if i not in present:
@@ -733,15 +797,20 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
                            "（" + ", ".join(str(n) for n in nets) + "）："
                            "在它上面开 DHCP 会抢答骨干网的地址/网关，必须改到专用装机网卡。")
     for lo, hi in ranges:
+        # ★ 外部审查 U2-F2：原来只判"两个**端点** ∈ 骨干网段"，池子**跨过**骨干网段
+        #   （端点都在外面、范围却盖住了它）会被漏判 —— 而 docstring/注释写的是
+        #   "池与骨干网段有重叠"。改成真正的**区间重叠**判定。
+        try:
+            lo_i = int(ipaddress.ip_address(lo))
+            hi_i = int(ipaddress.ip_address(hi))
+        except ValueError:
+            continue
+        if hi_i < lo_i:
+            lo_i, hi_i = hi_i, lo_i
         for net in nets:
-            try:
-                lo_in = ipaddress.ip_address(lo) in net
-                hi_in = ipaddress.ip_address(hi) in net
-            except ValueError:
-                continue
-            if lo_in or hi_in:
-                return False, ("dhcp-range " + str(lo) + "-" + str(hi) + " 落在骨干网段 "
-                               + str(net) + " 内：这会把骨干网的地址分给客户端，"
+            if int(net.network_address) <= hi_i and lo_i <= int(net.broadcast_address):
+                return False, ("dhcp-range " + str(lo) + "-" + str(hi) + " 与骨干网段 "
+                               + str(net) + " 有重叠：这会把骨干网的地址分给客户端，"
                                  "请把池改到专用装机网段。")
     # 6) 地址池必须落在目标网卡**自己**的网段里（读不到网卡地址也算拒绝）
     #    只在能列出真实网卡时做（非 Linux / 容器里读不到 /sys/class/net 时跳过，
@@ -888,9 +957,21 @@ def dhcp_control(action):
         # 注意 managed=False 只表示"我不拥有这个守护进程"，**不代表配置已生效** ——
         # 调用方（deploy_files）必须再用 wait_host_reload() 核对 sha，
         # 核对不过就报失败。这里绝不返回 ok=True 来暗示"已完成"。
+        # 容器里做不到：不拥有守护进程，也不该在这个网络命名空间里起第二个 dnsmasq
+        # （会和宿主机的抢 67/69，P0/U8 事故）。
+        # ★ 外部审查 U2-F5：以前这里对**任何** action 都回 ok=True —— 于是 stop/start
+        #   报成功却什么都没做（假成功）。现在只对 restart/status 保持原语义。
+        if action in ("start", "stop"):
+            return {"ok": False, "action": action, "managed": False, "reload_delegated": True,
+                    "msg": ("容器内不能 " + action + " dnsmasq（它由宿主机管理）；"
+                            "请在宿主机上执行 `systemctl " + action + " dnsmasq`"),
+                    "running": len(_find_dnsmasq_pids(skip_zombies=True)) > 0
+                               or _port_67_listening()}
         return {"ok": True, "action": action, "managed": False, "reload_delegated": True,
                 "msg": "运行在容器内，dnsmasq 由宿主机管理；配置已写入，等待宿主机重载单元加载",
-                "running": len(_find_dnsmasq_pids(skip_zombies=True)) > 0}
+                # running 必须用 :67 监听状态判断：容器与宿主机共享网络命名空间但不共享 PID，
+                # _find_dnsmasq_pids 在容器里**恒为空**（会把在跑的 dnsmasq 显示成 stopped）。
+                "running": len(_find_dnsmasq_pids(skip_zombies=True)) > 0 or _port_67_listening()}
     has_systemd = os.path.isfile("/run/systemd/system")
     if action == "status":
         st = dhcp_status()

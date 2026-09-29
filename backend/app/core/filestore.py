@@ -159,8 +159,19 @@ def try_rollback(log, errors, prev, removed_paths, conf_prev, conf_name, written
       · 回滚放弃/失败 → written 原样保留，并追加一条说明为什么没回滚，
         绝不让调用方以为"已经恢复原样了"。
     """
-    if not written and conf_prev is None:
+    if not written and conf_prev is None and not removed_paths:
         return errors, written, {}
+    # ★ 外部审查 U2-F9：上面的条件原来漏了 `removed_paths`。`_make_room` 可能已经
+    #   删掉了挡路的旧布局（不可逆），此时即使一个文件都没写成，也必须走回滚路径 ——
+    #   那里才会把"删掉的内容无法恢复"如实报出来，而不是静默当成"无需回滚"。
+    if not written and conf_prev is None and removed_paths:
+        errs = list(errors) + [
+            "【无法自动恢复】本次为腾位置删除了 " + str(len(removed_paths))
+            + " 个已存在的路径，随后就没有再写成任何文件："
+            + "、".join(str(x) for x in removed_paths[:3])
+            + "。这些删除是不可逆的，请人工核对（本次没有改动 dnsmasq 配置）。"
+        ]
+        return errs, written, {"rolled_back": False, "removed_paths": list(removed_paths)}
     rb = restore_previous(prev, removed_paths, conf_prev, conf_name, log,
                           lock=lock, lock_path=lock_path)
     if rb["ok"]:
@@ -175,9 +186,14 @@ def try_rollback(log, errors, prev, removed_paths, conf_prev, conf_name, written
             # 去确认"宿主机重新与磁盘一致"（旧配置内容未变，通常不会重启 dnsmasq）。
             extra["rollback_conf_sha"] = _dhcp.conf_sha(rb["conf_text"])
         return errs, [], extra
+    # ★ 外部审查 U2-F4：回滚是**逐个文件**做的，中途失败时已经恢复了前面几个 ——
+    #   原来的文案却写"已写入的文件保持现状（不做半套回滚）"，与磁盘上的实际情况相反，
+    #   运维照着这句话核对会得出错误结论。这里如实报"恢复了几个/失败哪几个"。
+    done = rb.get("restored") or 0
     errs = list(errors) + [
         "【无法回滚】" + (rb["why"] or "未知原因")
-        + "。已写入的文件保持现状（**不做**半套回滚，以免运维以为已经恢复原样）；"
-          "请按上面的路径人工核对内容。"
+        + "。本次已恢复 " + str(done) + " 个路径，其余保持本次写入的内容"
+          "（**磁盘是混合状态**，并不等于「什么都没动」）；请按上面的路径人工核对内容。"
     ]
-    return errs, written, {"rolled_back": False, "rollback_error": rb["why"]}
+    return errs, written, {"rolled_back": False, "rollback_error": rb["why"],
+                           "files_restored": done}

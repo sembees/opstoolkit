@@ -333,9 +333,13 @@ class ZtpDeployServerTest(unittest.TestCase):
         return m
 
     WAIT_OK = {"ok": True, "state": {"state": "OK", "sha": "x", "ts": "1", "reason": "", "err": ""}}
-    WAIT_TEST_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": "1",
+    # FAIL 的 ts 必须新鲜：U2-F8 之后只认"本次部署之后写下的 FAIL"（陈旧 FAIL 不算数）
+    _FRESH_TS = "9999999999"
+    WAIT_STALE_TEST_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": "1",
+                                                     "reason": "test-failed:badoption", "err": ""}}
+    WAIT_TEST_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": _FRESH_TS,
                                               "reason": "test-failed:badoption", "err": ""}}
-    WAIT_RESTART_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": "1",
+    WAIT_RESTART_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": _FRESH_TS,
                                                   "reason": "restart-failed", "err": ""}}
 
     # ── 红线 ──
@@ -431,6 +435,23 @@ class ZtpDeployServerTest(unittest.TestCase):
         self.assertFalse(res.get("rolled_back"))
         self.assertTrue(any("未回滚" in e for e in res["errors"]), res["errors"])
         self.assertNotEqual(self._tree(), before)
+
+    def test_stale_fail_does_not_authorize_rollback(self):
+        """★ 外部审查 U2-F8：状态槽里**陈旧**的 FAIL 不能证明"这次没重启过"。
+
+        宿主机可能早就因为别的事件重启过 dnsmasq —— 拿一个上次运行留下的 FAIL 去授权
+        回滚磁盘，正好会制造那个判据想避免的"磁盘 vs 守护进程更不一致"。
+        """
+        self._delegate([self.WAIT_OK])
+        self.assertTrue(self.ztp.deploy_files(self._files(), "t" * 32)["ok"])
+        before = self._tree()
+
+        self._delegate([self.WAIT_STALE_TEST_FAILED])
+        res = self.ztp.deploy_files(self._files(tag="SW2"), "t" * 32)
+        self.assertFalse(res["ok"])
+        self.assertFalse(res.get("rolled_back"), res)
+        self.assertTrue(any("未回滚" in e for e in res["errors"]), res["errors"])
+        self.assertNotEqual(self._tree(), before)   # 磁盘保持本次写入的内容（已如实报告）
 
     def test_config_write_failure_rolls_back_device_files(self):
         """配置写不下去 ⇒ 连设备配置也不该留在盘上（旧代码只 log 一句，还报成功）。"""

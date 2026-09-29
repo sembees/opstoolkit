@@ -2728,9 +2728,13 @@ class DeployPreflightAndRollbackTest(unittest.TestCase):
         return m
 
     WAIT_OK = {"ok": True, "state": {"state": "OK", "sha": "x", "ts": "1", "reason": "", "err": ""}}
-    WAIT_TEST_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": "1",
+    # FAIL 状态的时间戳必须**新鲜**：外部审查 U2-F8 之后，reload_failure_is_pre_restart
+    # 只认"本次部署之后写下的 FAIL"（陈旧的/别的运行的 FAIL 不能证明这次没重启过）。
+    # 夹具里用一个远未来的 ts，等价于"刚写的"，从而测的是判据本身而不是时钟。
+    _FRESH_TS = "9999999999"
+    WAIT_TEST_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": _FRESH_TS,
                                               "reason": "test-failed:badoption", "err": ""}}
-    WAIT_RESTART_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": "1",
+    WAIT_RESTART_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": _FRESH_TS,
                                                   "reason": "restart-failed", "err": ""}}
 
     # ── 1. 预检失败 ⇒ 零落盘 ──
