@@ -58,8 +58,10 @@ class H3cBaselineTest(unittest.TestCase):
                         "管理 VLAN 必须出现在 SVI 之前")
 
     def test_mgmt_vlan_not_duplicated_when_listed(self):
+        # ★ 外部审查 U6-F1：这里原来写的是 `assertLessEqual(count, 1)` —— 等于允许
+        #   "一次都不生成"，断言形同虚设（管理 VLAN 没建出来也照样通过）。
         out = h3c_config(DEV, prof("h3c", vlans=[{"id": 10, "name": "MGMT"}]))
-        self.assertLessEqual(out.count("\nvlan 10\n"), 1)
+        self.assertEqual(out.count("\nvlan 10\n"), 1)
 
     def test_vlan_mismatch_is_flagged_and_interface_wins(self):
         """管理 VLAN 号与接口名不一致时：以接口名为准，并在配置里写明。"""
@@ -68,6 +70,9 @@ class H3cBaselineTest(unittest.TestCase):
         self.assertIn("不一致", out)
         self.assertIn("vlan 100", out)
         self.assertIn("interface Vlan-interface100", out)
+        # ★ 外部审查 U6-F4：还要锁"错的那个 VLAN **不**出现"，以及 VLAN 必须先于 SVI 生成
+        self.assertNotIn("\nvlan 10\n", out)
+        self.assertLess(out.index("vlan 100"), out.index("interface Vlan-interface100"))
 
     def test_ntp_line_only_when_configured(self):
         self.assertNotIn("ntp-service", h3c_config(DEV, prof("h3c", ntp_server="")))
