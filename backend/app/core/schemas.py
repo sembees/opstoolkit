@@ -607,6 +607,28 @@ class PxeDiskTargetIn(BaseModel):
     id_path: str = ""
     min_size_gb: int = 0
 
+    # ★ 外部审查 U7-F5：id_path 原来完全没校验（生成器里被 `re.sub` 静默洗过一遍才用）。
+    #   洗过之后如果变成空串，`mode=match` 就只剩 model/serial —— 校验层次与事实不符。
+    #   这里按 udev 实际会用的字符集收窄，非法即 422；生成器对 Ubuntu 仍然直接拒绝这个键
+    #   （subiquity 不识别未知键时会静默退回"匹配第一块盘"⇒ 抹数据盘，见 §5.46）。
+    @field_validator("id_path")
+    @classmethod
+    def _check_id_path(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            return ""
+        if not re.fullmatch(r"[A-Za-z0-9._:+-]{1,128}", s):
+            raise ValueError(f"id_path 含非法字符（只允许字母数字与 . _ : + -）：{s[:40]!r}")
+        return s
+
+    @field_validator("model", "serial")
+    @classmethod
+    def _check_matchers(cls, v: str) -> str:
+        s = (v or "").strip()
+        if s and any(ord(ch) < 32 for ch in s):
+            raise ValueError(f"匹配键含控制字符：{s[:40]!r}")
+        return s
+
 
 class PxeDiskConfigIn(BaseModel):
     """disk_config 的结构化模型（规格 §2）。
@@ -920,6 +942,19 @@ class PxeProfileIn(BaseModel):
     disk_config: dict[str, Any] = {}
 
 
+    # ★ 外部审查 U7-F11：disk_scheme 原来没有白名单 —— 传个未知值（例如 "zfs"）保存期
+    #   一路放行，到生成器里被静默当成 lvm，运维以为选了别的方案却装成了 LVM。
+    @field_validator("disk_scheme")
+    @classmethod
+    def _check_scheme(cls, v: str) -> str:
+        val = (v or "").strip().lower()
+        if val not in ("lvm", "direct", "custom"):
+            raise ValueError(
+                "disk_scheme 只允许 lvm / direct / custom（自定义分区请用 custom + disk_config），"
+                f"收到：{v!r}")
+        return val
+
+
     @field_validator("disk_config")
     @classmethod
     def _check_disk_config(cls, v, info):
@@ -1106,6 +1141,27 @@ class PxeGenerateIn(BaseModel):
     # 留空时后端会按 mirror 指向的本机发布目录自动探测。
     stage2: str = ""
     extra_repos: list = []
+
+    # ★ 外部审查 U7-F6：extra_repos 是裸 list，元素完全不校验 —— 而它们会被拼进
+    #   ks.cfg / user-data 的 repo 行（换行即注入）。这里逐个要求"单行 URL 形状"。
+    @field_validator("extra_repos")
+    @classmethod
+    def _check_repos(cls, v: list) -> list:
+        out = []
+        for i, r in enumerate(v or []):
+            if not isinstance(r, str):
+                raise ValueError(f"extra_repos[{i}] 必须是字符串")
+            s = r.strip()
+            if not s:
+                continue
+            if any(ord(ch) < 32 or ch == "\x7f" for ch in s):
+                raise ValueError(f"extra_repos[{i}] 含控制字符（换行会注入配置）：{s[:40]!r}")
+            if not (s.startswith("http://") or s.startswith("https://")
+                    or s.startswith("ftp://") or s.startswith("nfs:") or s.startswith("file:")):
+                raise ValueError(
+                    f"extra_repos[{i}] 必须是 http(s)/ftp/nfs/file 形式的安装源：{s[:60]!r}")
+            out.append(s)
+        return out
     deploy_mode: str = "standalone"    # standalone / proxy / relay
     net_config: PxeNetConfigIn = PxeNetConfigIn()
     installs: list[PxeInstallItem] = []

@@ -254,6 +254,47 @@ class DataDiskIdentFormatTest(unittest.TestCase):
         self.assertTrue(self._profile({"name": "sdb", "wwid": "naa.6000c29a-1b2c-3d4e"}))
 
 
+class PxeInputSurfaceTest(unittest.TestCase):
+    """U7-F5 / F6 / F11：PXE 入参模型的三个洞（保存能过、生成期才炸或可注入）。"""
+
+    def test_disk_scheme_whitelist(self):
+        from app.core.schemas import PxeProfileIn
+        for bad in ("zfs", "lvm2", "raid"):
+            with self.subTest(bad=bad):
+                with pytest.raises(ValueError) as e:
+                    PxeProfileIn(name="t", os_type="ubuntu", admin_password="Test@123",
+                                 disk_scheme=bad)
+                self.assertIn("disk_scheme", str(e.value))
+        # 大小写/空白归一后合法（"CUSTOM " 是**应当接受**的写法）
+        self.assertEqual(PxeProfileIn(name="t", os_type="ubuntu", admin_password="T@1",
+                                      disk_scheme="Direct").disk_scheme, "direct")
+        self.assertEqual(PxeProfileIn(name="t", os_type="ubuntu", admin_password="T@1",
+                                      disk_scheme="CUSTOM ").disk_scheme, "custom")
+
+    def test_extra_repos_element_validation(self):
+        from app.core.schemas import PxeGenerateIn
+        with pytest.raises(ValueError) as e:
+            PxeGenerateIn(extra_repos=["http://ok/repo\nrepo --name=x"])
+        self.assertIn("控制字符", str(e.value))
+        with pytest.raises(ValueError):
+            PxeGenerateIn(extra_repos=["repo --name=evil"])
+        got = PxeGenerateIn(extra_repos=["http://10.0.0.1/repo", " https://x/y "])
+        self.assertEqual(got.extra_repos, ["http://10.0.0.1/repo", "https://x/y"])
+
+    def test_id_path_charset(self):
+        from app.core.schemas import PxeDiskTargetIn
+        with pytest.raises(ValueError) as e:
+            PxeDiskTargetIn(mode="match", id_path="pci-0000:00:05.0-scsi-0:0:0:1\nx")
+        self.assertIn("id_path", str(e.value))
+        good = "pci-0000:00:05.0-scsi-0:0:0:1"
+        self.assertEqual(PxeDiskTargetIn(mode="match", id_path=good).id_path, good)
+
+    def test_target_matchers_reject_control_chars(self):
+        from app.core.schemas import PxeDiskTargetIn
+        with pytest.raises(ValueError):
+            PxeDiskTargetIn(mode="match", serial="SN1\nport=0")
+
+
 class RequireRoleTest(unittest.TestCase):
     """U4-F1：破坏性接口必须要求 admin 角色。"""
 
