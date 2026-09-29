@@ -23,6 +23,15 @@ services:
       # 有守卫，但容器里看不到 deploy/host/ ⇒ 会**静默 skip**，等于从未被守卫
       # （外部审查 U6-F6）。挂进来之后容器里也真跑；找不到文件时测试会直接失败而不是跳过。
       - ./deploy/host:/app/deploy/host:ro
+      # ★ `.env`（JWT secret + credential_key）**必须挂**（外部审查 U4-F6 的部署侧一半）。
+      # 不挂的后果（真机上已确认存在这条路径）：`_write_env` 写的是 BASE_DIR/.env =
+      # /app/backend/.env，而那个路径在**容器可写层**里 —— `docker compose restart` 还在，
+      # 但 `docker compose up -d`（重建容器）会把它丢掉 / 回退成镜像里 COPY 进去的那份：
+      #   · 容器里生成过新 key ⇒ 重建后滚回旧 key ⇒ 用新 key 加密的凭据**永久打不开**；
+      #   · 镜像里那份是构建时从宿主机 backend/.env 复制的，两处不一致时
+      #     "到底哪把 key 在用"完全靠运气（库里现有 4 条凭据 + 7 个 ZTP 模板存着密文）。
+      # 挂上之后：key 文件与仓库/备份在一起、重建容器不丢、容器内外永远看到同一份。
+      - ./backend/.env:/app/backend/.env:rw
       # 入口脚本也挂进去：它是"容器是否自起 dnsmasq"的开关，必须与仓库保持一致，
       # 不能依赖镜像里烤进去的那份副本（改它需要重建镜像，而前端阶段重建当前会失败）。
       - ./backend/docker-entrypoint.sh:/docker-entrypoint.sh:ro
