@@ -46,17 +46,41 @@ export default http
 
 
 // 下载后端打包的 zip（POST，返回 blob 流）
+// ★ 外部审查 U5-F3：以前失败时只弹一句"下载失败: 422"就 `return undefined`，
+//   调用方却无条件提示"下载已开始"（假成功）；fetch 抛错（含 30s abort）更是没人接。
+//   现在：成功返回 true / 失败返回 false 并把后端 detail 带出来，调用方必须看返回值。
 export async function downloadZip(url, body) {
   const token = localStorage.getItem('opstk_token')
-  const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), 30000); const res = await fetch('/api' + url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (token || '') },
-    body: JSON.stringify(body || {}),
-    signal: ctrl.signal,
-  })
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 30000)
+  let res
+  try {
+    res = await fetch('/api' + url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (token || '') },
+      body: JSON.stringify(body || {}),
+      signal: ctrl.signal,
+    })
+  } catch (e) {
+    clearTimeout(timer)
+    ElMessage.error('下载失败：' + (e && e.name === 'AbortError'
+      ? '请求超时（30s）' : ((e && e.message) || '网络错误')))
+    return false
+  }
+  clearTimeout(timer)
   if (!res.ok) {
-    ElMessage.error('下载失败: ' + res.status)
-    return
+    let detail = ''
+    try {
+      const text = await res.text()
+      try { detail = JSON.parse(text).detail } catch (e) { detail = text }
+    } catch (e) { /* 读不出来就算了，下面给状态码 */ }
+    if (Array.isArray(detail)) {
+      detail = detail.map((d) => (d && d.loc ? d.loc.join('.') + ': ' : '') + ((d && d.msg) || '')).join('；')
+    } else if (detail && typeof detail === 'object') {
+      detail = JSON.stringify(detail)
+    }
+    ElMessage.error('下载失败(' + res.status + ')：' + (detail || '后端未给出原因'))
+    return false
   }
   const blob = await res.blob()
   const objUrl = URL.createObjectURL(blob)
@@ -68,4 +92,5 @@ export async function downloadZip(url, body) {
   a.click()
   document.body.removeChild(a)
   URL.revokeObjectURL(objUrl)
+  return true
 }

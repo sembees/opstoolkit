@@ -782,6 +782,13 @@ async function saveProfile() {
     ElMessage.success("保存成功")
     profileDialog.value = false
     loadProfiles()
+  } catch (e) {
+    // ★ 外部审查 U5-F2：buildPayload() 会为"数据盘没填稳定标识"等**安全原因**抛 Error
+    //   （不是 HTTP 错误，axios 拦截器不介入）。以前只有 try/finally，于是保存按钮
+    //   "点了没反应"、告警只进 console —— 运维最省事的"绕过"就是删掉那几行数据盘，
+    //   结果 %pre 排除集为空，正好回到会抹盘的路径。这里必须把原因显示出来。
+    ElMessage.error((e && e.message) || "保存失败")
+    return
   } finally { saving.value = false }
 }
 
@@ -834,7 +841,8 @@ async function doGenerate() {
 
 async function doDownload() {
   const pid = sessionStorage.getItem("pxe_profile_id")
-  await downloadZip("/it/pxe/profiles/" + pid + "/download", {
+  // 只有真拿到 ZIP 才提示"下载已开始"（外部审查 U5-F3）
+  const ok = await downloadZip("/it/pxe/profiles/" + pid + "/download", {
     hostname: genForm.hostname,
     server_ip: genForm.server_ip,
     http_root: genForm.http_root,
@@ -844,6 +852,7 @@ async function doDownload() {
     deploy_mode: genForm.deploy_mode,
     installs: installs.value.map(i => ({ mac: i.mac, hostname: i.hostname })),
   })
+  if (ok !== true) return
   ElMessage.success("下载已开始")
 }
 
@@ -871,5 +880,5 @@ function startInstallPolling() {
 
 let serverPollTimer = null
 onBeforeUnmount(() => { clearTimeout(installTimer); clearTimeout(serverPollTimer) })
-onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); loadMedia(); startInstallPolling(); serverPollTimer = setTimeout(loadServerStatus, 5000) })
+onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); loadMedia(); startInstallPolling() })
 </script>

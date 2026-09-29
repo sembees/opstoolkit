@@ -118,7 +118,9 @@
       </el-alert>
       <el-alert v-if="obsNote" :type="obsOk ? 'info' : 'warning'" :closable="false" show-icon style="margin-bottom: 10px" :title="obsNote" />
       <el-divider content-position="left">待认领设备（来自 dnsmasq 租约）</el-divider>
-      <el-table :data="observations" stripe size="small" empty-text="租约里暂时没有设备；设备上电接入开局网络后会出现在这里">
+      <el-table :data="observations" stripe size="small" :empty-text="obsOk
+        ? '租约里暂时没有设备；设备上电接入开局网络后会出现在这里'
+        : '读取不到 dnsmasq 租约（不是「没有设备」）—— 请先看上方说明'">
         <el-table-column prop="mac" label="MAC" width="160" />
         <el-table-column prop="ip" label="拿到的IP" width="130" />
         <el-table-column prop="hostname" label="租约主机名" min-width="120" />
@@ -603,7 +605,15 @@ async function loadObservations() {
     // 只有读不到时才是需要运维处理的告警。以前一律用 warning 黄条 ——
     // 于是正常部署下页面永远挂一条黄警告，久了就没人看告警了。
     obsOk.value = !!res.leases_path
-  } catch (e) { /* 后端租约读取不会 500；保险起见也不让这里打断页面 */ }
+  } catch (e) {
+    // ★ 外部审查 U5-F4：失败时**必须清掉上一轮的列表**。以前只在成功分支赋值，
+    //   切换模板后仍显示模板 A 的"待认领设备"，而此时点「认领到落位」会把 A 的 MAC
+    //   绑到 B 的落位上（confirmClaim 发的是当前选中的 template_id）。
+    observations.value = []
+    obsOk.value = false
+    obsNote.value = "租约读取失败：读取不到设备列表（请看后端 /ct/ztp/observations 的说明），"
+      + "当前列表为空，**不要**据此认领。"
+  }
 }
 
 function loadPositionData() { loadPositions(); loadObservations() }
@@ -715,11 +725,13 @@ async function doGenerate() {
 
 async function doDownload() {
   const tid = sessionStorage.getItem("ztp_template_id")
-  await downloadZip("/ct/ztp/templates/" + tid + "/download", {
+  // 只有真拿到 ZIP 才提示"下载已开始"（外部审查 U5-F3：以前失败也提示成功）
+  const ok = await downloadZip("/ct/ztp/templates/" + tid + "/download", {
     deploy_mode: genForm.deploy_mode,
     server_ip: genForm.server_ip,
     devices: genForm.devices,
   })
+  if (ok !== true) return
   ElMessage.success("下载已开始")
 }
 
@@ -772,7 +784,7 @@ async function controlService(action) {
 let serverPollTimer = null
 onBeforeUnmount(() => { clearTimeout(serverPollTimer) })
 onMounted(async () => {
-  loadTemplates(); loadDevices(); loadServerStatus(); serverPollTimer = setTimeout(loadServerStatus, 5000)
+  loadTemplates(); loadDevices(); loadServerStatus()
   // 落位登记默认定位到「生成配置」用过的那个模板（没有就用第一个）
   await loadTemplates()
   const remembered = sessionStorage.getItem("ztp_template_id")
