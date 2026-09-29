@@ -54,10 +54,26 @@ def _profile_out(p: models.PxeProfile) -> PxeProfileOut:
 
 
 def _safe_decrypt(enc):
+    """解密模板里的口令；**"解不开"要说清楚**（外部审查 U4-F6）。
+
+    改前任何异常都返回 "" —— 于是一个"密钥变了/密文坏了"的模板会被报成
+    "管理员密码不能为空"，运维按提示去填口令、填完还是同样的问题（因为存进去的密文
+    根本不是这把 key 加的）。
+
+    现在分两种情况：
+      · 密文为空 = 真的没填（返回 ""，由下游照旧报"必填"）；
+      · 密文非空却解不开 = 抛一句可操作的话，指名 credential_key。
+    """
+    if not enc:
+        return ""
     try:
         return crypto.decrypt(enc)
-    except Exception:
-        return ""
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(
+            "模板里保存的口令无法解密（%s）：多半是 credential_key（凭证密钥）变了或丢了。"
+            "请恢复原来的密钥（.env 里的 credential_key），或在这个模板里重新填写口令。"
+            % type(e).__name__
+        ) from e
 
 
 def _default_media(p):
@@ -382,22 +398,27 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
     if not p:
         raise HTTPException(status_code=404, detail="模板不存在")
     body = body or {}
-    cfg = _to_pxeconfig(
-        p,
-        server_ip=body.get("server_ip", ""),
-        http_root=body.get("http_root", ""),
-        kernel_path=body.get("kernel_path", ""),
-        initrd_path=body.get("initrd_path", ""),
-        squashfs_path=body.get("squashfs_path", ""),
-        iso_url=body.get("iso_url", ""),
-        kernel_console=body.get("kernel_console", ""),
-        stage2=body.get("stage2", ""),
-        extra_repos=body.get("extra_repos", []),
-        deploy_mode=body.get("deploy_mode", "standalone"),
-        # 只有 /deploy 会填它（本机部署时的 profiles/<pid> 前缀）；
-        # /generate 与 /download 不填 → 输出与改造前逐字一致（向后兼容）。
-        answer_root=body.get("answer_root", ""),
-    )
+    # `_to_pxeconfig` 里的 `_safe_decrypt` 会在"密文解不开"时抛 ValueError（U4-F6），
+    # 所以它也必须落在同一个 422 边界内 —— 否则运维看到的是 500。
+    try:
+        cfg = _to_pxeconfig(
+            p,
+            server_ip=body.get("server_ip", ""),
+            http_root=body.get("http_root", ""),
+            kernel_path=body.get("kernel_path", ""),
+            initrd_path=body.get("initrd_path", ""),
+            squashfs_path=body.get("squashfs_path", ""),
+            iso_url=body.get("iso_url", ""),
+            kernel_console=body.get("kernel_console", ""),
+            stage2=body.get("stage2", ""),
+            extra_repos=body.get("extra_repos", []),
+            deploy_mode=body.get("deploy_mode", "standalone"),
+            # 只有 /deploy 会填它（本机部署时的 profiles/<pid> 前缀）；
+            # /generate 与 /download 不填 → 输出与改造前逐字一致（向后兼容）。
+            answer_root=body.get("answer_root", ""),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     cfg.hostname = body.get("hostname", "default")
     # 部署时自动检测的网络配置覆盖
     if body.get("net_config"):

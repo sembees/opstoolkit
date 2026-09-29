@@ -37,10 +37,17 @@ router = APIRouter()
 
 
 def _safe_decrypt(enc):
+    """同 pxe._safe_decrypt（外部审查 U4-F6）：密文为空 = 没填；非空解不开 = 指名密钥报错。"""
+    if not enc:
+        return ""
     try:
         return crypto.decrypt(enc)
-    except Exception:
-        return ""
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(
+            "模板里保存的口令无法解密（%s）：多半是 credential_key（凭证密钥）变了或丢了。"
+            "请恢复原来的密钥（.env 里的 credential_key），或在这个模板里重新填写口令。"
+            % type(e).__name__
+        ) from e
 
 
 def _template_out(p: models.ZtpTemplate) -> ZtpTemplateOut:
@@ -564,7 +571,12 @@ async def _gen_ztp_files(tid: str, body: dict, db: AsyncSession) -> dict:
     if not t:
         raise HTTPException(status_code=404, detail="模板不存在")
     body = body or {}
-    prof = _to_profile(t)
+    # `_to_profile` 里的 `_safe_decrypt` 会在"密文解不开"时抛 ValueError（U4-F6），
+    # 让它落在同一个 422 边界内（否则运维看到的是 500）。
+    try:
+        prof = _to_profile(t)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     if body.get("deploy_mode"):
         prof.deploy_mode = body["deploy_mode"]
     if body.get("server_ip"):

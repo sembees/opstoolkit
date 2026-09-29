@@ -294,6 +294,38 @@ class AssetCredentialInputTest(_DbCase):
             "name": "c", "username": "u", "port": 0}).status_code, 422)
 
 
+class DecryptFailureApiTest(_DbCase):
+    """U4-F6：模板口令"解不开"必须是 422 + 可操作的话，不是 500，也不是"口令不能为空"。"""
+
+    def _seed_profile(self, enc="not-a-fernet-token"):
+        async def _go():
+            async with self.SessionLocal() as s:
+                p = models.PxeProfile(name="broken-key", os_type="ubuntu",
+                                      admin_password_enc=enc)
+                s.add(p)
+                await s.commit()
+                await s.refresh(p)
+                return p.id
+        return self._run(_go())
+
+    def test_generate_reports_undecryptable_password_as_422(self):
+        pid = self._seed_profile()
+        c = self._pxe_client()
+        r = c.post("/api/it/pxe/profiles/%s/generate" % pid, json={})
+        self.assertEqual(r.status_code, 422, r.text)
+        detail = json.dumps(r.json()["detail"], ensure_ascii=False)
+        self.assertIn("无法解密", detail)
+        self.assertIn("credential_key", detail)
+
+    def test_empty_ciphertext_still_means_not_filled(self):
+        """密文为空 = 真的没填 ⇒ 沿用下游的"必填"提示（不能报成密钥问题）。"""
+        pid = self._seed_profile(enc=None)
+        c = self._pxe_client()
+        r = c.post("/api/it/pxe/profiles/%s/generate" % pid, json={})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertNotIn("credential_key", json.dumps(r.json()["detail"], ensure_ascii=False))
+
+
 class DanglingCredentialTest(_DbCase):
     """U7-F12：凭据被删而资产仍指着它 —— 巡检要说出真实原因。"""
 

@@ -6,6 +6,7 @@ to /etc/dnsmasq.d/ and dnsmasq auto-loads them all.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import platform
 import subprocess
@@ -752,6 +753,15 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
     """
     import ipaddress
     prov = providers or {}
+    if own_path is None:
+        # ★ 外部审查 U2-F10：`own_path` 为空时第 5 条的"排除自己"就不生效 ——
+        #   目标配置**自己**用过的不可重复关键字（如 `port=0`）会被当成"别的 .conf 也用了"
+        #   而误报（结果是把一次合法部署拦下）。本仓库两个调用点（PXE / ZTP 的 deploy_files）
+        #   都显式传了它，所以这是 API 易用性缺口而不是可达缺陷；留一条日志，
+        #   让以后新的调用点踩到时能立刻定位。
+        logging.getLogger(__name__).warning(
+            "check_dhcp_conf_safety 未传 own_path：本次检查不会排除任何文件，"
+            "配置自身的不可重复关键字（如 port=0）可能被误判成与别的 .conf 冲突。")
     # 网卡地址事实：优先用注入的映射（单测用，跨平台确定），其次用可注入的 iface_v4 函数，
     # 最后才是真实读取。
     injected_map = prov.get("iface_v4_map")

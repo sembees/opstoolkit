@@ -64,19 +64,63 @@ async def _ensure_additive_indexes(conn) -> None:
         ))
 
 
+async def _check_credential_key() -> None:
+    """启动期凭证密钥体检（外部审查 U4-F6）。
+
+    不在这里"直接启动失败"：PXE/ZTP 的投递本身并不需要这把密钥，为一个凭据密钥把整个
+    运维平台打死更糟。所以是**大声报错 + 说明怎么办**，让运维在还能进界面的时候修。
+    """
+    from sqlalchemy import func, select
+
+    from app.core import crypto, models
+
+    log = logging.getLogger(__name__)
+    warn = crypto.credential_key_health()
+    if warn:
+        log.error(warn)
+        return
+    if (settings.credential_key or "").strip():
+        return
+    # 密钥为空：首次启动属正常（第一次用到时才生成）；但库里已经有密文就说明密钥**丢了** ——
+    # 这时再生成一把新的会让那些密文永久打不开，必须喊出来。
+    async with async_session() as session:
+        creds = (await session.execute(
+            select(func.count()).select_from(models.Credential)
+            .where(models.Credential.encrypted_password.isnot(None))
+        )).scalar() or 0
+        pxe_tpl = (await session.execute(
+            select(func.count()).select_from(models.PxeProfile)
+            .where(models.PxeProfile.admin_password_enc.isnot(None))
+        )).scalar() or 0
+        ztp_tpl = (await session.execute(
+            select(func.count()).select_from(models.ZtpTemplate)
+            .where(models.ZtpTemplate.admin_password_enc.isnot(None))
+        )).scalar() or 0
+    if creds or pxe_tpl or ztp_tpl:
+        log.error(
+            "credential_key 为空，但库里已有 %d 条凭据 / %d 个 PXE 模板 / %d 个 ZTP 模板存着加密口令："
+            "说明这把密钥丢了。请先恢复原来那把密钥再启动，否则本次自动生成的密钥会让这些密文"
+            "永久无法解密（表现：巡检认证失败、装机报「口令不能为空」）。",
+            creds, pxe_tpl, ztp_tpl,
+        )
+
+
 async def init_db() -> None:
     """应用启动时自动调用。
 
     1. 创建所有表（若不存在）
     2. 给存量库补增量唯一索引（见 _ensure_additive_indexes）
-    3. 写入各厂商默认巡检模板
-    4. 创建默认管理员账号（若不存在）
+    3. 凭证密钥体检（外部审查 U4-F6）
+    4. 写入各厂商默认巡检模板
+    5. 创建默认管理员账号（若不存在）
     """
     from app.core import models  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _ensure_additive_indexes(conn)
+
+    await _check_credential_key()
 
     from app.core.auth import hash_password
     from app.core.crud import get_user_by_username

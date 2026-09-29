@@ -613,6 +613,25 @@ def _deploy_fail(log, errors, scope="", written=None, extra=None):
 
 
 def deploy_files(files, pid="") -> dict:
+    """对外入口：**应用侧串行化**（外部审查 R3-M2）。
+
+    宿主机侧只给"重载"加了 flock，而部署的**写文件**发生在容器里：两个并发 /deploy
+    （不同模板）会同时写共享的扁平文件（`boot.ipxe` / dnsmasq 配置），交叉写入后磁盘上可能
+    是"甲的文件 + 乙的配置"，而上一次重载只反映其中一个 —— 表现是装机拿到错模板的菜单，
+    且事后看配置"每条都合法"。
+
+    加锁之后每次部署的「写入 + 等宿主机重载」是原子的：后到的等前面做完再开始
+    （最长等一个重载超时，默认 25s）。`deploy_files` 是同步函数、由路由经
+    `asyncio.to_thread` 调用，所以用线程锁而不是 asyncio 锁。
+    """
+    with _DEPLOY_LOCK:
+        return _deploy_files_impl(files, pid)
+
+
+_DEPLOY_LOCK = threading.Lock()
+
+
+def _deploy_files_impl(files, pid="") -> dict:
     """把配置写到本机：应答/引导文件落盘 + dnsmasq 配置 + 重启 dnsmasq。
 
     返回值 {"ok", "supported", "errors", "log", "scope", "files_written", ...}。

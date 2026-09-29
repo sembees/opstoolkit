@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import threading
 import time
 
 from app.core import dhcp as _dhcp
@@ -107,6 +108,19 @@ def _deploy_fail(log, errors, written=None, extra=None):
 
 
 def deploy_files(files: dict, tid: str = "") -> dict:
+    """对外入口：**应用侧串行化**（外部审查 R3-M2，与 PXE 同一处理）。
+
+    理由见 `app/it/pxe/server.py::deploy_files`：宿主机只给重载加了 flock，而写文件这一半
+    没有互斥 —— 两个并发部署会交叉写共享文件，磁盘上可能落在"半甲半乙"的状态。
+    """
+    with _DEPLOY_LOCK:
+        return _deploy_files_impl(files, tid)
+
+
+_DEPLOY_LOCK = threading.Lock()
+
+
+def _deploy_files_impl(files: dict, tid: str = "") -> dict:
     """一键部署：设备配置写到 TFTP/HTTP + dnsmasq 配置写到宿主机 + **确认它真的生效**。
 
     返回值 {"ok","supported","errors","log","files_written",...}。
