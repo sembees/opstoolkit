@@ -76,3 +76,29 @@ async def get_current_user(
     if user is None:
         raise cred_exc
     return {"id": user.id, "username": user.username, "display_name": user.display_name, "role": user.role}
+
+
+def require_role(*roles: str):
+    """依赖工厂：只有指定角色能调这个接口（默认 admin）。
+
+    为什么需要（外部审查 U4-F1，我复核确认）：`get_current_user` 把 `role` 取出来了，
+    但**全项目没有任何地方用它** —— 于是任意登录用户都能
+    `POST /it/pxe/server/service {"action":"stop"}` 把 dnsmasq 停掉：它是 IT PXE 与
+    CT ZTP **共用**的 DHCP/TFTP（红线），停掉等于整个装机网段同时失去 DHCP/TFTP。
+    同理还能删 ISO、一键部署、改别人的模板。
+
+    用法：`_user=Depends(require_role("admin"))`（放在原 `get_current_user` 的位置）。
+    """
+    allowed = {str(r).strip().lower() for r in roles if str(r).strip()} or {"admin"}
+
+    async def _require_role(user: dict = Depends(get_current_user)) -> dict:
+        role = str((user or {}).get("role") or "").strip().lower()
+        if role not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="该操作需要 %s 权限（当前角色：%s）"
+                       % ("/".join(sorted(allowed)), role or "未知"),
+            )
+        return user
+
+    return _require_role

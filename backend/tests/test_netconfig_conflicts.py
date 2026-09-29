@@ -161,7 +161,8 @@ class _FakeDb:
 def _client(db):
     app = FastAPI()
     app.include_router(netconfig_api.router, prefix="/api/it/netconfig")
-    app.dependency_overrides[get_current_user] = lambda: {"id": "t", "username": "t"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "t", "username": "t",
+                                                          "role": "admin"}
     app.dependency_overrides[netconfig_api.get_db] = lambda: db
     return TestClient(app)
 

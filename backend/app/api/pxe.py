@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crypto, models
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_role
 from app.core.schemas import PxeGenerateIn, PxeGenerateResult, PxeInstallIn, PxeInstallOut, PxeProfileIn, PxeProfileOut
 from app.database import get_db
 from app.core.ziputil import files_to_zip_response
@@ -304,7 +304,7 @@ async def update_profile(pid: str, body: PxeProfileIn, db: AsyncSession = Depend
 
 
 @router.delete("/profiles/{pid}")
-async def delete_profile(pid: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def delete_profile(pid: str, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
     p = await db.get(models.PxeProfile, pid)
     if p:
         await db.delete(p)
@@ -434,14 +434,14 @@ async def server_status(_user=Depends(get_current_user)):
 
 
 @router.post("/server/service")
-async def service_control(body: dict = None, _user=Depends(get_current_user)):
+async def service_control(body: dict = None, _user=Depends(require_role("admin"))):
     """POST /api/it/pxe/server/service — 控制 dnsmasq: start/stop/restart/reload/status。"""
     action = (body or {}).get("action", "status")
     return pxe_server.service_control(action)
 
 
 @router.post("/profiles/{pid}/deploy")
-async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
     """POST /api/it/pxe/profiles/{pid}/deploy — 一键部署到本机：生成配置→落地文件→重启 dnsmasq。"""
     body = body or PxeGenerateIn()
     net = pxe_server.detect_network()
@@ -540,7 +540,7 @@ async def list_media(_user=Depends(get_current_user)):
 
 
 @router.post("/iso/{iso_name}/extract")
-async def extract_iso(iso_name: str, body: dict = None, _user=Depends(get_current_user)):
+async def extract_iso(iso_name: str, body: dict = None, _user=Depends(require_role("admin"))):
     """从 ISO 提取 PXE 引导文件 (vmlinuz/initrd/squashfs)。"""
     body = body or {}
     return pxe_server.extract_from_iso(
@@ -551,6 +551,6 @@ async def extract_iso(iso_name: str, body: dict = None, _user=Depends(get_curren
 
 
 @router.delete("/iso/{iso_name}")
-async def delete_iso(iso_name: str, _user=Depends(get_current_user)):
+async def delete_iso(iso_name: str, _user=Depends(require_role("admin"))):
     """删除 ISO 文件。"""
     return pxe_server.delete_iso(iso_name)

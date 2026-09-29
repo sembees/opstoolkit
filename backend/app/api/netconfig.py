@@ -1,5 +1,7 @@
 """IT 网络配置生成接口。"""
-from fastapi import APIRouter, Depends
+import re
+
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -59,7 +61,13 @@ async def generate(body: NetConfigRequest, db: AsyncSession = Depends(get_db),
     `warnings`：跨模块一致性提示（H）—— 静态 IP 若落在 PXE/ZTP 的 DHCP 池内，
     可能和正在装机的机器撞成同一个地址。只是提示，不影响生成结果。
     """
-    script, filename = generate_netconfig(body)
+    try:
+        script, filename = generate_netconfig(body)
+    except ValueError as e:
+        # ★ 外部审查 U4-F9：生成期校验失败（os×format 组合、掩码/cidr 非法、
+        #   注入字符被拦…）必须与 pxe 侧一致地报 422 + 可读中文，
+        #   而不是 500 "Internal Server Error"（前端无法区分"请求有问题"和"后端坏了"）。
+        raise HTTPException(status_code=422, detail=str(e))
     return {"script": script, "format": body.format, "filename": filename,
             "warnings": await _dhcp_pool_warnings(body, db)}
 
@@ -67,8 +75,17 @@ async def generate(body: NetConfigRequest, db: AsyncSession = Depends(get_db),
 @router.post("/download", response_class=PlainTextResponse)
 async def download(body: NetConfigRequest, _user=Depends(get_current_user)):
     """直接下载生成的脚本文件。"""
-    script, _ = generate_netconfig(body)
+    try:
+        script, _ = generate_netconfig(body)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     from fastapi.responses import Response
-    filename = body.hostname + "-" if body.hostname else ""
-    filename += "99-opstk.yaml" if body.format == "netplan" else ("ifcfg-files.txt" if body.format == "ifcfg" else "apply-network.sh")
-    return Response(script, media_type="text/plain", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    # ★ 外部审查 U4-F7：`filename="..."` 里直接拼 hostname —— 非 ASCII（中文主机名）
+    #   会让 Starlette 的 latin-1 编码抛 UnicodeEncodeError（500），`"`/CR/LF 还能破坏
+    #   响应头结构。这里把文件名收窄到安全字符集，空则退回固定名。
+    host = re.sub(r"[^A-Za-z0-9._-]", "_", (body.hostname or ""))[:64].strip("._-")
+    filename = (host + "-" if host else "") + (
+        "99-opstk.yaml" if body.format == "netplan"
+        else ("ifcfg-files.txt" if body.format == "ifcfg" else "apply-network.sh"))
+    return Response(script, media_type="text/plain",
+                    headers={"Content-Disposition": 'attachment; filename="%s"' % filename})

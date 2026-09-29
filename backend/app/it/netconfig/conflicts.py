@@ -31,8 +31,12 @@ def collect_static_addresses(req) -> list:
             ip = (getattr(o, "ip", "") or "").strip()
             if not ip:
                 continue
-            mode = (getattr(o, "mode", "static") or "static").lower()
-            if mode != "static":
+            # ★ 外部审查 U4-F2（这条是我自己写出来的 bug）：bond 的 `mode` 是
+            #   **聚合模式(0-6 的整数)**，对它调 `.lower()` 会抛 AttributeError，
+            #   而被调用方的 `except Exception: return []` 吞掉 ⇒ **整份冲突提示都没了**。
+            #   只有物理接口才有 static/dhcp 之分：bond/vlan/bridge 有 ip 就是静态。
+            #   （另外一律用 str() 包一层，避免再被非字符串字段坑到。）
+            if kind == "接口" and str(getattr(o, "mode", "static") or "static").lower() != "static":
                 continue
             name = (getattr(o, "name", "") or "").strip() or "?"
             try:

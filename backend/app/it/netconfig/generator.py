@@ -17,6 +17,36 @@ import shlex
 _YAML_SAFE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
+_LACP_RATES = ("slow", "fast")
+_XMIT_POLICIES = ("layer2", "layer2+3", "layer3+4", "encap2+3", "encap3+4", "vlan+srcmac")
+
+
+def _bond_opt_value(value, field, kind="enum"):
+    """bond 选项值白名单（外部审查 U4-F5）。
+
+    这些值会进**逗号/空格分隔**的 `bond.options` / `BONDING_OPTS`：
+    值里带一个 `,` 或空格就能追加任意 bonding 参数（`primary="eth0,mode=broadcast"`），
+    或者塞非法值让 `nmcli connection add` 失败 —— 而脚本是 `set -e`，
+    中途失败会留下改了一半的网络。所以只放行"确定合法"的写法。
+    """
+    v = str(value).strip()
+    if not v or any(ch in v for ch in (",", "=", '"', "'")) or any(ch.isspace() for ch in v):
+        raise ValueError("%s 不能含逗号/等号/引号/空白（会往 bond 选项里追加参数）：%r"
+                         % (field, v[:40]))
+    if kind == "ifname":
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,32}", v):
+            raise ValueError("%s 不是合法的接口名：%r" % (field, v[:40]))
+        return v
+    if field.endswith("lacp_rate"):
+        if v not in _LACP_RATES:
+            raise ValueError("%s 只允许 %s：%r" % (field, "/".join(_LACP_RATES), v[:40]))
+        return v
+    if v not in _XMIT_POLICIES:
+        raise ValueError("%s 只允许 %s：%r"
+                         % (field, "/".join(_XMIT_POLICIES), v[:40]))
+    return v
+
+
 def _safe_line(v, field="字段") -> str:
     """第 3 层兜底：值会被原样拼进 shell 脚本 / netplan YAML / ifcfg 文件，
     而三者都以**换行分隔**行 —— 值里出现换行或任何控制字符（含 TAB/CR）就等于注入一整行：
@@ -120,12 +150,26 @@ def _route_metrics(req) -> dict:
 
 
 def _netmask_to_cidr(netmask: str) -> int:
+    """点分十进制掩码 → 前缀长度。**必须校验**（外部审查 U4-F8）。
+
+    旧实现只数 1 的个数：`255.255.0.255`（非连续掩码）会算出 24，`255.255`（两段）
+    或乱码也静默变成 24 —— 于是"校验说网关同子网、实际生成的地址却在另一网段"，
+    机器静默落到错误的网段。这里：必须 4 段、每段 0-255、且 32 位是**连续的 1**。
+    """
+    parts = str(netmask or "").split(".")
+    if len(parts) != 4:
+        raise ValueError("netmask 必须是 4 段点分十进制（例如 255.255.255.0）：%r" % netmask)
     try:
-        parts = [int(p) for p in netmask.split(".")]
-        bits = sum(bin(p).count("1") for p in parts)
-        return bits if 0 <= bits <= 32 else 24
-    except Exception:
-        return 24
+        nums = [int(p) for p in parts]
+    except ValueError:
+        raise ValueError("netmask 含非数字段：%r" % netmask)
+    if any(n < 0 or n > 255 for n in nums):
+        raise ValueError("netmask 每段必须在 0-255：%r" % netmask)
+    bits = "".join(format(n, "08b") for n in nums)
+    ones = bits.count("1")
+    if "1" in bits[ones:] or "0" in bits[:ones]:
+        raise ValueError("netmask 的 1 必须连续（例如 255.255.254.0），收到：%r" % netmask)
+    return ones
 
 
 def _cidr_to_netmask(cidr: int) -> str:
@@ -140,7 +184,12 @@ def _prefix(obj) -> int:
     # 第 2 层（schemas.NetConfigRequest）已用同一个默认值 /24 做网关同子网检查，
     # 两处默认值必须保持一致，否则会出现"校验通过但生成的默认路由不可达"。
     if obj.get("cidr"):
-        return int(obj["cidr"])
+        # ★ 外部审查 U4-F8：原来直接 int() 不校验范围，cidr=64 会生成 `x/64` /
+        #   `PREFIX=64`，nmcli/ifcfg 中途报错，而脚本是 set -e ⇒ 留下改了一半的网络。
+        cidr = int(obj["cidr"])
+        if not 0 <= cidr <= 32:
+            raise ValueError("cidr 前缀长度必须在 0-32：%r" % obj["cidr"])
+        return cidr
     if obj.get("netmask"):
         return _netmask_to_cidr(obj["netmask"])
     return 24
@@ -191,12 +240,15 @@ def _bond(cmds, obj, metric=None):
     mode_str = BOND_MODES.get(mode, "active-backup")
     cmds.append(f"# 聚合 {_safe_line(name, 'bonds[].name')} 模式={mode}:{mode_str}")
     opts = f"mode={mode_str},miimon={int(obj.get('miimon', 100))}"
+    # ★ 外部审查 U4-F5：这三个值直接进**逗号分隔**的 bond.options，值里的 `,`/`=`
+    #   可以追加任意 bonding 参数（例如 primary="eth0,mode=broadcast"）。白名单化。
     if obj.get("primary"):
-        opts += f",primary={obj['primary']}"
+        opts += f",primary={_bond_opt_value(obj['primary'], 'bonds[].primary', 'ifname')}"
     if obj.get("lacp_rate"):
-        opts += f",lacp_rate={obj['lacp_rate']}"
+        opts += f",lacp_rate={_bond_opt_value(obj['lacp_rate'], 'bonds[].lacp_rate', 'enum')}"
     if obj.get("xmit_hash_policy"):
-        opts += f",xmit_hash_policy={obj['xmit_hash_policy']}"
+        opts += (f",xmit_hash_policy="
+                 + _bond_opt_value(obj['xmit_hash_policy'], 'bonds[].xmit_hash_policy', 'enum'))
     cmds.append(f"nmcli connection add type bond ifname {_sh(name)} con-name {_sh(name)} bond.options {_sh(opts)}")
     _mod(cmds, name, obj, metric)
     for i in obj.get("interfaces", []):
@@ -313,10 +365,13 @@ def _build_netplan(req):
     out.append("# /etc/netplan/99-opstk.yaml")
     out.append("network:")
     out.append("  version: 2")
-    # renderer 直接进 YAML 的 `renderer:` 行：换行即可注入任意 YAML 键（同上，两层都拦）
-    renderer = _safe_line(
-        getattr(req, "netplan_renderer", "networkd") or "networkd", "netplan_renderer"
-    )
+    # ★ 外部审查 U4-F11：renderer 是 YAML 的标量，`|` / `>` / `&a` / `*a` 这类结构字符
+    #   虽然不含控制字符，却会把后面的整份缩进块吞掉（ethernets/bonds 在 netplan 里"消失"，
+    #   apply 之后机器静默断网）。所以这里改成**白名单**，与文件开头"两层都拦"的说法对齐。
+    renderer = str(getattr(req, "netplan_renderer", "networkd") or "networkd").strip()
+    if renderer not in ("networkd", "NetworkManager"):
+        raise ValueError(
+            "netplan_renderer 只允许 networkd 或 NetworkManager，收到：%r" % renderer[:40])
     out.append(f"  renderer: {renderer}")
     ind = "    "
     # 收集被 bond/bridge 引用的从接口，避免重复配置 IP
@@ -350,7 +405,10 @@ def _build_netplan(req):
             out.append(f"{ind}  interfaces: [{', '.join(_yaml(s) for s in o.interfaces)}]")
             out.append(f"{ind}  parameters:")
             out.append(f"{ind}    mode: {ms}")
-            out.append(f"{ind}    miimon: {int(o.miimon)}")
+            # ★ 外部审查 U4-F3：netplan 的 bonding 参数是**内核名的 kebab-case**，
+            #   没有 `miimon` 这个键（同段的 lacp-rate / transmit-hash-policy 都对，
+            #   唯独这里漏了）⇒ 写 `mii-monitor-interval`。
+            out.append(f"{ind}    mii-monitor-interval: {int(o.miimon)}")
             if o.primary:
                 out.append(f"{ind}    primary: {_yaml(o.primary)}")
             if o.lacp_rate:
@@ -442,12 +500,16 @@ def _build_ifcfg(req):
         mode = int(o.mode or 1)
         mode_str = BOND_MODES.get(mode, "active-backup")
         opts = "mode=" + mode_str + " miimon=" + str(o.miimon or 100)
+        # 同 nmcli 分支（外部审查 U4-F5）：这几个值不能把参数"追加"进 BONDING_OPTS。
+        # ifcfg 里是空格分隔，且整个串包在双引号里，所以这里用校验后的裸值（不再 _sh，
+        # 原来 _sh 会把引号变成**字面量**写进 BONDING_OPTS，本身就不是合法参数）。
         if o.primary:
-            opts += " primary=" + _sh(o.primary)
+            opts += " primary=" + _bond_opt_value(o.primary, "bonds[].primary", "ifname")
         if o.lacp_rate:
-            opts += " lacp_rate=" + _sh(o.lacp_rate)
+            opts += " lacp_rate=" + _bond_opt_value(o.lacp_rate, "bonds[].lacp_rate", "enum")
         if o.xmit_hash_policy:
-            opts += " xmit_hash_policy=" + _sh(o.xmit_hash_policy)
+            opts += (" xmit_hash_policy="
+                     + _bond_opt_value(o.xmit_hash_policy, "bonds[].xmit_hash_policy", "enum"))
         lines = ["DEVICE=" + _sh(name), "TYPE=Bond", "BONDING_MASTER=yes", "BONDING_OPTS=\"" + opts + "\""]
         lines += _ip_lines(
             {"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "dns": o.dns, "netmask": o.netmask},

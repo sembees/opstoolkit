@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crypto, models
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_role
 from app.core.schemas import (
     ZtpClaimIn,
     ZtpDeviceIn,
@@ -573,14 +573,14 @@ async def server_status(_user=Depends(get_current_user)):
 
 
 @router.post("/server/service")
-async def service_control(body: dict = None, _user=Depends(get_current_user)):
+async def service_control(body: dict = None, _user=Depends(require_role("admin"))):
     """控制 dnsmasq 服务: start/stop/restart/reload/status。"""
     action = (body or {}).get("action", "status")
     return ztp_server.service_control(action)
 
 
 @router.post("/templates/{tid}/deploy")
-async def deploy_to_host(tid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def deploy_to_host(tid: str, body: dict = None, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
     """一键部署到本机: 生成配置 -> 落地 TFTP/HTTP -> 让宿主机真正加载并核对生效。
 
     与 PXE 的 /deploy 同一口径：**ok=False 必须报错**，不能让"配置写下去了但
