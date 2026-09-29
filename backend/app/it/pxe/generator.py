@@ -676,6 +676,9 @@ def _disk_plan(c, dc):
     # 为什么不能只比名字：数据盘可以只给 size/serial/wwid（§5.42 之后这是推荐写法），
     # 那时名字是空的，纯名字比较恒不成立 = 这道防线形同虚设。
     # 所以凡是**两边都有、语义相同**的身份都比一遍：name 与 serial。
+    # （外部审查 U1-F2 建议把 model/size/wwid 也比一遍 —— 实际比不了：target 只有
+    #  name/serial/model/id_path，数据盘只有 name/size/serial/wwid，**交集只有 name 与 serial**。
+    #  所以这里改为对"只用 model 定位目标盘"这种无法交叉校验的写法直接拒绝，见下。）
     _t_ident = {"name": name, "serial": serial}
     for k, d in enumerate(data):
         for key in ("name", "serial"):
@@ -686,6 +689,19 @@ def _disk_plan(c, dc):
                     "disk_config：目标盘与 data_disks[%d] 的 %s 完全相同（%r）—— "
                     "同一块盘不能既是系统盘、又是声明为要保护的数据盘；"
                     "目标盘会被清空分区，这等于把要保护的数据盘抹掉。" % (k, key, dv))
+
+    # 外部审查 U1-F2（我复核确认机制成立）：mode=match **只用 model** 定位目标盘、
+    # 同时又声明了 data_disks 时，上面那道交叉校验**没有可比的字段**
+    # （数据盘没有 model 这个键）⇒ 防线形同虚设。而 model 在同类盘之间不唯一：
+    # 两块同型号盘时它可能正好命中被声明为"别碰"的那块，目标盘一分区就等于抹掉数据盘。
+    # 这与本项目"不猜、宁可显式失败"的一贯口径一致：这种配置直接拒绝。
+    if mode == "match" and model and not serial and data:
+        raise ValueError(
+            "disk_config：target.mode=match 只给了 model（没有 serial），同时又声明了 "
+            "data_disks —— 无法交叉校验目标盘与数据盘是不是同一块（数据盘没有 model 键），"
+            "而 model 在同型号盘之间不唯一，一旦命中数据盘就会把它抹掉。"
+            "请给 target 补 serial（数据盘有 serial 时即可交叉校验），"
+            "或改用 target.mode=name 显式给盘名。")
 
     # RAID 成员的"盘名前缀"与数据盘同名 = 用户想在这块盘上做 RAID，又声明它是"别碰"的数据盘。
     # 两者的语义在本规格里不可能同时成立（RAID 成员是**目标盘**上的分区），必须拒绝而不是猜。
@@ -878,13 +894,29 @@ def _ubuntu_storage_obj(plan):
         if not d["wipe"]:
             continue
         did = "data%d" % n
-        # 同目标盘：curtin 的 wipe 必须是模式字符串（"superblock"），传 True 会 ValueError
-        cfg.append({"type": "disk", "id": did, "path": "/dev/" + d["name"],
-                    "wipe": "superblock"})
+        # 同目标盘：curtin 的 wipe 必须是模式字符串（"superblock"），传 True 会 ValueError。
+        # ★ 外部审查 U1-F4（我复核确认）：**能不用盘名就不用** —— `/dev/sda` 这种名字
+        #   在枚举顺序变化时会指向另一块物理盘，而这条 disk 条目带 wipe:"superblock"，
+        #   等于"按猜的名字抹盘"。目标盘早就改用稳定键了（_ubuntu_disk_match），
+        #   数据盘这里原来漏了。subiquity 的 disk 条目认顶层 serial（目标盘就用的它）；
+        #   给了 serial 但不匹配时它会**明确报 matched no disk**（安全失败），
+        #   而写 /dev/<name> 出错时会**静默抹错盘**。没有 serial 才退回 path。
+        entry = {"type": "disk", "id": did}
+        if d.get("serial"):
+            entry["serial"] = d["serial"]
+        else:
+            entry["path"] = "/dev/" + d["name"]
+        entry["wipe"] = "superblock"
+        cfg.append(entry)
         if not d["mount"]:
             continue                      # 只清盘不建分区（与 RHEL 侧 clearpart 的语义一致）
         pid = "datap%d" % n
-        cfg.append({"type": "partition", "id": pid, "device": did, "size": "rest"})
+        # ★ 外部审查 U1-F1（我复核确认，**严重**）：主盘分区(825)与 LVM(866) 都把
+        #   `rest` 转成了 -1，唯独数据盘这里直接发了字符串 "rest" ——
+        #   而 subiquity 对 "rest" 会报 `'rest' is not valid input.` 整机中止。
+        #   最糟的是顺序：curtin 先按上面的 disk 条目把数据盘 **wipe:sulperblock 抹掉**，
+        #   之后才在这里失败 ⇒ 数据盘已经空了、系统也没装完。
+        cfg.append({"type": "partition", "id": pid, "device": did, "size": -1})
         fid = _format(pid, d["fstype"] or "ext4")
         mounts.append((fid, d["mount"]))
 
@@ -1297,7 +1329,13 @@ def _rhel_pick_target_lines(plan) -> list:
         lines += [
             "ddev%d=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | "
             "awk -v gi=%d -v dm='%s' '%s' | sort | head -1)"
-            % (i + 1, i + 1, g, _LSBLK_AWK_PRELUDE + _AWK_PICK_BY_GROUP),
+            # ★ 外部审查 U1-F3（我复核确认）：`dm` 这里传的是**单组**条件
+            #   （`"|".join(groups[i])`，组间分隔符是 ';'，而此处只有一个组），
+            #   awk 的 `BEGIN { npg = split(dm, grp, ";") }` 于是 npg=1；
+            #   而 gi 原来传 i+1 ⇒ 第 2 个及以后的 wipe 数据盘查 grp[2..] 全空、
+            #   dgrp 恒返回 0 ⇒ ddevN 为空 ⇒ 下面的护栏永远 exit 1，
+            #   "两条数据盘"这种常见配置直接装不下去。**单组就必须传 gi=1**。
+            % (i + 1, 1, g, _LSBLK_AWK_PRELUDE + _AWK_PICK_BY_GROUP),
             "if [ -z \"$ddev%d\" ]; then" % (i + 1),
             "  pxelog '!! 第 %d 个数据盘（wipe=true）按稳定条件找不到设备 —— 拒绝继续"
             "（按猜的盘格式化会清错盘）'" % (i + 1),

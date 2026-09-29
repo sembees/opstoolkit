@@ -1403,8 +1403,12 @@ class PxeDataDiskTest(unittest.TestCase):
              "grub_device": True, "ptable": "gpt"},
             {"type": "disk", "id": "data0", "path": "/dev/sdc", "wipe": "superblock"},
         ])
+        # ★ 外部审查 U1-F1：数据盘分区原来发的是字符串 "rest" —— subiquity 会报
+        #   `'rest' is not valid input.` 整机中止，而此时 curtin 已经把数据盘
+        #   wipe:"superblock" 抹掉了（先抹后失败）。主盘/LVM 早就转成 -1 了，这里漏了。
         self.assertIn({"type": "partition", "id": "datap0", "device": "data0",
-                       "size": "rest"}, cfg)
+                       "size": -1}, cfg)
+        self.assertNotIn("rest", json.dumps(cfg))
         fmt = [c for c in cfg if c["type"] == "format" and c["volume"] == "datap0"]
         self.assertEqual(len(fmt), 1)
         self.assertEqual(fmt[0]["fstype"], "xfs")
@@ -2915,3 +2919,81 @@ class DeployPreflightAndRollbackTest(unittest.TestCase):
         self.assertNotIn("rolled_back", res)
         self.assertTrue(res["files_written"])
         self.assertTrue(self.os.path.exists(self.conf))
+
+
+class PxeReviewFixesTest(unittest.TestCase):
+    """外部审查（MiMo v2.6-pro）在 PXE 模块报出的 4 条 —— 逐条回归。
+
+    U1-F1 Ubuntu 数据盘分区发 "rest"（subiquity 报错整机中止，且此时数据盘已被抹）
+    U1-F2 target.mode=match 只用 model 时无法与 data_disks 交叉校验 ⇒ 拒绝这种写法
+    U1-F3 %pre 里 data disk 反解传了单组条件却给 gi=i+1 ⇒ 第 2 个及以后恒失败
+    U1-F4 Ubuntu 数据盘的 wipe 目标用 /dev/<name>（不稳定）而不是稳定标识
+    """
+
+    DD = {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+          "partitions": CUSTOM_PARTS,
+          "data_disks": [{"name": "sdc", "size": "30G", "serial": "SN-DATA-1",
+                          "mount": "/backup", "fstype": "xfs", "wipe": True}]}
+
+    def _ubuntu_cfg(self, disk_config):
+        files = generate_all(_cfg(disk_config=disk_config))
+        return yaml.safe_load(files["user-data"])["autoinstall"]["storage"]["config"]
+
+    # ---- F1 ----
+    def test_ubuntu_data_disk_partition_uses_minus_one(self):
+        cfg = self._ubuntu_cfg(self.DD)
+        self.assertIn({"type": "partition", "id": "datap0", "device": "data0",
+                       "size": -1}, cfg)
+        self.assertNotIn('"rest"', json.dumps(cfg))
+
+    # ---- F4 ----
+    def test_ubuntu_data_disk_uses_serial_when_available(self):
+        cfg = self._ubuntu_cfg(self.DD)
+        data = [c for c in cfg if c.get("id") == "data0"][0]
+        self.assertEqual(data.get("serial"), "SN-DATA-1")
+        self.assertNotIn("path", data)
+        self.assertEqual(data["wipe"], "superblock")
+
+    def test_ubuntu_data_disk_falls_back_to_path_without_serial(self):
+        dd = {"target": {"mode": "name", "name": "sda"}, "layout": "custom",
+              "partitions": CUSTOM_PARTS,
+              "data_disks": [{"name": "sdc", "size": "30G", "mount": "/backup",
+                              "fstype": "xfs", "wipe": True}]}
+        cfg = self._ubuntu_cfg(dd)
+        data = [c for c in cfg if c.get("id") == "data0"][0]
+        self.assertEqual(data.get("path"), "/dev/sdc")     # 没有稳定键才退回盘名
+        self.assertNotIn("serial", data)
+
+    # ---- F2 ----
+    def test_model_only_match_with_data_disks_is_rejected(self):
+        dd = {"target": {"mode": "match", "model": "Samsung SSD 870"},
+              "layout": "custom", "partitions": CUSTOM_PARTS,
+              "data_disks": [{"name": "sda", "size": "500G", "wipe": False}]}
+        with self.assertRaises(ValueError) as e:
+            generate_all(_cfg(disk_config=dd))
+        self.assertIn("model", str(e.exception))
+
+    def test_model_only_match_without_data_disks_still_allowed(self):
+        dd = {"target": {"mode": "match", "model": "Samsung SSD 870"},
+              "layout": "custom", "partitions": CUSTOM_PARTS}
+        self.assertTrue(generate_all(_cfg(disk_config=dd)))
+
+    # ---- F3 ----
+    def test_pre_resolves_each_wiped_data_disk_with_its_own_group(self):
+        dd = {"target": {"mode": "auto"}, "layout": "custom",
+              "partitions": CUSTOM_PARTS,
+              "data_disks": [{"name": "sdb", "size": "30G", "wipe": True},
+                             {"name": "sdc", "size": "40G", "wipe": True}]}
+        ks = generate_all(_cfg(os_type="rhel", os_version="9.3", disk_config=dd,
+                               mirror="http://10.0.0.1/pxe/serve/repo"))["ks.cfg"]
+        start = ks.index("%pre")
+        end = ks.index("%end") if "%end" in ks else len(ks)
+        pre = ks[start:end]
+        self.assertIn("ddev1=", pre)
+        self.assertIn("ddev2=", pre)
+        # 单组条件必须配 gi=1：以前传 i+1 ⇒ 第 2 个查 grp[2] 恒空 ⇒ 装机必中止
+        self.assertNotIn("-v gi=2", pre)
+        self.assertEqual(pre.count("-v gi=1"), 2)
+        # 两个设备名各自带自己的容量条件（30G/40G 的字节数），不能都拿第一组
+        self.assertIn(str(30 * 1024 ** 3), pre)
+        self.assertIn(str(40 * 1024 ** 3), pre)
