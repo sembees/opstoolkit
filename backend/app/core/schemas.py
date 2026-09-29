@@ -1478,6 +1478,25 @@ class ZtpDeviceIn(BaseModel):
     serial: str = ""
     mgmt_ip: Optional[str] = None
 
+    # 同 ZtpPositionIn（外部审查 U7-F3）：设备清单这条入口原来也是裸字符串，
+    # 而它的值同样会进 dnsmasq 与设备 CLI。
+    @field_validator("hostname", "serial")
+    @classmethod
+    def _check_tokens(cls, v: str) -> str:
+        return _require_clean_token(v, "hostname/serial")
+
+    @field_validator("mac")
+    @classmethod
+    def _check_mac(cls, v: str) -> str:
+        return _require_mac_or_empty(v)
+
+    @field_validator("mgmt_ip")
+    @classmethod
+    def _check_mgmt_ip(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return None
+        return _require_ipv4(v, "mgmt_ip")
+
 
 class ZtpDeviceOut(ORMBase):
     id: str
@@ -1555,6 +1574,51 @@ class ZtpGenerateResult(BaseModel):
 # 背景：设备到货时只有「落位 + 规划管理 IP + 规划主机名」，没有 MAC（还没上电）。
 # 先按落位登记（MAC 留空）；设备上电后从 dnsmasq 租约里自动学到 MAC，
 # 运维做一步「认领」把它指到落位，之后即可按 MAC 下发各自配置 —— 全程不手抄 MAC。
+_MAC_HEX = set("0123456789abcdef")
+
+
+def _require_mac_or_empty(value: Optional[str], field: str = "mac") -> str:
+    """MAC 归一为 `aa:bb:cc:dd:ee:ff`；空串表示"没填"；非法即报错。
+
+    外部审查 U7-F3/F8：ZTP 的输入模型原来把这些当裸字符串收，于是
+    `aabb.ccdd.eeff` / 全大写 / 带空格都能存库，而它们进 `dhcp-host=` 后
+    要么让 dnsmasq 配置非法、要么与租约里的归一 MAC 对不上（设备静默只拿 default.cfg）。
+    """
+    v = (value or "").strip().lower()
+    if not v:
+        return ""
+    if "." in v:
+        parts = v.split(".")
+        if len(parts) != 3 or any(len(x) != 4 for x in parts):
+            raise ValueError(f"{field} 不是合法 MAC：{value!r}")
+        v = "".join(parts)
+    cleaned = v.replace(":", "").replace("-", "")
+    if len(cleaned) != 12 or any(ch not in _MAC_HEX for ch in cleaned):
+        raise ValueError(f"{field} 不是合法 MAC（可写 aa:bb:cc:dd:ee:ff / aabb.ccdd.eeff / 全大写）：{value!r}")
+    return ":".join(cleaned[i:i + 2] for i in range(0, 12, 2))
+
+
+def _require_clean_token(value: Optional[str], field: str, maxlen: int = 128,
+                         allow_space: bool = False) -> str:
+    """ZTP 单值字段（落位/主机名/序列号）：不允许引号/换行/制表/控制字符，默认也不允许空格。
+
+    与生成器里的 `_require_clean` 同口径，但放在**第 2 层**尽早报错 ——
+    这些值会进宿主机的 dnsmasq 配置（`option:bootfile-name,"ztp/<stem>.cfg"`）与设备
+    命令行（`sysname` 等），换行可以注入额外指令（外部审查 U3-F3/F7、U7-F3/F8）。
+    空串按"未填"返回。
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if len(v) > maxlen:
+        raise ValueError(f"{field} 太长（最多 {maxlen} 字符）：{v[:40]!r}")
+    if any(ch in v for ch in ('"', "\n", "\r", "\t")) or any(ord(ch) < 32 for ch in v):
+        raise ValueError(f"{field} 含不允许的字符（引号/换行/制表/控制字符）：{v[:40]!r}")
+    if not allow_space and any(ch.isspace() for ch in v):
+        raise ValueError(f"{field} 不能含空格：{v[:40]!r}")
+    return v
+
+
 class ZtpPositionIn(BaseModel):
     template_id: str = ""
     position: str
@@ -1563,6 +1627,40 @@ class ZtpPositionIn(BaseModel):
     serial: str = ""
     mac: str = ""
     remark: str = ""
+
+    # ★ 外部审查 U7-F8（高）：mgmt_ip 原来完全不校验 —— `"10.0.0.11 "`、`"010.0.0.11"`
+    #   这类**非规范写法**会与规范写法存成不同的字符串，`(template_id, mgmt_ip)`
+    #   唯一约束于是形同虚设，"两台设备不会拿到同一个规划 IP"这个保证就被绕过了。
+    @field_validator("mgmt_ip")
+    @classmethod
+    def _check_mgmt_ip(cls, v: str) -> str:
+        return _require_ipv4(v, "mgmt_ip")
+
+    @field_validator("position")
+    @classmethod
+    def _check_position(cls, v: str) -> str:
+        out = _require_clean_token(v, "position")
+        if not out:
+            raise ValueError("position（落位编码）不能为空")
+        return out
+
+    @field_validator("hostname", "serial")
+    @classmethod
+    def _check_tokens(cls, v: str) -> str:
+        return _require_clean_token(v, "hostname/serial")
+
+    @field_validator("mac")
+    @classmethod
+    def _check_mac(cls, v: str) -> str:
+        return _require_mac_or_empty(v)
+
+    @field_validator("remark")
+    @classmethod
+    def _check_remark(cls, v: str) -> str:
+        # 备注是自由文本，但不能带控制字符（它会进 CSV 往返与页面展示）
+        if any(ord(ch) < 32 and ch not in "\n" for ch in (v or "")):
+            raise ValueError("remark 含控制字符")
+        return (v or "")[:500]
 
 
 class ZtpPositionOut(ORMBase):
@@ -1602,6 +1700,15 @@ class ZtpClaimIn(BaseModel):
     template_id: str
     position_id: str
     mac: str
+
+    # 认领必须给一个合法 MAC（空串没有意义：那等于没认领）
+    @field_validator("mac")
+    @classmethod
+    def _check_mac(cls, v: str) -> str:
+        out = _require_mac_or_empty(v)
+        if not out:
+            raise ValueError("认领必须填写设备 MAC（可从「待认领设备」列表里选）")
+        return out
 
 
 class ZtpImportIn(BaseModel):

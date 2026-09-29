@@ -13,6 +13,7 @@
      files 里。ZTP 生成器没有口令就抛 ValueError —— 这里显式给测试口令。
 """
 import asyncio
+import json
 import os
 import pathlib
 import sys
@@ -268,7 +269,34 @@ class ZtpPositionsApiTest(_ApiTestBase):
         tid = self._seed_template("T2")
         r = self._create(client, tid, mgmt_ip="999.1.1.1")
         self.assertEqual(r.status_code, 422, r.text)
-        self.assertIn("管理 IP 格式不正确", r.json()["detail"])
+        # 校验层次变了（外部审查 U7-F8）：现在由 **schemas** 在入参阶段就拒（更早更严），
+        # 所以拿到的是 pydantic 的错误结构，字段路径在 loc 里；接口层的中文提示成了第二道。
+        detail = r.json()["detail"]
+        text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+        self.assertTrue("mgmt_ip" in text or "管理 IP" in text, text)
+
+    def test_mgmt_ip_non_canonical_is_rejected(self):
+        """U7-F8：`10.0.0.11 ` / `010.0.0.11` 这类非规范写法必须被拒 ——
+        否则它们与规范写法是两个不同字符串，(template_id, mgmt_ip) 唯一约束就被绕过了。"""
+        client = self._client()
+        tid = self._seed_template("T2b")
+        self.assertEqual(self._create(client, tid, position="A01",
+                                      mgmt_ip="10.0.0.11").status_code, 200)
+        for bad in ("010.0.0.12", "10.0.0.12 ", "10.0.0.12\t"):
+            with self.subTest(bad=bad):
+                r = self._create(client, tid, position="A02", mgmt_ip=bad)
+                self.assertEqual(r.status_code, 422, r.text)
+
+    def test_position_and_hostname_cannot_carry_injection(self):
+        """U7-F3/F8：落位/主机名会进 dnsmasq 配置与设备 CLI，不能带换行/引号/空格。"""
+        client = self._client()
+        tid = self._seed_template("T2c")
+        for bad in ("A01\nport=0", 'A01"x', "A01 U12"):
+            with self.subTest(bad=bad):
+                r = self._create(client, tid, position=bad, mgmt_ip="10.0.0.13")
+                self.assertEqual(r.status_code, 422, r.text)
+        r = self._create(client, tid, hostname="SW1\nport=0", mgmt_ip="10.0.0.14")
+        self.assertEqual(r.status_code, 422, r.text)
 
     def test_duplicate_position_is_409(self):
         client = self._client()
