@@ -166,6 +166,94 @@ class BondOptionInjectionTest(unittest.TestCase):
         self.assertEqual(_bond_opt_value("eth0", "bonds[].primary", "ifname"), "eth0")
 
 
+class BondBridgeInterfaceValidationTest(unittest.TestCase):
+    """U7-F2：bond/bridge 的从接口名原来完全绕过 `_require_ifname`。"""
+
+    BAD = ("eth0;rm -rf /", "eth0\nport=0", "eth 0", "eth0`id`")
+
+    def test_bond_slaves_must_match_whitelist(self):
+        from app.core.schemas import NetBondIn
+        for bad in self.BAD:
+            with self.subTest(bad=bad):
+                with pytest.raises(ValueError) as e:
+                    NetBondIn(name="bond0", mode=1, interfaces=[bad])
+                self.assertIn("interface name", str(e.value))
+
+    def test_bridge_slaves_must_match_whitelist(self):
+        from app.core.schemas import NetBridgeIn
+        for bad in self.BAD:
+            with self.subTest(bad=bad):
+                with pytest.raises(ValueError):
+                    NetBridgeIn(name="br0", interfaces=[bad])
+
+    def test_empty_and_duplicate_slaves_are_rejected(self):
+        from app.core.schemas import NetBridgeIn
+        with pytest.raises(ValueError):
+            NetBridgeIn(name="br0", interfaces=[])
+        with pytest.raises(ValueError) as e:
+            NetBridgeIn(name="br0", interfaces=["eth0", "eth0"])
+        self.assertIn("重复", str(e.value))
+
+    def test_bond_primary_must_be_ifname(self):
+        from app.core.schemas import NetBondIn
+        with pytest.raises(ValueError):
+            NetBondIn(name="bond0", mode=1, interfaces=["eth0"],
+                      primary="eth0,mode=broadcast")
+        self.assertEqual(NetBondIn(name="bond0", mode=1, interfaces=["eth0"],
+                                   primary="eth1").primary, "eth1")
+
+    def test_valid_slaves_pass(self):
+        from app.core.schemas import NetBondIn
+        b = NetBondIn(name="bond0", mode=4, interfaces=["eth0", "eth1"])
+        self.assertEqual(b.interfaces, ["eth0", "eth1"])
+
+
+class DataDiskIdentFormatTest(unittest.TestCase):
+    """U7-F1（按我复核后的准确范围）：稳定标识的**格式**校验。
+
+    "必须有 size/serial/wwid 之一"这条 schema 里早就有；缺的是格式 ——
+    size 写错格式会导致 %pre 匹配不上任何盘（装机白跑一趟），
+    serial/wwid 里的引号/空白会破坏被拼进去的 awk 匹配串。
+    """
+
+    PARTS = [{"mount": "/boot/efi", "size": "512M", "fstype": "fat32"},
+             {"mount": "/boot", "size": "1G", "fstype": "ext4"},
+             {"mount": "swap", "size": "8G"},
+             {"mount": "/", "size": "rest", "fstype": "ext4"}]
+
+    def _profile(self, dd):
+        from app.core.schemas import PxeProfileIn
+        return PxeProfileIn(
+            name="t", os_type="ubuntu", os_version="22.04",
+            admin_password="Test@123", disk_scheme="custom",
+            disk_config={"target": {"mode": "name", "name": "sda"},
+                         "layout": "custom", "partitions": self.PARTS,
+                         "data_disks": [dd]})
+
+    def test_bad_size_format_is_rejected(self):
+        for bad in ("30GB x", "abc", "30G G"):
+            with self.subTest(bad=bad):
+                with pytest.raises(ValueError) as e:
+                    self._profile({"name": "sdb", "size": bad})
+                self.assertIn("size", str(e.value))
+
+    def test_good_sizes_pass(self):
+        for good in ("30G", "500M", "32212254720", "1.5T"):
+            with self.subTest(good=good):
+                self.assertTrue(self._profile({"name": "sdb", "size": good}))
+
+    def test_serial_or_wwid_with_shell_chars_is_rejected(self):
+        for key in ("serial", "wwid"):
+            with self.subTest(key=key):
+                with pytest.raises(ValueError) as e:
+                    self._profile({"name": "sdb", key: 'x"; rm -rf /'})
+                self.assertIn(key, str(e.value))
+
+    def test_good_serial_and_wwid_pass(self):
+        self.assertTrue(self._profile({"name": "sdb", "serial": "S3Z1NB0K123456"}))
+        self.assertTrue(self._profile({"name": "sdb", "wwid": "naa.6000c29a-1b2c-3d4e"}))
+
+
 class RequireRoleTest(unittest.TestCase):
     """U4-F1：破坏性接口必须要求 admin 角色。"""
 

@@ -44,6 +44,27 @@ def _require_ifname(value: str) -> str:
     return value
 
 
+def _require_ifname_list(value, field: str = "interfaces") -> list:
+    """接口名**列表**逐个过白名单（外部审查 U7-F2）。
+
+    bond/bridge 的 `interfaces` 是 `list[str]`，原来只做类型检查 ⇒ 名字完全绕过
+    `_require_ifname`，而它们会进 netplan/nmcli/ifcfg 三种产物（换行/空格/引号即注入）。
+    同时要求非空且不重复（同一个从接口挂到两个聚合里是配置矛盾）。
+    """
+    if not value:
+        raise ValueError(f"{field} 不能为空")
+    out, seen = [], set()
+    for name in value:
+        if not isinstance(name, str):
+            raise ValueError(f"{field} 的元素必须是接口名（字符串）：{name!r}")
+        n = _require_ifname(name.strip())
+        if n in seen:
+            raise ValueError(f"{field} 里重复出现 {n!r}")
+        seen.add(n)
+        out.append(n)
+    return out
+
+
 def _require_ipv4(value: str, kind: str) -> str:
     """必须为合法 IPv4 地址；合法时原样返回（NC2）。"""
     # TODO(IPv6): 整个 netconfig 模块只处理 IPv4 —— 地址/掩码/网关一律走 ipaddress.IPv4*，
@@ -713,6 +734,19 @@ class PxeDiskConfigIn(BaseModel):
                     "用它做排除集会抹掉数据盘。例如 size=\"30G\"。")
             if d.get("name") and not _disk_ident_check(d.get("name", ""), f"data_disks[{i}].name"):
                 raise ValueError(f"data_disks[{i}].name 含非法字符")
+            # ★ 外部审查 U7-F1（我复核后修正了它的说法：上面那条"必须有稳定条件"早就有了，
+            #   真正缺的是**格式**校验）—— size/serial/wwid 会被拼进 %pre 的 awk 匹配串与
+            #   产物文本，值里带引号/空白/换行即可破坏脚本；size 写错格式则**匹配不上任何盘**，
+            #   第 1 个数据盘声明一条都没命中 ⇒ 装机中止（fail-closed，但纯属白跑一趟）。
+            sz = str(d.get("size") or "").strip()
+            if sz and not re.fullmatch(r"\d+(\.\d+)?\s*[KMGTPkmgtp]?i?[Bb]?", sz):
+                raise ValueError(
+                    f"data_disks[{i}].size 格式不对：{sz!r}（可写 30G / 500M / 32212254720）")
+            for k in ("serial", "wwid"):
+                val = str(d.get(k) or "").strip()
+                if val and not re.fullmatch(r"[A-Za-z0-9._:+-]{1,128}", val):
+                    raise ValueError(
+                        f"data_disks[{i}].{k} 含非法字符（只允许字母数字与 . _ : + -）：{val[:40]!r}")
             # wipe=true 时产物里要**显式写到这块盘**（clearpart/ignoredisk 那几行），
             # 只给 size/serial/wwid 表达不出来 → 盘名必填。
             # 与 generator._disk_plan 里的同名护栏成对：这里让界面保存时就 422，
@@ -1194,6 +1228,16 @@ class NetBondIn(BaseModel):
     def _check_name(cls, v: str) -> str:
         return _require_ifname(v)
 
+    # ★ 外部审查 U7-F2：`interfaces`（从接口列表）原来只做 list[str] 类型检查，
+    #   完全绕过 `_require_ifname` —— 而这些名字会进 netplan/nmcli/ifcfg 三种产物的
+    #   接口段落（换行/空格/引号即注入或生成非法配置）。逐个过白名单。
+    #   （`primary` / `lacp_rate` / `xmit_hash_policy` 本文件下面**早有**同样的白名单校验，
+    #    这里不重复定义 —— 同名覆盖会静默丢掉原来那条，Pydantic 会 warn。）
+    @field_validator("interfaces")
+    @classmethod
+    def _check_slaves(cls, v: list[str]) -> list[str]:
+        return _require_ifname_list(v, "bonds[].interfaces")
+
     @field_validator("mode")
     @classmethod
     def _check_mode(cls, v: int) -> int:
@@ -1320,6 +1364,12 @@ class NetBridgeIn(BaseModel):
     @classmethod
     def _check_name(cls, v: str) -> str:
         return _require_ifname(v)
+
+    # 同 bond（外部审查 U7-F2）：网桥的从接口名也必须过白名单
+    @field_validator("interfaces")
+    @classmethod
+    def _check_slaves(cls, v: list[str]) -> list[str]:
+        return _require_ifname_list(v, "bridges[].interfaces")
 
     @field_validator("mode")
     @classmethod
