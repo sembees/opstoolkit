@@ -244,6 +244,38 @@ def _dup_conflicts(existing, position: str, mgmt_ip: str, mac: str, exclude_id=N
     return None, ""
 
 
+def _dup_position_409(what: str, owner) -> HTTPException:
+    """落位唯一性冲突的 409（应用层检查与数据库约束共用同一套文案）。"""
+    if what == "落位":
+        return HTTPException(status_code=409, detail=f"该模板下已存在落位 {owner.position}")
+    if what == "管理 IP":
+        return HTTPException(
+            status_code=409, detail=f"该模板下管理 IP {owner.mgmt_ip} 已被落位 {owner.position} 使用")
+    if what == "MAC":
+        return HTTPException(status_code=409, detail=f"该 MAC 已被落位 {owner.position} 认领")
+    return HTTPException(status_code=409, detail="该模板下已存在相同落位/管理 IP/MAC")
+
+
+async def _commit_position_or_409(db, p) -> None:
+    """写库并提交；**数据库层的唯一约束**撞了就转 409（外部审查 U3-F14）。
+
+    为什么还要这一层：应用层是先查再插（check-then-insert），两个并发请求（或 import 与手工
+    新增同时发生）可以都通过检查，随后由 (template_id, position) / (template_id, mgmt_ip) /
+    部分唯一索引 (template_id, mac) 拒掉 —— 改前那是一个 500，运维只看到"服务器内部错误"。
+    文案与 `_dup_conflicts` 保持同一口径，不引入第二种说法。
+    """
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="该模板下已存在相同的落位编码 / 管理 IP / MAC（并发写入被数据库唯一约束拒绝）；"
+                   "请刷新列表后重试",
+        )
+    await db.refresh(p)
+
+
 @router.get("/positions", response_model=list[ZtpPositionOut])
 # GET /api/ct/ztp/positions — 落位登记列表（template_id 为空返回全部），按落位编码排序
 async def list_positions(template_id: str = "", db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
@@ -268,11 +300,7 @@ async def create_position(body: ZtpPositionIn, db: AsyncSession = Depends(get_db
     )
     owner, what = _dup_conflicts(list(res.scalars().all()), position, mgmt_ip, mac)
     if owner is not None:
-        if what == "落位":
-            raise HTTPException(status_code=409, detail=f"该模板下已存在落位 {position}")
-        if what == "管理 IP":
-            raise HTTPException(status_code=409, detail=f"该模板下管理 IP {mgmt_ip} 已被落位 {owner.position} 使用")
-        raise HTTPException(status_code=409, detail=f"该 MAC 已被落位 {owner.position} 认领")
+        raise _dup_position_409(what, owner)
     p = models.ZtpPosition(
         template_id=body.template_id, position=position,
         hostname=(body.hostname or "").strip(), mgmt_ip=mgmt_ip,
@@ -280,8 +308,7 @@ async def create_position(body: ZtpPositionIn, db: AsyncSession = Depends(get_db
         source="manual", claimed_at=(utcnow() if mac else None),
     )
     db.add(p)
-    await db.commit()
-    await db.refresh(p)
+    await _commit_position_or_409(db, p)
     return p
 
 
@@ -304,11 +331,7 @@ async def update_position(pid: str, body: ZtpPositionIn, db: AsyncSession = Depe
     )
     owner, what = _dup_conflicts(list(res.scalars().all()), position, mgmt_ip, mac, exclude_id=pid)
     if owner is not None:
-        if what == "落位":
-            raise HTTPException(status_code=409, detail=f"该模板下已存在落位 {position}")
-        if what == "管理 IP":
-            raise HTTPException(status_code=409, detail=f"该模板下管理 IP {mgmt_ip} 已被落位 {owner.position} 使用")
-        raise HTTPException(status_code=409, detail=f"该 MAC 已被落位 {owner.position} 认领")
+        raise _dup_position_409(what, owner)
     p.template_id = tid
     p.position = position
     p.hostname = (body.hostname or "").strip()
@@ -320,8 +343,7 @@ async def update_position(pid: str, body: ZtpPositionIn, db: AsyncSession = Depe
         p.mac = mac
         p.claimed_at = utcnow() if mac else None
         p.source = "manual"
-    await db.commit()
-    await db.refresh(p)
+    await _commit_position_or_409(db, p)
     return p
 
 
@@ -525,8 +547,9 @@ async def claim_position(body: ZtpClaimIn, db: AsyncSession = Depends(get_db), _
     p.mac = mac
     p.claimed_at = utcnow()
     p.source = "claim"
-    await db.commit()
-    await db.refresh(p)
+    # 并发下同一个 MAC 可能同时被两条落位认领：应用层的 check-then-insert 挡不住，
+    # 兜底的数据库部分唯一索引会拒 —— 转成 409，别让运维看到 500（U3-F14 同一处理）。
+    await _commit_position_or_409(db, p)
     return {
         "ok": True,
         "position": ZtpPositionOut.model_validate(p),
@@ -612,11 +635,17 @@ async def deploy_to_host(tid: str, body: dict = None, db: AsyncSession = Depends
     """
     body = body or {}
     srv = body.get("server_ip", "")
+    t = await db.get(models.ZtpTemplate, tid)
     if not srv:
-        t = await db.get(models.ZtpTemplate, tid)
         srv = t.server_ip if t else ""
     body.setdefault("server_ip", srv)
-    body.setdefault("http_root", ("http://" + srv + ":8000/ztp") if srv else "")
+    # ★ 外部审查 U3-F9（第二次审查）：这里原来无条件把**派生**的 http_root 塞进 body，
+    #   而 `_gen_ztp_files` 见到 body 里有它就覆盖模板里已配好的值 ⇒
+    #   "部署出来的"与模板里配的（以及下载 ZIP 得到的）http_root 不一致，
+    #   华为 midfile 的 "HTTP file server"、思科 bootstrap 的 server 变量都跟着变。
+    #   现在只在**模板没配**时才派生默认值（server_ip 同理已经是"模板优先"）。
+    if not (body.get("http_root") or "").strip() and not ((t.http_root if t else "") or "").strip():
+        body["http_root"] = ("http://" + srv + ":8000/ztp") if srv else ""
     files = await _gen_ztp_files(tid, body, db)
     # deploy_files 是同步函数，容器部署路径里它会**阻塞等待**宿主机重载完成
     # （最长 OPS_HOST_RELOAD_TIMEOUT，默认 25s）。与 api/pxe.py 一样丢到线程里，

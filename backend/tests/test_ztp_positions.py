@@ -434,8 +434,84 @@ class ZtpPositionsApiTest(_ApiTestBase):
         self.assertIn("读取不到 dnsmasq 租约文件", out["note"])
         self.assertIn(missing, out["note"])          # 真实实现会把尝试过的路径写出来
         self.assertIn("FileNotFoundError", out["note"])
-        self.assertIn("读取不到 dnsmasq 租约文件", out["note"])
         self.assertEqual(out["observations"], [])
+
+
+class ZtpDeployBodyTest(_ApiTestBase):
+    """U3 第二次审查的附加项：部署体不能覆盖模板里配好的 http_root。"""
+
+    def _seed(self, name, **kw):
+        # ZTP 开局必须填设备管理员口令（不代填默认口令）；库里存的是加密值。
+        # 华为设备的 SNMP 团体名还要求 8-32 字符（真机实测），默认的 public 会被拒。
+        from app.core import crypto
+        kw.setdefault("admin_password_enc", crypto.encrypt("TestPw@123"))
+        if kw.get("vendor", "huawei") == "huawei":
+            kw.setdefault("snmp_community", "Opstk@2026")
+        vendor = kw.pop("vendor", "huawei")
+
+        async def _go():
+            async with self.SessionLocal() as s:
+                t = models.ZtpTemplate(name=name, vendor=vendor, **kw)
+                s.add(t)
+                await s.commit()
+                await s.refresh(t)
+                return t.id
+        return asyncio.run(_go())
+
+    def _deploy_and_capture(self, tid):
+        from unittest import mock
+
+        from app.api import ztp as ztp_api
+        seen = {}
+
+        def fake(files, _tid):
+            seen.update(files)
+            return {"ok": True, "supported": True, "log": [], "errors": [], "files_written": []}
+
+        client = self._client()
+        with mock.patch.object(ztp_api.ztp_server, "deploy_files", fake):
+            r = client.post("/api/ct/ztp/templates/%s/deploy" % tid, json={})
+        return r, seen
+
+    def test_template_http_root_wins_over_derived_default(self):
+        """★ 外部审查 U3-2nd-F9：改前 deploy 无条件把派生的
+        `http://<server_ip>:8000/ztp` 塞进请求体，而 _gen_ztp_files 见到它就覆盖模板值 ——
+        "部署出来的"与模板里配的（以及下载 ZIP 得到的）根本不是一份东西。
+        """
+        tid = self._seed("T20", http_root="http://10.0.0.250:8080/ztp")
+        r, files = self._deploy_and_capture(tid)
+        self.assertEqual(r.status_code, 200, r.text)
+        blob = "\n".join(files.values())
+        self.assertIn("http://10.0.0.250:8080/ztp", blob)      # 模板值必须生效
+        self.assertNotIn(":8000/ztp", blob)                    # 派生默认值不得抢班
+
+    def test_derived_default_still_used_when_template_is_empty(self):
+        """模板没配 http_root 时才派生（既有行为不能丢）。"""
+        tid = self._seed("T21", server_ip="10.9.9.9", http_root="")
+        r, files = self._deploy_and_capture(tid)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("http://10.9.9.9:8000/ztp", "\n".join(files.values()))
+
+    def test_concurrent_duplicate_position_is_409_not_500(self):
+        """★ 外部审查 U3-2nd-F14：应用层是先查再插，并发下会被数据库唯一约束拒 —— 必须是 409。
+
+        模拟方式：把 `_dup_conflicts` 打成"什么都没查出来"（等价于另一个并发请求刚刚写进去、
+        这边的检查发生在它之前），再提交同样的落位。
+        """
+        from unittest import mock
+
+        from app.api import ztp as ztp_api
+        client = self._client()
+        tid = self._seed_template("T22")
+        self._create(client, tid, position="A01-03-U99", mgmt_ip="10.0.0.99")
+        with mock.patch.object(ztp_api, "_dup_conflicts", lambda *a, **k: (None, "")):
+            r = self._create(client, tid, position="A01-03-U99", mgmt_ip="10.0.0.99")
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("唯一约束", r.json()["detail"])
+        # 409 之后会话必须还能用（回滚干净），否则后续请求会连不上
+        r2 = client.get("/api/ct/ztp/positions", params={"template_id": tid})
+        self.assertEqual(r2.status_code, 200, r2.text)
+        self.assertEqual(len(r2.json()), 1)
 
 
 class ZtpClaimApiTest(_ApiTestBase):
@@ -603,6 +679,28 @@ class ZtpPositionsGeneratorTest(unittest.TestCase):
         self.assertEqual(len(warn_lines), 1, conf)
         self.assertIn("00:11:22:33:44:55", warn_lines[0])
         self.assertIn("ztp/SW01.cfg", warn_lines[0])
+
+    def test_same_mac_in_devices_and_positions_is_rejected(self):
+        """★ 外部审查 U3-2nd-F5：跨清单的 MAC 唯一性。
+
+        设备清单里手抄了 MAC，之后又从租约把**同一台**设备认领到某个落位 —— 两条并存时
+        dnsmasq 会为这个 MAC 生成两组指向**不同文件**的引导项，哪一份生效取决于合并语义，
+        而接口/界面都报成功。必须点名两条来源并拒绝。
+        """
+        dev = ZtpDevice(hostname="SW9", mac="aa:bb:cc:dd:ee:99")
+        pos = {"position": "A01-03-U99", "hostname": "SW99", "mgmt_ip": "192.168.199.60",
+               "serial": "", "mac": "AA:BB:CC:DD:EE:99"}
+        with self.assertRaises(ValueError) as ctx:
+            generate_all(self._profile(), [dev], positions=[pos])
+        msg = str(ctx.exception)
+        self.assertIn("aa:bb:cc:dd:ee:99", msg)      # 报的是**归一后**的 MAC
+        self.assertIn("SW9", msg)
+        self.assertIn("A01-03-U99", msg)
+        # 对照：MAC 不同就正常生成，且各自一条 dhcp-host
+        pos2 = dict(pos, mac="AA:BB:CC:DD:EE:98")
+        conf = generate_all(self._profile(), [dev], positions=[pos2])["dnsmasq.conf"]
+        hosts = [ln for ln in conf.splitlines() if ln.startswith("dhcp-host=")]
+        self.assertEqual(len(hosts), 2, conf)
 
     def test_mgmt_ip_inside_the_dhcp_pool_is_warned(self):
         """★ 外部审查 U6-F8：落位的规划管理 IP 落在**本模板 DHCP 池内**时必须告警。

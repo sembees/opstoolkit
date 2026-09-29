@@ -1015,6 +1015,32 @@ def _readme(p, devices, positions=None) -> str:
     )
 
 
+def _dup_macs(items) -> None:
+    """同一 MAC 只能出现在一个地方（外部审查 U3-2nd-F5）。
+
+    为什么必须挡：dnsmasq 侧每个"有 MAC 的条目"都会写出
+        dhcp-host=<mac>,set:<tag>
+        dhcp-option=tag:<tag>,option:bootfile-name,"ztp/<文件>"
+    —— 同一个 MAC 出现两次就会有两组 tag 指向**不同的文件**，哪一份生效取决于 dnsmasq 的
+    合并语义（本机未取证），设备可能拿到另一台的配置；而接口/界面都报成功。
+    最典型的来源：设备清单里手抄了 MAC，之后又从租约里把同一台设备认领到某个落位。
+    """
+    seen = {}
+    for d in items:
+        mac = _norm_mac_text(getattr(d, "mac", "") or "")
+        if not mac:
+            continue
+        label = getattr(d, "position", None) or getattr(d, "hostname", "") or "未命名"
+        if mac in seen:
+            raise ValueError(
+                "ZTP 同一个 MAC %s 被登记了两次（%r 与 %r）：dnsmasq 会为它生成两组互相冲突的"
+                "引导项（指向两份不同的配置），设备最终拿到哪一份不确定。"
+                "请二选一：要么保留设备清单里的手抄记录，要么保留落位认领。"
+                % (mac, seen[mac], label)
+            )
+        seen[mac] = label
+
+
 def generate_all(p, devices=None, positions=None):
     """生成 ZTP 全部部署文件。
 
@@ -1047,6 +1073,7 @@ def generate_all(p, devices=None, positions=None):
 
     _dup_stems(list(devices), "设备清单")
     _dup_stems(pos_devices, "落位登记")
+    _dup_macs(list(devices) + pos_devices)
     files = {}
     vendor = _norm_vendor(p.vendor)
     gen = VENDOR_CONFIG.get(vendor, h3c_config)
