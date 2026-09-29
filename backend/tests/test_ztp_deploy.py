@@ -341,6 +341,13 @@ class ZtpDeployServerTest(unittest.TestCase):
                                               "reason": "test-failed:badoption", "err": ""}}
     WAIT_RESTART_FAILED = {"ok": False, "state": {"state": "FAIL", "sha": "", "ts": _FRESH_TS,
                                                   "reason": "restart-failed", "err": ""}}
+    # ★ 外部审查 U6-F3：**一条最常见**的失败形态 —— 等不到标记（宿主机单元没装/没响应，
+    #   或容器看不到状态目录），等待超时后 state 为 None。此前这组用例只覆盖"拿到 FAIL 状态"
+    #   的两种形状，判据层（reload_failure_is_pre_restart(None) is False）有测试，
+    #   但**部署层的接线**没有：回归成"没等到就当成功"或"没等到就回滚（制造磁盘 vs
+    #   守护进程更不一致）"都不会变红。
+    WAIT_NO_MARKER = {"ok": False, "state": None,
+                      "log": ["等待宿主机重载超时（未发现状态标记）"]}
 
     # ── 红线 ──
 
@@ -452,6 +459,29 @@ class ZtpDeployServerTest(unittest.TestCase):
         self.assertFalse(res.get("rolled_back"), res)
         self.assertTrue(any("未回滚" in e for e in res["errors"]), res["errors"])
         self.assertNotEqual(self._tree(), before)   # 磁盘保持本次写入的内容（已如实报告）
+
+    def test_no_marker_waits_out_then_reports_unrolled(self):
+        """U6-F3：等不到任何状态标记（state=None）时必须 ok=False + 明说未回滚 + 保留本次写入。
+
+        "等不到标记"证明不了宿主机没重启过 dnsmasq（可能单元根本没装、也可能重启了但没写状态），
+        所以既不能当成功，也不能授权回滚 —— 只能如实报告。
+        """
+        self._delegate([self.WAIT_OK])
+        self.assertTrue(self.ztp.deploy_files(self._files(), "t" * 32)["ok"])
+        before = self._tree()
+
+        self._delegate([self.WAIT_NO_MARKER])
+        res = self.ztp.deploy_files(self._files(tag="SW2"), "t" * 32)
+        self.assertFalse(res["ok"], res)
+        self.assertFalse(res.get("rolled_back"), res)
+        self.assertTrue(any("未回滚" in e for e in res["errors"]), res["errors"])
+        self.assertNotEqual(self._tree(), before)   # 磁盘保持本次写入（已如实报告）
+        # 本次写入的文件仍在（不是"零落盘"那条路径）
+        with open(self.conf, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), self.GOOD_CONF)
+        tree = self._tree()
+        self.assertIn("ztp/SW2.cfg@tftp", tree)
+        self.assertIn("ztp/SW2.cfg@ztp-web", tree)
 
     def test_config_write_failure_rolls_back_device_files(self):
         """配置写不下去 ⇒ 连设备配置也不该留在盘上（旧代码只 log 一句，还报成功）。"""

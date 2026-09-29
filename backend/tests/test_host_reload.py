@@ -432,26 +432,40 @@ def test_rewrite_conf_unchanged_keeps_bytes_and_inode(tmp_path):
         assert p.stat().st_ino == ino, "必须原地写（rename 会让宿主机收不到事件）"
 
 
-def test_script_version_contract_is_documented():
-    """宿主脚本里写的 SCRIPT_VERSION 必须 >= 应用侧要求的最低版本，
-    否则部署会永远卡在 preflight（这条约束很容易在改脚本时忘掉）。
+def _host_file(name: str):
+    """读宿主机侧的脚本/单元文件；找不到时返回 None。
 
-    容器里只挂了 backend/app 与 backend/tests，`deploy/host/` 根本不在容器内 ——
-    找不到就 skip（而不是失败）：这是"开发机/CI 上跑全仓用例"才有的检查。
+    ★ 外部审查 U6-F6：这两条契约用例以前在容器里**静默 skip**（容器只挂了 backend/），
+    等于从未被守卫 —— 而它们钉的正是"改宿主脚本时最容易忘"的两件事。
+    现在 compose 把 `/opt/opstk/deploy/host` 只读挂进 `/app/deploy/host`，容器里也能真跑。
+    另外加了 fail-closed：只要**目录在**（`OPSTK_REPO` 指了完整仓库，或 `/app/deploy/host`
+    被挂进来）却找不到那个文件，就直接失败 —— 目录在而文件没了，本身就是契约被破坏。
     """
-    import re as _re
     here = pathlib.Path(__file__).resolve()
     roots = [here.parents[2], pathlib.Path("/app")]
     if os.environ.get("OPSTK_REPO"):
         roots.insert(0, pathlib.Path(os.environ["OPSTK_REPO"]))
-    sh_text = None
     for r in roots:
-        f = r / "deploy" / "host" / "opstk-dnsmasq-reload.sh"
+        d = r / "deploy" / "host"
+        f = d / name
         if f.is_file():
-            sh_text = f.read_text(encoding="utf-8")
-            break
+            return f.read_text(encoding="utf-8")
+        if d.is_dir():
+            raise AssertionError("宿主目录 %s 存在，但缺少 %s（契约被破坏）" % (d, name))
+    return None
+
+
+def test_script_version_contract_is_documented():
+    """宿主脚本里写的 SCRIPT_VERSION 必须 >= 应用侧要求的最低版本，
+    否则部署会永远卡在 preflight（这条约束很容易在改脚本时忘掉）。
+
+    容器里通过 `/app/deploy/host`（compose 的只读挂载）看到真文件；确实没有仓库的
+    环境才 skip。
+    """
+    import re as _re
+    sh_text = _host_file("opstk-dnsmasq-reload.sh")
     if sh_text is None:
-        pytest.skip("宿主脚本不在本环境（容器只挂了 backend/），该契约检查只在完整仓库里跑")
+        pytest.skip("宿主脚本不在本环境（容器没挂 deploy/host，也没有完整仓库）")
     # 注意行尾：检出到 Windows 时是 CRLF，正则必须容忍 `\r`（踩过：`$` 卡在 \r 前）
     m = _re.search(r"^SCRIPT_VERSION=(\d+)\s*$", sh_text, _re.M)
     assert m, "宿主脚本里没有 SCRIPT_VERSION"
@@ -466,17 +480,9 @@ def test_reload_service_disables_start_rate_limit():
     磁盘被留在不一致状态。这条用例钉死那个开关（很容易被人"清理"掉）。
     """
     here = pathlib.Path(__file__).resolve()
-    roots = [here.parents[2], pathlib.Path("/app")]
-    if os.environ.get("OPSTK_REPO"):
-        roots.insert(0, pathlib.Path(os.environ["OPSTK_REPO"]))
-    unit = None
-    for r in roots:
-        f = r / "deploy" / "host" / "opstk-dnsmasq-reload.service"
-        if f.is_file():
-            unit = f.read_text(encoding="utf-8")
-            break
+    unit = _host_file("opstk-dnsmasq-reload.service")
     if unit is None:
-        pytest.skip("宿主单元不在本环境（容器只挂了 backend/）")
+        pytest.skip("宿主单元不在本环境（容器没挂 deploy/host，也没有完整仓库）")
     assert "StartLimitIntervalSec=0" in unit
     # SuccessExitStatus=0 1 也必须在：脚本"失败"是设计的一部分（写 FAIL 状态），
     # 不能让它因为退出码 1 触发 systemd 的失败处理。

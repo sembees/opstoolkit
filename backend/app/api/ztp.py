@@ -510,6 +510,18 @@ async def claim_position(body: ZtpClaimIn, db: AsyncSession = Depends(get_db), _
     for e in res.scalars().all():
         if e.id != p.id and (e.mac or "") == mac:
             raise HTTPException(status_code=409, detail=f"该 MAC 已被落位 {e.position} 认领")
+    # ★ 外部审查 U6-F7：同一落位**二次认领**（换一个 MAC）原来会静默改写
+    #   mac/claimed_at/source —— 也就是"把这台设备的归属悄悄换给另一台"：先前那台已经按 MAC
+    #   拿到过自己的配置，之后会静默掉回 default.cfg，而界面上没有任何提示。
+    #   界面本来就只让选**待认领**的落位（claimablePositions 过滤了 p.mac），所以这条路径
+    #   只可能来自直接调 API 或并发操作 ⇒ 明确 409，并给出改归属的正确做法（编辑落位）。
+    if (p.mac or "") and p.mac != mac:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"该落位已由 MAC {p.mac} 认领（source={p.source or '-'}）："
+                    f"要改成 {mac} 请直接在「编辑落位」里改 MAC（会同时重置认领时间），"
+                    f"或在编辑里清空 MAC 回到待认领状态；这里不静默换主。"),
+        )
     p.mac = mac
     p.claimed_at = utcnow()
     p.source = "claim"

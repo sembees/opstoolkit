@@ -794,6 +794,11 @@ def dnsmasq(p, devices, positions=None) -> str:
     L.append(f'dhcp-option=option:bootfile-name,"ztp/default.cfg"')
     L.append("")
     L.append("# ---- 按 MAC/序列号映射到各自配置文件 ----")
+    # ★ 外部审查 U6-F2：设备清单与落位登记**撞同一个文件名**时，落位规划覆盖手工登记
+    #   （既定的兼容行为，见 generate_all 的说明）—— 但那个 MAC 的 bootfile 仍然指向这份
+    #   被覆盖的文件，也就是"这台机器会拿到落位的规划 IP"。这是有意为之，但必须在生成物里
+    #   看得见，否则运维核对 dnsmasq 时只会看到一条正常的映射。
+    pos_stems = {_file_stem(_position_device(x)) for x in (positions or [])}
     for d in devices:
         stem = _file_stem(d)
         fname = f"ztp/{stem}.{_ext(vendor)}"
@@ -811,13 +816,68 @@ def dnsmasq(p, devices, positions=None) -> str:
             tag = "tag:set_" + mac.replace(":", "")
             L.append(f"dhcp-host={mac},set:set_{mac.replace(':', '')}")
             L.append(f'dhcp-option={tag},option:bootfile-name,"{fname}"')
+            if stem in pos_stems:
+                L.append(
+                    "# ⚠ 上面这台（MAC %s）与**落位登记**撞了同一个文件名 %s："
+                    "该文件的内容由落位规划决定（落位覆盖手工登记），"
+                    "也就是这台机器会拿到那份规划。若两台是不同设备，请改序列号/主机名。" % (mac, fname)
+                )
         else:
             L.append(f'# {_require_clean(d.hostname, "主机名")}: 缺少 MAC, 使用 default.cfg')
     # 落位登记（认领后按 MAC 下发各自配置）：设备清单靠手抄 MAC，落位登记不需要 ——
     # MAC 是设备上电后从 DHCP 租约里自动学来的。
     L += build_dnsmasq_lines(positions, vendor=vendor)
+    # ★ 外部审查 U6-F8：落位的**规划管理 IP** 落在本模板 DHCP 池内。
+    #   设备首次上电先拿池里的临时地址，若配置里的静态地址同时也在池内，dnsmasq 可能把
+    #   同一个地址再租给另一台设备 ⇒ 两台设备同 IP（这正是 §5.62 / test_netconfig_conflicts
+    #   描述的事故形状，只是发生在 ZTP 这条线上）。
+    #   只**告警不拦**：池常常是为首次引导临时开的，各现场规划口径不同；但必须让运维在
+    #   生成物（以及预览）里看得见。
+    if (p.deploy_mode or "standalone") == "standalone":
+        for warn in _pool_overlap_warnings(p, positions):
+            L.append("# ⚠ " + warn)
     L.append("")
     return "\n".join(L) + "\n"
+
+
+def _pool_overlap_warnings(p, positions) -> list:
+    """落位规划管理 IP 落在本模板 DHCP 池内的告警（U6-F8）。
+
+    非法地址/池一律跳过（生成器不做二次校验，校验在 schema 层），绝不在这里抛异常 ——
+    一条提示性检查不该把整份配置的生成打断。
+    """
+    import ipaddress
+
+    def _net_of(start, end):
+        try:
+            a, b = ipaddress.IPv4Address(str(start).strip()), ipaddress.IPv4Address(str(end).strip())
+        except Exception:  # noqa: BLE001
+            return None
+        lo, hi = sorted((int(a), int(b)))
+        return lo, hi
+
+    span = _net_of(p.dhcp_start, p.dhcp_end)
+    if not span:
+        return []
+    lo, hi = span
+    out = []
+    for pos in positions or []:
+        dev = _position_device(pos)
+        ip = (getattr(dev, "mgmt_ip", "") or "").strip()
+        if not ip:
+            continue
+        try:
+            n = int(ipaddress.IPv4Address(ip))
+        except Exception:  # noqa: BLE001
+            continue
+        if lo <= n <= hi:
+            label = dev.position or dev.hostname or "未命名落位"
+            out.append(
+                "落位 %s 的规划管理 IP %s 落在本模板 DHCP 池 %s-%s 内："
+                "首次引导时它可能已被租给别的设备 ⇒ 两台同 IP。"
+                "请把规划地址挪到池外，或缩小池。" % (label, ip, p.dhcp_start, p.dhcp_end)
+            )
+    return out
 
 
 # ============ 厂商中间文件 ============

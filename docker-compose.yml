@@ -17,6 +17,12 @@ services:
       # 才生效 —— 踩过多次（§4-I / §5.41）：容器里跑的还是旧用例，golden 失败被当成回归、
       # 新用例根本没被执行。挂进来之后"改用例 → 直接 pytest"就成立，与 backend/app 同理。
       - ./backend/tests:/app/backend/tests
+      # 宿主机侧的 dnsmasq 重载脚本/单元也挂进来（只读）。
+      # 为什么：两条"改脚本时最容易忘"的契约（SCRIPT_VERSION >= 应用侧要求、
+      # 单元里的 StartLimitIntervalSec=0 / SuccessExitStatus=0 1）在 test_host_reload.py 里
+      # 有守卫，但容器里看不到 deploy/host/ ⇒ 会**静默 skip**，等于从未被守卫
+      # （外部审查 U6-F6）。挂进来之后容器里也真跑；找不到文件时测试会直接失败而不是跳过。
+      - ./deploy/host:/app/deploy/host:ro
       # 入口脚本也挂进去：它是"容器是否自起 dnsmasq"的开关，必须与仓库保持一致，
       # 不能依赖镜像里烤进去的那份副本（改它需要重建镜像，而前端阶段重建当前会失败）。
       - ./backend/docker-entrypoint.sh:/docker-entrypoint.sh:ro

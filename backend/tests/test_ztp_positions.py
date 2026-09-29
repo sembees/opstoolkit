@@ -372,6 +372,10 @@ class ZtpPositionsApiTest(_ApiTestBase):
         self.assertEqual(r.status_code, 404)
 
     def test_observations_match_claimed_positions(self):
+        """★ 外部审查 U6-F5：这里原来把 `read_leases` 整个换成桩、再断言桩自己返回的字符串
+        （`leases_path == "/tmp/leases"` 必然成立）。现在只把**候选路径**指向一个真的临时
+        租约文件，`read_leases` 走真实实现：解析、路径回填、说明文字都是被测代码产出的。
+        """
         from app.api import ztp as ztp_api
         client = self._client()
         tid = self._seed_template("T6")
@@ -384,17 +388,22 @@ class ZtpPositionsApiTest(_ApiTestBase):
             "1700000000 aa:bb:cc:dd:ee:41 10.0.0.77 sw41-lease 01:aa:bb:cc:dd:ee:41\n"
             "1700000000 aa:bb:cc:dd:ee:99 10.0.0.99 *\n"
         )
-        records = ztp_positions.parse_leases(leases)
-        orig = ztp_positions.read_leases
-        ztp_positions.read_leases = lambda: ("/tmp/leases", "读取 dnsmasq 租约文件：/tmp/leases（2 条）", records)
+        fd, lease_path = tempfile.mkstemp(suffix=".leases")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(leases)
+        orig = ztp_positions.leases_candidates
+        ztp_positions.leases_candidates = lambda: [lease_path]
         try:
             r = client.get("/api/ct/ztp/observations", params={"template_id": tid})
         finally:
-            ztp_positions.read_leases = orig
+            ztp_positions.leases_candidates = orig
+            os.unlink(lease_path)
         self.assertEqual(r.status_code, 200, r.text)
         out = r.json()
         self.assertTrue(out["ok"])
-        self.assertEqual(out["leases_path"], "/tmp/leases")
+        # 路径与说明来自**真实** read_leases（读到的是我们写的那个文件）
+        self.assertEqual(out["leases_path"], lease_path)
+        self.assertIn("2 条", out["note"])
         self.assertEqual(len(out["observations"]), 2)
         obs0 = next(o for o in out["observations"] if o["mac"] == "aa:bb:cc:dd:ee:41")
         self.assertEqual(obs0["ip"], "10.0.0.77")
@@ -408,17 +417,23 @@ class ZtpPositionsApiTest(_ApiTestBase):
         self.assertEqual(obs1["position"], "")
 
     def test_observations_without_leases_file_is_note_not_500(self):
+        """★ U6-F5：只指向一个不存在的路径，note 由真实 `read_leases` 生成（不是桩的回显）。"""
         client = self._client()
         self._seed_template("T7")
-        orig = ztp_positions.read_leases
-        ztp_positions.read_leases = lambda: ("", "读取不到 dnsmasq 租约文件（…）：Z:/nope", [])
+        missing = os.path.join(tempfile.gettempdir(), "opstk-no-such-leases-%d" % os.getpid())
+        orig = ztp_positions.leases_candidates
+        ztp_positions.leases_candidates = lambda: [missing]
         try:
             r = client.get("/api/ct/ztp/observations")
         finally:
-            ztp_positions.read_leases = orig
+            ztp_positions.leases_candidates = orig
         self.assertEqual(r.status_code, 200, r.text)
         out = r.json()
         self.assertEqual(out["leases_path"], "")
+        self.assertEqual(out["observations"], [])
+        self.assertIn("读取不到 dnsmasq 租约文件", out["note"])
+        self.assertIn(missing, out["note"])          # 真实实现会把尝试过的路径写出来
+        self.assertIn("FileNotFoundError", out["note"])
         self.assertIn("读取不到 dnsmasq 租约文件", out["note"])
         self.assertEqual(out["observations"], [])
 
@@ -460,6 +475,53 @@ class ZtpClaimApiTest(_ApiTestBase):
         r = self._create(client, tid, position="A01-03-U72", mgmt_ip="10.0.0.72",
                          mac="AA:BB:CC:DD:EE:77")
         self.assertEqual(r.status_code, 409, r.text)
+
+    def test_same_position_reclaim_with_another_mac_is_refused(self):
+        """★ 外部审查 U6-F7：同一落位**二次认领**换 MAC 不能静默换主。
+
+        改前会直接改写 mac/claimed_at/source —— 先前那台设备已经按 MAC 拿到过自己的配置，
+        之后会静默掉回 default.cfg，界面上毫无提示。界面本来就只让选"待认领"的落位
+        （claimablePositions 过滤了 p.mac），所以这条路径只可能来自直接调 API / 并发操作。
+        """
+        client = self._client()
+        tid = self._seed_template("T11")
+        pid = self._create(client, tid, position="A01-03-U81", mgmt_ip="10.0.0.81").json()["id"]
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": pid, "mac": "aa:bb:cc:dd:ee:81"})
+        self.assertEqual(r.status_code, 200, r.text)
+        first = r.json()["position"]
+
+        # 换个 MAC 再认领同一条落位 → 409，且**归属没有被改写**
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": pid, "mac": "aa:bb:cc:dd:ee:82"})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("aa:bb:cc:dd:ee:82", r.json()["detail"])
+        after = client.get("/api/ct/ztp/positions", params={"template_id": tid}).json()[0]
+        self.assertEqual(after["mac"], "aa:bb:cc:dd:ee:81")
+        self.assertEqual(after["claimed_at"], first["claimed_at"])
+
+        # 同一个 MAC 重复认领 = 幂等（不是冲突）
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": pid, "mac": "AA:BB:CC:DD:EE:81"})
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_reclaim_after_clearing_mac_is_allowed(self):
+        """改归属的**正确做法**：先清空 MAC（回到待认领）再认领 —— 必须走得通。"""
+        client = self._client()
+        tid = self._seed_template("T12")
+        pid = self._create(client, tid, position="A01-03-U91", mgmt_ip="10.0.0.91").json()["id"]
+        client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": pid, "mac": "aa:bb:cc:dd:ee:91"})
+        r = client.put("/api/ct/ztp/positions/" + pid, json={
+            "template_id": tid, "position": "A01-03-U91", "mgmt_ip": "10.0.0.91",
+            "hostname": "sw91", "serial": "", "mac": "", "remark": ""})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["mac"], "")
+        self.assertIsNone(r.json()["claimed_at"])
+        r = client.post("/api/ct/ztp/claim", json={
+            "template_id": tid, "position_id": pid, "mac": "aa:bb:cc:dd:ee:92"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["position"]["mac"], "aa:bb:cc:dd:ee:92")
 
 
 class ZtpPositionsGeneratorTest(unittest.TestCase):
@@ -513,7 +575,13 @@ class ZtpPositionsGeneratorTest(unittest.TestCase):
         self.assertIn("ztp/A01-03-U14.cfg", files)
 
     def test_position_overrides_same_stem_device(self):
-        """落位排在 devices 之后：同文件名（同 stem）时落位规划覆盖手工登记。"""
+        """落位排在 devices 之后：同文件名（同 stem）时落位规划覆盖手工登记。
+
+        ★ 外部审查 U6-F2：这条用例以前只看 cfg 正文、对 dnsmasq 侧一个字都不比 ——
+        于是"覆盖之后那个 MAC 到底拿哪份配置"没有断言。现在把**映射**（该 MAC →
+        `ztp/SW01.cfg`）和生成物里的**告警注释**一起钉死：覆盖是有意的兼容行为，
+        但运维必须能从 dnsmasq.conf 里看出这台机器拿到的是落位的规划。
+        """
         dev = ZtpDevice(hostname="SW01", mac="00:11:22:33:44:55", mgmt_ip="10.9.9.9")
         pos = {"position": "A01-03-U15", "hostname": "SW01", "mgmt_ip": "192.168.199.50",
                "serial": "", "mac": ""}
@@ -521,6 +589,46 @@ class ZtpPositionsGeneratorTest(unittest.TestCase):
         cfg = files["ztp/SW01.cfg"]
         self.assertIn("ip address 192.168.199.50 255.255.255.0", cfg)
         self.assertNotIn("10.9.9.9", cfg)
+
+        conf = files["dnsmasq.conf"]
+        # 该 MAC 的 bootfile 目标就是那份被覆盖的文件（映射一致，不是"指向别处"）
+        self.assertIn("dhcp-host=00:11:22:33:44:55,set:set_001122334455", conf)
+        self.assertIn('dhcp-option=tag:set_001122334455,option:bootfile-name,"ztp/SW01.cfg"', conf)
+        # 落位没有 MAC ⇒ 只出注释，不能再有第二条 dhcp-host 指向同一份文件
+        hosts = [ln for ln in conf.splitlines() if ln.startswith("dhcp-host=")]
+        self.assertEqual(hosts, ["dhcp-host=00:11:22:33:44:55,set:set_001122334455"])
+        self.assertNotIn("set:pos_", conf)
+        # 撞名必须在生成物里可见（否则运维核对时只会看到一条正常映射）
+        warn_lines = [ln for ln in conf.splitlines() if ln.startswith("# ⚠ 上面这台")]
+        self.assertEqual(len(warn_lines), 1, conf)
+        self.assertIn("00:11:22:33:44:55", warn_lines[0])
+        self.assertIn("ztp/SW01.cfg", warn_lines[0])
+
+    def test_mgmt_ip_inside_the_dhcp_pool_is_warned(self):
+        """★ 外部审查 U6-F8：落位的规划管理 IP 落在**本模板 DHCP 池内**时必须告警。
+
+        事故形状（与 netconfig 的池冲突同源）：设备首次上电先拿池里的临时地址，
+        配置里的静态地址若也在池内，dnsmasq 可能把同一个地址再租给另一台 ⇒ 两台同 IP。
+        只告警不拦（池常常是为首次引导临时开的），但必须能在生成物里看见。
+        """
+        p = self._profile()          # 池 192.168.199.210 - .240
+        inside = {"position": "A01-03-U20", "hostname": "sw20", "mgmt_ip": "192.168.199.220",
+                  "serial": "", "mac": "aa:bb:cc:dd:ee:20"}
+        outside = {"position": "A01-03-U21", "hostname": "sw21", "mgmt_ip": "192.168.199.30",
+                   "serial": "", "mac": "aa:bb:cc:dd:ee:21"}
+        conf = generate_all(p, [], positions=[inside])["dnsmasq.conf"]
+        warn = [ln for ln in conf.splitlines() if "落在本模板 DHCP 池" in ln]
+        self.assertEqual(len(warn), 1, conf)
+        self.assertIn("192.168.199.220", warn[0])
+        self.assertIn("192.168.199.210-192.168.199.240", warn[0])
+        # 池外的规划地址不得产生告警
+        conf2 = generate_all(p, [], positions=[outside])["dnsmasq.conf"]
+        self.assertNotIn("落在本模板 DHCP 池", conf2)
+        # proxy/relay 模式没有地址池 ⇒ 不告警
+        p2 = self._profile()
+        p2.deploy_mode = "proxy"
+        conf3 = generate_all(p2, [], positions=[inside])["dnsmasq.conf"]
+        self.assertNotIn("落在本模板 DHCP 池", conf3)
 
     def test_readme_documents_position_flow_and_counts(self):
         claimed = {"position": "A01-03-U12", "hostname": "", "mgmt_ip": "192.168.199.30",
