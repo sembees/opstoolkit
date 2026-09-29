@@ -56,7 +56,7 @@
                   <el-option label="RHEL" value="rhel" />
                 </el-select>
                 <el-input v-model="row._osVer" size="small" style="width: 80px; margin-right: 6px" placeholder="22.04" />
-                <el-button type="success" link size="small" @click="extractIso(row)" :loading="row._extracting">提取</el-button>
+                <el-button type="success" link size="small" @click="askExtract(row)" :loading="row._extracting">提取</el-button>
                 <el-popconfirm title="确定删除?" @confirm="delIso(row.name)">
                   <template #reference><el-button type="danger" link size="small">删除</el-button></template>
                 </el-popconfirm>
@@ -308,7 +308,11 @@
             <b style="color: var(--el-color-warning)">识别方式必须填「容量」/「序列号」/「WWID」之一</b>：
             盘名（sda/sdb）由内核探测顺序决定，<b>同一台机器两次启动都可能互换</b>，
             拿它当"别碰这块盘"的判据会把系统盘排除掉、让安装落到数据盘上并抹掉它（真机实测过）。
-            盘名只作备注。容量写法如 <code>30G</code>（G/M/T 按二进制，GB/MB/TB 按十进制）。
+            盘名只作备注。容量写法如 <code>30G</code>（G/M/T 按二进制，GB/MB/TB 按十进制）。<br />
+            <!-- 后端契约：不格式化时不会建分区，挂载点会被丢弃 ⇒ 直接 422（fail-closed），
+                 别让运维填完挂载点才撞一个 422。挂载**已有**文件系统尚未支持（见 RUNBOOK §4-G）。 -->
+            <b style="color: var(--el-color-warning)">要给数据盘填「挂载点」就必须同时打开「格式化」</b>：
+            不格式化时不会建分区，挂载点没有承载物、后端会拒绝（挂载<b>已有</b>文件系统尚未支持）。
           </div>
           <el-table :data="form.data_disks" size="small" style="margin-bottom: 6px">
             <el-table-column label="容量（识别用）" width="130">
@@ -439,12 +443,18 @@
           </el-col>
           <el-col :span="6"><el-form-item label="主机名"><el-input v-model="genForm.hostname" /></el-form-item></el-col>
           <el-col :span="6"><el-form-item label="PXE服务IP"><el-input v-model="genForm.server_ip" placeholder="PXE服务本机IP，如 10.128.118.113" /></el-form-item></el-col>
-          <el-col :span="6"><el-form-item label="内核路径"><el-input v-model="genForm.kernel_path" placeholder="rhel/9/vmlinuz" /></el-form-item></el-col>
-          <el-col :span="6"><el-form-item label="initrd"><el-input v-model="genForm.initrd_path" placeholder="rhel/9/initrd.img" /></el-form-item></el-col>
+          <el-col :span="6"><el-form-item label="内核路径"><el-input v-model="genForm.kernel_path" placeholder="留空由后端按模板版本推导" /></el-form-item></el-col>
+          <el-col :span="6"><el-form-item label="initrd"><el-input v-model="genForm.initrd_path" placeholder="留空由后端按模板版本推导" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="HTTP根地址"><el-input v-model="genForm.http_root" placeholder="留空由后端生成，格式 http://<IP>:8000/pxe/serve" /></el-form-item></el-col>
         </el-row>
-        <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> 生成文件</el-button>
-          <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
+        <el-alert v-if="genMediaNote" type="warning" :closable="false" show-icon style="margin-bottom:8px">
+          {{ genMediaNote }}
+        </el-alert>
+        <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
+          <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
+          <!-- U5-F7：预览与下载必须是同一份内容 -->
+          <el-tag v-if="genStale" size="small" type="warning" style="margin-left:8px">预览已失效（参数或装机记录已变化，请重新生成）</el-tag>
+          <el-tag v-else-if="Object.keys(genFiles).length" size="small" type="success" style="margin-left:8px">下载内容 = 预览内容</el-tag>
       </el-form>
       <el-tabs v-model="activeFile" v-if="Object.keys(genFiles).length">
         <el-tab-pane v-for="(_, name) in genFiles" :key="name" :label="name" :name="name">
@@ -476,9 +486,47 @@
       <el-alert v-else type="info" :closable="false" show-icon>
         {{ deployForm.deploy_mode === 'proxy' ? 'ProxyDHCP 模式与现有 DHCP 并存，不分配地址，影响面小。' : '中继模式仅提供引导，依赖外部 DHCP 与交换机 IP helpers。' }}
       </el-alert>
+      <!-- ★ 外部审查 U5-F8：部署与「生成配置」弹窗用的是**两套参数**，界面以前对此只字不提。
+           事实（都读过后端）：部署按**模板**生成（内核路径留空时由后端按模板 os_type/os_version
+           推导）、http_root 由后端强制为 http://<server_ip>:8000/pxe/serve（不吃前端传值）、
+           installs 传空时自动回落到该模板在库里的装机记录。这里把将写入的东西说清楚，
+           部署后再显示实际写盘的文件清单。 -->
+      <el-descriptions :column="1" size="small" border style="margin-top:10px">
+        <el-descriptions-item label="将按模板生成">
+          {{ deployRow ? (deployRow.os_type + '/' + deployRow.os_version) : '-' }}
+          —— 内核/initrd 路径按模板版本推导（要覆盖请用「生成配置」弹窗里的路径再部署）
+        </el-descriptions-item>
+        <el-descriptions-item label="将带上装机记录">
+          {{ deployInstalls.length }} 条（模板里已登记的 MAC → 各自菜单/应答文件）
+        </el-descriptions-item>
+        <el-descriptions-item label="媒体根地址">
+          由后端强制为本机 http://&lt;PXE服务IP&gt;:8000/pxe/serve
+        </el-descriptions-item>
+      </el-descriptions>
+      <div v-if="deployWritten.length" style="margin-top:8px; font-size:12px; color:var(--el-text-color-secondary)">
+        上次实际写入 {{ deployWritten.length }} 个文件：{{ deployWritten.join('、') }}
+      </div>
       <template #footer>
         <el-button @click="deployDialog = false">取消</el-button>
         <el-button type="primary" :loading="deploying" @click="confirmDeploy">确认部署</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ISO 提取确认（U5-F10）：把目标目录写出来，避免 RHEL 镜像被提到 ubuntu/22.04 -->
+    <el-dialog v-model="extractConfirm.visible" title="确认提取引导介质" width="520px">
+      <div style="line-height:1.7">
+        将把 <b>{{ extractConfirm.row ? extractConfirm.row.name : '' }}</b> 里的引导文件提取到：<br />
+        <code style="font-size:13px">/srv/opstk/pxe-web/{{ (extractConfirm.row && extractConfirm.row._osType || '').trim()
+          }}/{{ (extractConfirm.row && extractConfirm.row._osVer || '').trim() }}/</code>
+        <div style="margin-top:10px; color: var(--el-color-warning); font-size:12px">
+          目录名必须与模板里的「系统 + 版本」完全一致，否则生成出来的内核 URL 是 404
+          （机器端只报 "Could not boot image"）。提取是长任务，请确认系统和版本没选错。
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="extractConfirm.visible = false">取消</el-button>
+        <el-button type="primary" :loading="extractConfirm.row && extractConfirm.row._extracting"
+                   @click="extractConfirm.visible = false; extractIso(extractConfirm.row)">开始提取</el-button>
       </template>
     </el-dialog>
   </div>
@@ -497,6 +545,10 @@ const saving = ref(false)
 const genDialog = ref(false)
 const generating = ref(false)
 const genFiles = ref({})
+// 当前预览对应的参数指纹（U5-F7：参数/装机记录变了就作废，见 genStale）+ 请求序号
+const genKey = ref("")
+const genMediaNote = ref("")
+let genSeq = 0
 const activeFile = ref("")
 const serverStatus = ref({ supported: false })
 const deployLog = ref([])
@@ -506,6 +558,7 @@ const deploying = ref(false)
 const deployDialog = ref(false)
 const deployRow = ref(null)
 const deployForm = reactive({ deploy_mode: "proxy", server_ip: "" })
+const deployWritten = ref([])   // U5-F8：部署后展示实际写盘的文件清单
 const isoList = ref({ supported: false, isos: [] })
 // 已提取的引导介质（os_type/os_version）。"版本"必须从这里选：生成出来的 kernel URL
 // 是按 os_type+os_version 拼的，版本对不上就是 404（iPXE 只会报 Could not boot image）。
@@ -513,6 +566,11 @@ const mediaList = ref({ supported: true, media: [] })
 const extractLog = ref([])
 
 async function loadServerStatus() {
+  // ★ 外部审查 U5-F5：轮询链只能有一条。本函数末尾会重新排一个定时器，而
+  //   controlService/extractIso 也会调用它 —— 不先清掉待执行的那个，每点一次服务
+  //   控制就多出一条 5s 轮询链，onBeforeUnmount 也只能停掉其中一条（长期 SPA 会话里
+  //   请求速率线性增长，组件销毁后还有链在打接口）。
+  clearTimeout(serverPollTimer)
   try { serverStatus.value = await http.get("/it/pxe/server/status") } catch(e) {}
   serverPollTimer = setTimeout(loadServerStatus, 5000)
 }
@@ -524,8 +582,17 @@ function deployProfile(row) {
   deployRow.value = row
   deployForm.deploy_mode = "proxy"
   deployForm.server_ip = ""
+  deployWritten.value = []
   deployDialog.value = true
 }
+
+// U5-F8：部署后会带上"该模板在库里的装机记录"（installs 传空时后端回落到 DB）。
+// 界面必须把这件事说清楚，否则运维会以为部署的就是刚才预览的那一份。
+const deployInstalls = computed(() => {
+  const row = deployRow.value
+  if (!row) return []
+  return (installs.value || []).filter(i => i.profile_id === row.id)
+})
 
 async function confirmDeploy() {
   const row = deployRow.value
@@ -539,7 +606,8 @@ async function confirmDeploy() {
       installs: []
     })
     deployLog.value = r.log || []
-    if (r.ok) ElMessage.success("部署完成")
+    deployWritten.value = r.files_written || []
+    if (r.ok) ElMessage.success("部署完成，已写入 " + deployWritten.value.length + " 个文件")
     else ElMessage.warning("部署未完全成功，查看日志")
     deployDialog.value = false
     loadServerStatus()
@@ -552,12 +620,32 @@ async function loadIsos() {
 async function loadMedia() {
   try { mediaList.value = await http.get("/it/pxe/media/list") } catch(e) {}
 }
+// ★ 外部审查 U5-F10：改前 `row._osType || "ubuntu"`、`row._osVer || "22.04"` —— 忘了选系统
+//   类型就会把 RHEL 镜像提取到 ubuntu/22.04/，之后按模板版本永远找不到介质（提取是长任务，
+//   错一次要重跑）。现在：值必须显式给，且先在确认框里把**目标目录**写出来。
+const extractConfirm = ref({ visible: false, row: null })
+
+function askExtract(row) {
+  const osType = (row._osType || "").trim()
+  const osVer = (row._osVer || "").trim()
+  if (!osType) { ElMessage.warning("请先选择这个 ISO 的系统类型（Ubuntu / RHEL）"); return }
+  if (!osVer) { ElMessage.warning("请先填写版本号（必须与模板里的版本完全一致，否则装机 404）"); return }
+  extractConfirm.value = { visible: true, row }
+}
+
 async function extractIso(row) {
+  const osType = (row._osType || "").trim()
+  const osVer = (row._osVer || "").trim()
+  if (!osType || !osVer) {
+    // 纵深：即使别处再调用本函数，也绝不回退到与镜像无关的默认值
+    ElMessage.error("系统类型与版本都必须显式填写，不能留空（不再回退 ubuntu/22.04）")
+    return
+  }
   row._extracting = true
   extractLog.value = []
   try {
     const r = await http.post("/it/pxe/iso/" + encodeURIComponent(row.name) + "/extract", {
-      os_type: row._osType || "ubuntu", os_version: row._osVer || "22.04"
+      os_type: osType, os_version: osVer
     })
     extractLog.value = r.log || []
     if (r.ok) { ElMessage.success("提取完成"); loadServerStatus() }
@@ -798,51 +886,63 @@ async function delProfile(id) {
   loadProfiles()
 }
 
+// 生成弹窗：默认内核路径必须来自**真实介质**，不能写死 22.04/rhel9
+// ★ 外部审查 U5-F6：改前固定填 `ubuntu/22.04/vmlinuz` / `rhel/9/vmlinuz`，与模板的
+//   os_version 及已提取介质目录无关 —— 模板是 ubuntu/24.04 时生成的 iPXE 指向不存在的
+//   vmlinuz，机器端只报 "Could not boot image"，与本页自己写的契约（版本对不上就是 404）
+//   直接矛盾。现在按 os_type + os_version 从 /it/pxe/media/list 里取真实存在的介质；
+//   取不到就**留空**（后端 `_to_pxeconfig` 会按模板版本推导），并在弹窗里明确提示。
+function mediaFor(row) {
+  const list = (mediaList.value.media || []).filter(m => m.os_type === row.os_type)
+  const exact = list.filter(m => String(m.os_version) === String(row.os_version))
+  return exact.find(m => m.complete) || exact[0]
+      || list.find(m => m.complete) || list[0] || null
+}
+
+function mediaDefaults(row) {
+  const m = mediaFor(row)
+  if (!m) {
+    return {
+      kernel_path: "", initrd_path: "", squashfs_path: "",
+      note: `没有 ${row.os_type}/${row.os_version}/ 的引导介质：内核路径留空，由后端按模板版本推导。`
+          + `若后端也找不到，iPXE 会报 "Could not boot image" —— 请先在下面的 ISO 管理里提取介质。`,
+    }
+  }
+  const base = m.os_type + "/" + m.os_version + "/"
+  const files = m.files || []
+  return {
+    kernel_path: m.kernel ? base + m.kernel : "",
+    initrd_path: m.initrd ? base + m.initrd : "",
+    // squashfs 只是 Ubuntu 的 casper 介质；目录里没有就留空（不编一个不存在的文件名）
+    squashfs_path: files.includes("installer.squashfs") ? base + "installer.squashfs" : "",
+    note: (m.os_type === row.os_type && String(m.os_version) === String(row.os_version))
+      ? ""
+      : `模板版本 ${row.os_type}/${row.os_version} 没有介质，已临时改用实际存在的 ${m.os_type}/${m.os_version}/。`
+        + `若这不是你要装的版本，请先在下面「ISO 镜像管理」里把 ${row.os_type}/${row.os_version} 的介质提取出来再重新生成。`,
+  }
+}
+
 function openGenDialog(row) {
   genForm.hostname = "server01"
   genForm.server_ip = ""
   genForm.http_root = ""
-  if (row.os_type === "ubuntu") {
-    genForm.kernel_path = "ubuntu/22.04/vmlinuz"
-    genForm.initrd_path = "ubuntu/22.04/initrd"
-    genForm.squashfs_path = "ubuntu/22.04/installer.squashfs"
-  } else {
-    genForm.kernel_path = "rhel/9/vmlinuz"
-    genForm.initrd_path = "rhel/9/initrd.img"
-    genForm.squashfs_path = ""
-  }
+  const d = mediaDefaults(row)
+  genForm.kernel_path = d.kernel_path
+  genForm.initrd_path = d.initrd_path
+  genForm.squashfs_path = d.squashfs_path
+  genMediaNote.value = d.note
   genDialog.value = true
   genFiles.value = {}
+  genKey.value = ""
   sessionStorage.setItem("pxe_profile_id", row.id)
   doGenerate()
 }
 
-async function doGenerate() {
-  generating.value = true
-  try {
-    const pid = sessionStorage.getItem("pxe_profile_id")
-    const body = {
-      hostname: genForm.hostname,
-      server_ip: genForm.server_ip,
-      http_root: genForm.http_root,
-      kernel_path: genForm.kernel_path,
-      initrd_path: genForm.initrd_path,
-      squashfs_path: genForm.squashfs_path,
-      deploy_mode: genForm.deploy_mode,
-      installs: installs.value.map(i => ({ mac: i.mac, hostname: i.hostname })),
-    }
-    const res = await http.post("/it/pxe/profiles/" + pid + "/generate", body)
-    genFiles.value = res.files
-    const keys = Object.keys(res.files)
-    if (keys.length) activeFile.value = keys[0]
-    ElMessage.success("生成完成: " + keys.length + " 个文件")
-  } finally { generating.value = false }
-}
-
-async function doDownload() {
-  const pid = sessionStorage.getItem("pxe_profile_id")
-  // 只有真拿到 ZIP 才提示"下载已开始"（外部审查 U5-F3）
-  const ok = await downloadZip("/it/pxe/profiles/" + pid + "/download", {
+// ★ 外部审查 U5-F7：把"生成时用的那一套参数（含 installs 快照）"记下来，下载/部署前先核对。
+//   改前 doGenerate 与 doDownload 各自现取 `installs.value`，而后台 10s 轮询会刷新它 ——
+//   于是「下载的 ZIP 里 MAC→主机名映射」与屏幕上核对过的预览可能不是同一份。
+function genBody() {
+  return {
     hostname: genForm.hostname,
     server_ip: genForm.server_ip,
     http_root: genForm.http_root,
@@ -851,7 +951,35 @@ async function doDownload() {
     squashfs_path: genForm.squashfs_path,
     deploy_mode: genForm.deploy_mode,
     installs: installs.value.map(i => ({ mac: i.mac, hostname: i.hostname })),
-  })
+  }
+}
+const genBodyKey = computed(() => JSON.stringify(genBody()))
+const genStale = computed(() =>
+  !!Object.keys(genFiles.value).length && genBodyKey.value !== genKey.value)
+
+async function doGenerate() {
+  generating.value = true
+  const seq = ++genSeq
+  try {
+    const pid = sessionStorage.getItem("pxe_profile_id")
+    const body = genBody()
+    const key = JSON.stringify(body)
+    const res = await http.post("/it/pxe/profiles/" + pid + "/generate", body)
+    if (seq !== genSeq) return          // 期间又发起了新的生成 ⇒ 丢弃这次响应
+    genFiles.value = res.files
+    genKey.value = key
+    const keys = Object.keys(res.files)
+    if (keys.length) activeFile.value = keys[0]
+    ElMessage.success("生成完成: " + keys.length + " 个文件")
+  } finally { if (seq === genSeq) generating.value = false }
+}
+
+async function doDownload() {
+  // 预览已被参数/装机记录变化作废时必须先重新生成（否则"审核的不是下载的"）
+  if (genStale.value) { ElMessage.warning("参数或装机记录已变化，请先点「生成文件」再下载"); return }
+  const pid = sessionStorage.getItem("pxe_profile_id")
+  // 只有真拿到 ZIP 才提示"下载已开始"（外部审查 U5-F3）
+  const ok = await downloadZip("/it/pxe/profiles/" + pid + "/download", genBody())
   if (ok !== true) return
   ElMessage.success("下载已开始")
 }

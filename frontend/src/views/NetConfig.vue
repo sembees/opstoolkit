@@ -28,7 +28,12 @@
         </div>
 
         <!-- 中11：元数据没拿到就阻止提交（不再拿硬编码默认值去提交） -->
-        <el-alert v-if="metaError" type="error" :closable="false" show-icon style="margin-bottom:8px"
+        <!-- U5-F12：区分"还在加载"和"加载失败" —— 改前用加载中触发一次预览就会把
+             "加载失败"写死，而加载成功后没人清它，红色横幅（写着"已禁止提交"）会一直挂着，
+             与实际已经能生成的状态相反。 -->
+        <el-alert v-if="metaLoading" type="info" :closable="false" show-icon style="margin-bottom:8px"
+                  title="正在加载网络配置元数据（os / 格式 选项）…" />
+        <el-alert v-else-if="metaError" type="error" :closable="false" show-icon style="margin-bottom:8px"
                   :title="metaError + '：已禁止提交，请刷新页面后重试'" />
 
         <!-- 高1：后端 422 的 detail 直接显示给运维（含 interfaces[0].gateway 这类字段路径） -->
@@ -180,7 +185,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import http from "../api"
+import http, { flattenDetail } from "../api"
 
 const meta = reactive({ os_options: [], formats: [], bond_modes: [], netplan_renderers: [] })
 const config = reactive({ os: "rhel", format: "nmcli", hostname: "", netplan_renderer: "networkd" })
@@ -190,10 +195,15 @@ const previewFilename = ref("")
 const previewKey = ref("")          // 生成当前预览所用的 payload 指纹（所见即所得的依据）
 const generating = ref(false)
 const metaLoaded = ref(false)
+const metaLoading = ref(true)       // U5-F12：区分"还在加载"与"加载失败"
 const metaError = ref("")
 const serverError = ref("")
 // 跨模块一致性提示（H）：静态 IP 落在 PXE/ZTP 的 DHCP 池内 → 可能两台机器同 IP
 const crossWarnings = ref([])
+// U5-F11：预览请求序号（只接受最新一次请求的结果，旧请求的失败不能清掉新预览）
+let previewSeq = 0
+// 在途请求计数：控制"生成"按钮的 loading 状态（失败后必须能再点，见 doGenerate 的注释）
+let previewInFlight = 0
 
 let previewTimer = null
 function preview() {
@@ -394,34 +404,29 @@ const previewStale = computed(() => !!previewScript.value && payloadKey.value !=
 const previewValid = computed(() => !!previewScript.value && !previewStale.value && !serverError.value)
 
 function invalidatePreview() {
+  previewSeq++                  // 让在途请求的响应失效（U5-F11）
   previewScript.value = ""
   previewFilename.value = ""
   previewKey.value = ""
   crossWarnings.value = []      // 预览失效时提示也得跟着失效，不能留着上一轮的告警
 }
 
-// 把 FastAPI 422 的 detail（list[{loc,msg}] 或 str）拍平成一行，保留字段路径
+// 把 FastAPI 422 的 detail（list[{loc,msg}] 或 str）拍平成一行，保留字段路径。
+// U5-F9：与拦截器/下载/ZTP 部署日志共用同一实现，避免同一错误各处显示不一致。
 function _errText(e) {
-  const detail = e?.response?.data?.detail
-  if (typeof detail === "string") return detail
-  if (Array.isArray(detail)) {
-    return detail.map(d => {
-      if (d && d.loc) {
-        const loc = d.loc.filter(x => x !== "body").join(".")
-        return (loc ? loc + ": " : "") + (d.msg || "")
-      }
-      return typeof d === "string" ? d : JSON.stringify(d)
-    }).join("\n")
-  }
-  return detail ? JSON.stringify(detail) : (e?.message || "请求失败")
+  return flattenDetail(e?.response?.data?.detail, e?.message || "请求失败", "\n")
 }
 
 async function doGenerate() {
   clearTimeout(previewTimer)
   serverError.value = ""
   if (!metaLoaded.value) {
-    // 中11：不拿硬编码默认值去提交后端不认识的 os/format
-    metaError.value = metaError.value || "网络配置元数据加载失败（os / 格式 下拉为空）"
+    // 中11：不拿硬编码默认值去提交后端不认识的 os/format。
+    // U5-F12：只有"加载已结束且失败"才写成错误 —— 加载中触发预览（刚进页面就在主机名框里
+    // 打字）不能把"还在加载"当"加载失败"，而那句错误以前没人清，会一直挂在页面上。
+    if (!metaLoading.value) {
+      metaError.value = metaError.value || "网络配置元数据加载失败（os / 格式 下拉为空）"
+    }
     invalidatePreview()
     return
   }
@@ -432,10 +437,18 @@ async function doGenerate() {
   const payload = buildPayload()
   const key = JSON.stringify(payload)
   if (key === previewKey.value && previewScript.value) return   // 参数没变，不重复请求
-  generating.value = true
+  // ★ 外部审查 U5-F11：请求序号。参数 A 的慢请求回来时参数早已是 B ——
+  //   改前它会在 catch 里 invalidatePreview() 并报"生成失败"，把 B 的**合法**预览清掉，
+  //   运维看到的是"当前参数不合法"（其实合法），还要再动一下参数才能恢复。
+  const seq = ++previewSeq
+  previewInFlight++                 // 用**计数**而不是序号控制 loading 状态：
+  generating.value = true           // invalidatePreview() 也会推进 previewSeq，
+                                    // 若用 `seq === previewSeq` 判断，一次失败就会让
+                                    // 生成按钮永远停在 loading（= 永久禁用）—— 那是比原缺陷更糟的回归。
   try {
     // _silent：错误提示由下面的常驻告警统一给出，避免 toast 一闪而过
     const resp = await http.post("/it/netconfig/generate", payload, { _silent: true })
+    if (seq !== previewSeq) return          // 期间又发起了新请求 ⇒ 丢弃这次响应
     previewScript.value = resp.script
     previewFilename.value = resp.filename
     previewKey.value = key
@@ -443,11 +456,13 @@ async function doGenerate() {
     // 只是提示（不同网段/不同现场时是正常用法），所以不拦、不清空预览。
     crossWarnings.value = resp.warnings || []
   } catch (e) {
+    if (seq !== previewSeq) return          // 旧请求的失败不能动新请求的预览
     // 高1：失败必须让运维看见，并且不能留着上一次的预览假装成功
     invalidatePreview()
     serverError.value = _errText(e)
   } finally {
-    generating.value = false
+    previewInFlight = Math.max(0, previewInFlight - 1)
+    if (previewInFlight === 0) generating.value = false
   }
 }
 
@@ -476,8 +491,11 @@ onMounted(async () => {
     if (!meta.netplan_renderers.some(r => r.id === config.netplan_renderer)) config.netplan_renderer = meta.netplan_renderers[0]?.id || config.netplan_renderer
     metaLoaded.value = !!(meta.os_options.length && meta.formats.length)
     if (!metaLoaded.value) metaError.value = "后端未返回 os / format 选项"
+    else metaError.value = ""      // U5-F12：加载成功必须清掉之前的错误，否则横幅常驻
   } catch (e) {
     metaError.value = "网络配置元数据加载失败（os / 格式 下拉为空）"
+  } finally {
+    metaLoading.value = false      // 加载结束（成功或失败）—— 之后才允许报"加载失败"
   }
   addItem("iface")
   addItem("bond")

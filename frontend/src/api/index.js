@@ -12,6 +12,28 @@ http.interceptors.request.use((config) => {
   return config
 })
 
+// FastAPI 的校验错误 detail 是**列表**（每项带 loc/msg）。直接丢给 ElMessage 会显示成
+// [object Object]，运维只知道"失败"却不知道错在哪个字段 —— 这里拍平成一行，
+// 并保留 loc 里的字段路径（例如 disk_config.partitions.2.fstype: 不在白名单内）。
+//
+// 外部审查 U5-F9：这段逻辑以前在拦截器、downloadZip、NetConfig、Ztp 各抄了一份，
+// 同一个 422 在不同地方显示成不同样子（有的拍平、有的渲染成 JSON）。统一到这里。
+export function flattenDetail(detail, fallback = '请求失败', sep = '；') {
+  if (typeof detail === 'string') return detail || fallback
+  if (Array.isArray(detail)) {
+    const text = detail.map((d) => {
+      if (d && d.loc) {
+        const loc = d.loc.filter((x) => x !== 'body').join('.')
+        return (loc ? loc + ': ' : '') + (d.msg || '')
+      }
+      return typeof d === 'string' ? d : JSON.stringify(d)
+    }).join(sep)
+    return text || fallback
+  }
+  if (detail && typeof detail === 'object') return JSON.stringify(detail)
+  return fallback
+}
+
 http.interceptors.response.use(
   (res) => res.data,
   (err) => {
@@ -20,21 +42,7 @@ http.interceptors.response.use(
       localStorage.removeItem('opstk_user')
       if (location.pathname !== '/login') location.href = '/login'
     }
-    // FastAPI 的校验错误 detail 是**列表**（每项带 loc/msg）。直接丢给 ElMessage 会显示成
-    // [object Object]，运维只知道"保存失败"却不知道错在哪个字段 —— 所以这里拍平成一行，
-    // 并保留 loc 里的字段路径（例如 disk_config.partitions.2.fstype: 不在白名单内）。
-    let msg = err.response?.data?.detail ?? err.message ?? '请求失败'
-    if (Array.isArray(msg)) {
-      msg = msg.map((d) => {
-        if (d && d.loc) {
-          const loc = d.loc.filter((x) => x !== 'body').join('.')
-          return (loc ? loc + ': ' : '') + (d.msg || '')
-        }
-        return typeof d === 'string' ? d : JSON.stringify(d)
-      }).join('；')
-    } else if (msg && typeof msg === 'object') {
-      msg = JSON.stringify(msg)
-    }
+    const msg = flattenDetail(err.response?.data?.detail, err.message || '请求失败')
     if (!err.config?._silent) {
       ElMessage.error(msg)
     }
@@ -74,11 +82,8 @@ export async function downloadZip(url, body) {
       const text = await res.text()
       try { detail = JSON.parse(text).detail } catch (e) { detail = text }
     } catch (e) { /* 读不出来就算了，下面给状态码 */ }
-    if (Array.isArray(detail)) {
-      detail = detail.map((d) => (d && d.loc ? d.loc.join('.') + ': ' : '') + ((d && d.msg) || '')).join('；')
-    } else if (detail && typeof detail === 'object') {
-      detail = JSON.stringify(detail)
-    }
+    // 与拦截器同一套拍平（U5-F9）
+    detail = flattenDetail(detail, '')
     ElMessage.error('下载失败(' + res.status + ')：' + (detail || '后端未给出原因'))
     return false
   }

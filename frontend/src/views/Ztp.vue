@@ -410,7 +410,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from "vue"
-import http, { downloadZip } from "../api"
+import http, { downloadZip, flattenDetail } from "../api"
 import { ElMessage } from "element-plus"
 
 const serverStatus = ref({})
@@ -774,8 +774,12 @@ async function doDeploy() {
     deployOk.value = false
     // 后端 ok=False 时返回 500 + detail（与 PXE 的 /deploy 同口径）；
     // axios 的 e.message 只有一句泛泛的英文，运维要的是后端那句中文原因。
+    // ★ 外部审查 U5-F9：FastAPI 的校验错误 detail 是 list[{loc,msg}]，改前被原样塞进
+    //   日志区、`{{ ln }}` 渲染成一坨缩进 JSON，而同一个错误在 toast 里（拦截器）却是
+    //   拍平过的 "server_ip: ..." —— 两处口径不一致。这里复用同一套拍平（api.flattenDetail）。
     const detail = e?.response?.data?.detail
-    deployResult.value = Array.isArray(detail) ? detail : [detail || e.message || "部署请求失败"]
+    deployResult.value = flattenDetail(detail, (e && e.message) || "部署请求失败", "\n")
+      .split("\n").filter(Boolean)
     ElMessage.error("部署失败")
   } finally {
     deploying.value = false
@@ -786,6 +790,9 @@ async function loadTemplates() { templates.value = await http.get("/ct/ztp/templ
 async function loadDevices() { devices.value = await http.get("/ct/ztp/devices") }
 
 async function loadServerStatus() {
+  // ★ 外部审查 U5-F5：轮询链只能有一条（同 Pxe.vue —— controlService 也会调本函数，
+  //   不先清掉待执行的定时器就会每点一次多一条链，卸载时只停得掉一条）。
+  clearTimeout(serverPollTimer)
   try { serverStatus.value = await http.get("/ct/ztp/server/status") } catch (e) {}
   serverPollTimer = setTimeout(loadServerStatus, 5000)
 }
