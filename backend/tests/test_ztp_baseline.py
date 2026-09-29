@@ -197,3 +197,84 @@ class CiscoBaselineTest(unittest.TestCase):
     def test_vlan_created_before_svi(self):
         out = cisco_config(DEV, prof("cisco", mgmt_interface="Vlan10", vlans=[]))
         self.assertLess(out.index("vlan 10"), out.index("interface Vlan10"))
+
+
+class MgmtInterfaceShapeTest(unittest.TestCase):
+    """U3-2nd-F6：管理接口必须是 VLAN 接口（物理口 fail-closed）。
+
+    改前的行为：`_vlan_id_of_interface` 用 `(\\d+)$` 从 `GigabitEthernet1/0/24` 抠出 24，
+    于是模板里写"把管理 IP 配在这个物理口上"，生成出来的却是「新建 vlan 24 + 把上联/接入口
+    划进 VLAN 24 + 在物理口上配 IP」—— 端口被挪出它原本的 VLAN（上联口可能就是 trunk），
+    而 Comware 上物理口默认是二层口，`ip address` 不生效（要先 `port link-mode route`）。
+    """
+
+    PHYSICAL = ("GigabitEthernet1/0/24", "Ten-GigabitEthernet1/0/1", "GE1/0/24",
+                "M-GigabitEthernet0/0/0", "MEth0/0/0")
+
+    def test_physical_mgmt_interface_is_rejected_for_every_vendor(self):
+        for vendor, fn in (("h3c", h3c_config), ("huawei", huawei_config),
+                           ("huawei-ce", huawei_config), ("cisco", cisco_config)):
+            for iface in self.PHYSICAL:
+                with self.subTest(vendor=vendor, iface=iface):
+                    with pytest.raises(ValueError) as e:
+                        fn(DEV, prof(vendor, mgmt_interface=iface))
+                    msg = str(e.value)
+                    self.assertIn("物理口", msg)
+                    self.assertIn("Vlan-interface", msg)
+
+    def test_vlan_interface_forms_are_accepted(self):
+        for vendor, fn, iface in (("h3c", h3c_config, "Vlan-interface10"),
+                                  ("huawei", huawei_config, "Vlanif10"),
+                                  ("huawei-ce", huawei_config, "Vlanif10"),
+                                  ("cisco", cisco_config, "Vlan10")):
+            with self.subTest(vendor=vendor, iface=iface):
+                out = fn(DEV, prof(vendor, mgmt_interface=iface))
+                self.assertIn("interface " + iface, out)
+
+    def test_empty_mgmt_interface_is_derived_from_mgmt_vlan(self):
+        """空值不能再生成 `interface `（一个没有名字的接口，设备必拒）——按厂商推导 SVI。"""
+        for vendor, fn, expect in (("h3c", h3c_config, "Vlan-interface10"),
+                                   ("huawei", huawei_config, "Vlanif10"),
+                                   ("huawei-ce", huawei_config, "Vlanif10"),
+                                   ("cisco", cisco_config, "Vlan10")):
+            with self.subTest(vendor=vendor):
+                out = fn(DEV, prof(vendor, mgmt_interface="", mgmt_vlan=10))
+                self.assertIn("interface " + expect, out)
+                self.assertNotIn("interface \n", out)
+
+    def test_generate_all_rejects_physical_mgmt_interface(self):
+        """同一道闸也在 generate_all 这条主路径上（API 用的就是它）。"""
+        from app.ct.ztp.generator import generate_all
+        with pytest.raises(ValueError) as e:
+            generate_all(prof("h3c", mgmt_interface="GigabitEthernet1/0/24"), [DEV])
+        self.assertIn("物理口", str(e.value))
+
+    def test_no_fake_vlan_is_created_for_physical_interface(self):
+        """反向确认：拒绝发生在**生成任何行之前**（不会先建一个 VLAN 24 再报错）。"""
+        from app.ct.ztp.generator import generate_all
+        try:
+            files = generate_all(prof("h3c", mgmt_interface="GigabitEthernet1/0/24"), [DEV])
+        except ValueError:
+            files = {}
+        self.assertEqual(files, {})
+
+    def test_schema_rejects_physical_mgmt_interface_at_save_time(self):
+        """入口也该拦（保存期 422 + 字段路径），别等到生成/部署期才炸。"""
+        from app.core.schemas import ZtpTemplateIn
+        with pytest.raises(ValueError) as e:
+            ZtpTemplateIn(name="t", vendor="h3c", mgmt_interface="GigabitEthernet1/0/24")
+        self.assertIn("VLAN 接口", str(e.value))
+        for ok in ("Vlan-interface10", "Vlanif10", "Vlan10", ""):
+            with self.subTest(ok=ok):
+                self.assertEqual(
+                    ZtpTemplateIn(name="t", vendor="h3c", mgmt_interface=ok).mgmt_interface, ok)
+        with pytest.raises(ValueError):
+            ZtpTemplateIn(name="t", vendor="h3c",
+                          mgmt_interface="Vlan-interface10\nip route-static 0.0.0.0/0 1.2.3.4")
+
+    def test_generator_rejects_control_chars_in_mgmt_interface(self):
+        """绕过 schema 直接调生成器时也要挡住（第 3 层）。"""
+        from app.ct.ztp.generator import generate_all
+        with pytest.raises(ValueError) as e:
+            generate_all(prof("h3c", mgmt_interface="Vlan-interface10\nsysname pwned"), [DEV])
+        self.assertIn("控制字符", str(e.value))

@@ -114,7 +114,10 @@ def _require_clean(value, field, allow_space=True):
 
 
 def _check_profile_values(p):
-    """模板里的"单值"字段统一过一遍（domain/SNMP/NTP/用户名/口令）。"""
+    """模板里的"单值"字段统一过一遍（domain/SNMP/NTP/用户名/口令/管理接口）。
+
+    返回值是把管理接口归一/推导后的名字，并写回 `p`（空值按厂商补 SVI 形式）。
+    """
     for name, val, allow_space in (("domain_name", p.domain_name, True),
                                    ("snmp_community", p.snmp_community, True),
                                    ("ntp_server", p.ntp_server, True),
@@ -122,6 +125,52 @@ def _check_profile_values(p):
                                    ("admin_password", p.admin_password, False)):
         if val:
             _require_clean(val, "模板字段 " + name, allow_space=allow_space)
+    p.mgmt_interface = _require_vlan_mgmt_interface(p)
+    return p.mgmt_interface
+
+
+# 管理接口必须是** VLAN 接口**（SVI）：`Vlan-interface10`(Comware) / `Vlanif10`(VRP8) / `Vlan10`(IOS)。
+_VLAN_IFACE_PREFIXES = ("vlan-interface", "vlanif", "vlan")
+
+
+def _is_vlan_interface(iface: str) -> bool:
+    return (iface or "").strip().lower().startswith(_VLAN_IFACE_PREFIXES)
+
+
+def _require_vlan_mgmt_interface(p) -> str:
+    """管理接口名：空 → 按厂商 + 管理 VLAN 推导 SVI；物理口 → 拒绝（外部审查 U3-2nd-F6）。
+
+    为什么要拒绝物理口（不是嫌麻烦）：改前的行为是**从接口名尾部抠数字当 VLAN 号**
+    （`GigabitEthernet1/0/24` → VLAN 24），于是模板里明明写的是"把管理 IP 配在这个物理口上"，
+    生成出来的却是「凭空新建 `vlan 24` + 把上联/接入口划进 VLAN 24 + 在 GE1/0/24 上配 IP」——
+    端口会因此被挪出它原本的 VLAN（上联口可能就是 trunk），而 Comware 上物理口默认是二层口，
+    `ip address` 根本不生效（要先把端口切三层：`port link-mode route`；VRP8 是 `undo portswitch`）。
+    也就是"看着对、其实把网络改坏"的那种配置。
+
+    物理口做管理口是**合法设计**，但要按平台补切三层的命令；这条路径本会话没在真机上验证过，
+    所以这里 fail-closed 并给出替代做法，而不是继续生成一份错的配置。
+    """
+    iface = (getattr(p, "mgmt_interface", "") or "").strip()
+    if iface:
+        # 第 3 层兜底：接口名会原样拼进设备命令行 —— 换行即注入一整条命令
+        iface = _require_clean(iface, "管理接口")
+    vendor = _norm_vendor(getattr(p, "vendor", "h3c"))
+    if not iface:
+        vid = int(getattr(p, "mgmt_vlan", 0) or 1)
+        tmpl = {"huawei": "Vlanif%d", "huawei-ce": "Vlanif%d", "cisco": "Vlan%d"}.get(
+            vendor, "Vlan-interface%d")
+        return tmpl % vid
+    if not _is_vlan_interface(iface):
+        raise ValueError(
+            "模板的「管理接口」填的是物理口 %r，而本生成器只支持**VLAN 接口**"
+            "（Vlan-interface10 / Vlanif10 / Vlan10）。原因：物理口做三层口要按平台先切模式"
+            "（Comware `port link-mode route`、VRP8 `undo portswitch`）再配 IP，这条路径尚未在"
+            "真机上验证；而改前的做法是从接口名尾部抠出数字当 VLAN 号（GE1/0/24 → VLAN 24），"
+            "会凭空新建 VLAN 并把上联/接入口划过去 —— 那等于把你的网络改坏。"
+            "请二选一：① 管理 IP 放在 VLAN 接口上（推荐，把这里改成 Vlan-interface<管理VLAN号>）；"
+            "② 这段物理口配置手工写。" % iface
+        )
+    return iface
 
 
 def _file_stem(dev) -> str:

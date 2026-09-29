@@ -122,10 +122,10 @@ def read_leases() -> tuple:
     ), []
 
 
-# 表头别名（小写比较；包含匹配，顺序即优先级 —— "mgmt_ip"/"管理ip" 必须排在 "ip" 前）
+# 表头别名（小写比较；顺序即优先级 —— "mgmt_ip"/"管理ip" 必须排在 "ip" 前）
 _FIELD_SYNONYMS = (
     ("position", ("position", "落位", "机位", "位置")),
-    ("mgmt_ip", ("mgmt_ip", "管理ip", "管理地址", "规划ip", "ip")),
+    ("mgmt_ip", ("mgmt_ip", "management_ip", "管理ip", "管理地址", "规划ip", "ip")),
     ("hostname", ("hostname", "主机名", "主机")),
     ("serial", ("serial", "序列号", "sn")),
     ("mac", ("mac",)),
@@ -134,21 +134,78 @@ _FIELD_SYNONYMS = (
 # 无表头时的固定列顺序：落位, 管理IP, 主机名, 序列号, MAC, 备注
 _FIELDS = ("position", "mgmt_ip", "hostname", "serial", "mac", "remark")
 
+# 表头判定用的"落位"线索：**必须与 position 的别名同一套**。
+# 改前只认 "position"/"落位"，于是表头写成「机位,…」或「位置,…」时不认表头 ⇒
+# 整表按固定列序解析（列序一变就错位），且表头行本身被当成数据、报一条误导性的
+# 「管理 IP 非法：管理IP」。
+_HEADER_HINTS = ("position", "落位", "机位", "位置")
+
+# 带外管理/其它协议的列名：里面恰好含 `ip` / `sn` 这类**短**别名，
+# 但绝不能当成管理 IP / 序列号（外部审查 U3-2nd-F10 举的例子：`IPMI地址`、`SNMP社区`）。
+_HEADER_DECOYS = ("ipmi", "bmc", "ilo", "idrac", "snmp", "带外", "console", "控制台", "串口")
+
+
+def _norm_cell(cell: str) -> str:
+    """表头单元格归一：去首尾空白、去空格/下划线/连字符/全角空格，转小写。"""
+    s = (cell or "").strip().lower()
+    for ch in (" ", "_", "-", "　", "\t"):
+        s = s.replace(ch, "")
+    return s
+
+
+def _is_ascii_alnum(ch: str) -> bool:
+    return ch.isascii() and ch.isalnum()
+
 
 def _header_key(cell_lower: str):
+    """表头单元格 → 字段名；认不出返回 None（外部审查 U3-2nd-F10）。
+
+    匹配顺序：
+      1. **归一后精确相等**（`管理ip` / `管理 IP` / `管理_ip` 都算）；
+      2. 否则子串匹配，但要过两道闸：
+         · 单元格不能是带外/其它协议的列（见 `_HEADER_DECOYS`）；
+         · 别名长度 ≥ 4 直接认；**长度 ≤ 3 的短别名**（`ip`/`sn`/`mac`）必须被
+           非字母数字边界围住 —— `IP地址` 认、`IPMI地址` 不认、`SN号` 认、`SNMP社区` 不认。
+      3. 多个别名命中时取**最长**的那个（`管理ip` 优于 `ip`）。
+    改前只做"按别名表顺序、任意子串"匹配，于是 `IPMI地址` 命中 `ip` 变成管理 IP、
+    `SNMP社区` 命中 `sn` 变成序列号，而真正的「管理IP」列因为 key 已被占用被丢弃 ——
+    导入一批张冠李戴的数据，接口还报成功。
+    """
+    cell = (cell_lower or "").strip()
+    if not cell:
+        return None
+    norm = _norm_cell(cell)
+    if not norm:
+        return None
     for key, names in _FIELD_SYNONYMS:
         for name in names:
-            if name and name in cell_lower:
+            if _norm_cell(name) == norm:
                 return key
-    return None
+    if any(d in cell for d in _HEADER_DECOYS):
+        return None
+    best = None   # (别名长度, key)
+    for key, names in _FIELD_SYNONYMS:
+        for name in names:
+            alias = _norm_cell(name)
+            if not alias or alias not in norm:
+                continue
+            if len(alias) <= 3:
+                pos = norm.index(alias)
+                before = norm[pos - 1] if pos > 0 else ""
+                after = norm[pos + len(alias)] if pos + len(alias) < len(norm) else ""
+                if _is_ascii_alnum(after) or (before and _is_ascii_alnum(before)):
+                    continue      # 短别名必须整词出现（前后都不是字母数字）
+            if best is None or len(alias) > best[0]:
+                best = (len(alias), key)
+    return best[1] if best else None
 
 
 def parse_positions_csv(csv_text) -> tuple:
     """解析落位 CSV 文本，返回 (行列表, 错误列表)。
 
-    · 表头可有可无：小写化后包含 `position` 或 `落位` 的第一行当表头（跳过），
-      按表头名映射列（中英文别名都认，缺列补空）；没有表头时列顺序固定为
-      落位, 管理IP, 主机名, 序列号, MAC, 备注；
+    · 表头可有可无：任一个格子带 `position`/`落位`/`机位`/`位置` 线索，或这一行有 ≥2 个
+      格子能认出字段名（中英文别名都认，大小写/空格/下划线不敏感）时，第一行当表头（跳过），
+      按表头名映射列（缺列补空）；没有表头时列顺序固定为 落位, 管理IP, 主机名, 序列号, MAC, 备注；
     · 用 csv 标准库解析（支持引号/逗号转义）；忽略空行；每格 strip 首尾空白；
     · 校验：落位为空 → 报错跳过；管理 IP 用 ipaddress.ip_address() 校验并保留
       原字符串 → 非法则报错跳过；
@@ -163,10 +220,17 @@ def parse_positions_csv(csv_text) -> tuple:
             continue  # 忽略空行
         if colmap is None:
             lowered = [c.lower() for c in cells]
-            if any(("position" in c) or ("落位" in c) for c in lowered):
+            keys = [_header_key(c) for c in lowered]
+            # 表头判定（外部审查 U3-2nd-F10）：
+            #   · 任一个格子带"落位"线索（position/落位/机位/位置）→ 是表头；
+            #   · 或者这一行有 ≥2 个格子能认出字段名（例如只有 管理IP/主机名/MAC 三列、
+            #     没有落位列的表头也能认出来）。
+            # 数据行不会误判：落位编码（A01-03-U12）、IP、主机名、序列号、MAC 里
+            # 都认不出字段名（`SN012` 的 `sn` 后面紧跟数字、`10.0.0.12` 里没有整词的 `ip`）。
+            if (any(h in c for c in lowered for h in _HEADER_HINTS)
+                    or sum(1 for k in keys if k) >= 2):
                 colmap = {}
-                for i, c in enumerate(lowered):
-                    key = _header_key(c)
+                for i, key in enumerate(keys):
                     if key and key not in colmap:
                         colmap[key] = i
                 continue

@@ -1872,6 +1872,32 @@ class ZtpTemplateIn(BaseModel):
     remark: str = ""
 
 
+    # ★ 外部审查 U3-2nd-F6：管理接口必须是 **VLAN 接口**（SVI 形式）。
+    #   物理口做管理口是合法设计，但生成器是"按接口名尾部的数字当 VLAN 号"处理的 ——
+    #   `GigabitEthernet1/0/24` 会被解析出 VLAN 24，于是凭空新建 vlan 24、把上联/接入口
+    #   划进 VLAN 24，再在物理口上配 IP；而 Comware 上物理口默认是二层口，`ip address`
+    #   根本不生效（要先 `port link-mode route`；VRP8 是 `undo portswitch`）。
+    #   改前是**静默生成一份会把网络改坏的配置**（真机上会被拒一句，但更糟的是端口被挪 VLAN）。
+    #   留空允许：生成时按厂商 + 管理 VLAN 推导成 Vlan-interface<N>/Vlanif<N>/Vlan<N>。
+    @field_validator("mgmt_interface")
+    @classmethod
+    def _check_mgmt_interface(cls, v: str) -> str:
+        t = (v or "").strip()
+        if not t:
+            return ""      # 空 = 未填，生成时推导
+        if any(ord(ch) < 32 or ord(ch) == 0x7F for ch in t):
+            raise ValueError("mgmt_interface 不允许包含换行或控制字符（会造成配置注入）")
+        if not t.lower().startswith(("vlan-interface", "vlanif", "vlan")):
+            raise ValueError(
+                f"mgmt_interface 必须是 VLAN 接口（Vlan-interface10 / Vlanif10 / Vlan10），"
+                f"收到 {v!r}：物理口做三层口要按平台先切模式（Comware `port link-mode route`、"
+                f"VRP8 `undo portswitch`）再配 IP，本生成器不支持（改前会从接口名尾部抠数字"
+                f"当成 VLAN 号，凭空新建一个 VLAN 并把上联/接入口划过去）。"
+                f"请改成 Vlan-interface<管理VLAN号>，或把这段物理口配置手工写。"
+            )
+        return t
+
+
 class ZtpTemplateOut(ORMBase):
     id: str
     name: str

@@ -179,6 +179,74 @@ class ParsePositionsCsvTest(unittest.TestCase):
         self.assertEqual(rows[0]["hostname"], "sw9")
         self.assertEqual(rows[0]["remark"], "备注")
 
+    # ---- 外部审查 U3-2nd-F10：表头判定与别名表不一致 + 子串误映射 ----
+
+    def test_header_using_position_aliases_is_recognized(self):
+        """表头写「机位/位置」时也要认出来（改前只认 position/落位）。
+
+        改前的后果：整表按固定列序解析（列序一变就错位），而且表头行本身被当成数据，
+        报一条误导性的「管理 IP 非法：管理IP」。
+        """
+        for head in ("机位", "位置"):
+            with self.subTest(head=head):
+                rows, errors = ztp_positions.parse_positions_csv(
+                    "%s,管理IP,主机名,序列号,MAC,备注\nA01-03-U31,10.0.0.31,sw31,SN31,,x\n" % head)
+                self.assertEqual(errors, [], errors)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["position"], "A01-03-U31")
+                self.assertEqual(rows[0]["mgmt_ip"], "10.0.0.31")
+                self.assertEqual(rows[0]["hostname"], "sw31")
+
+    def test_decoys_are_not_mapped_to_mgmt_ip_or_serial(self):
+        """`IPMI地址` / `SNMP社区` 这类列不能被当成管理 IP / 序列号。
+
+        改前：`"ip" in "ipmi地址"` 为真 ⇒ 该列被当成 mgmt_ip，而**真正的「管理IP」列**
+        因为 key 已被占用被丢弃；`SNMP社区` 命中 `sn` ⇒ 被当成序列号。导入进来一批
+        张冠李戴的数据，接口还报成功。
+        """
+        csv_text = ("落位,IPMI地址,管理IP,SNMP社区,主机名,MAC\n"
+                    "A01-03-U41,192.168.9.9,10.0.0.41,public,sw41,aa:bb:cc:dd:ee:41\n")
+        rows, errors = ztp_positions.parse_positions_csv(csv_text)
+        self.assertEqual(errors, [], errors)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["mgmt_ip"], "10.0.0.41")   # 不是 IPMI 那个地址
+        self.assertEqual(rows[0]["serial"], "")             # 不是 SNMP 团体名
+        self.assertEqual(rows[0]["hostname"], "sw41")
+        self.assertEqual(rows[0]["mac"], "aa:bb:cc:dd:ee:41")
+
+    def test_short_aliases_still_work_at_word_boundary(self):
+        """`IP地址`/`SN号` 这类常见写法仍要认（短别名按整词边界匹配）。"""
+        rows, errors = ztp_positions.parse_positions_csv(
+            "落位,IP地址,SN号,主机名\nA01-03-U51,10.0.0.51,SN51,sw51\n")
+        self.assertEqual(errors, [], errors)
+        self.assertEqual(rows[0]["mgmt_ip"], "10.0.0.51")
+        self.assertEqual(rows[0]["serial"], "SN51")
+
+    def test_header_alias_spacing_and_case_insensitive(self):
+        # 管理 IP 的各种写法（注意：数据行必须有**合法**管理 IP，否则整行被跳过）
+        for head in ("管理 IP", "管理_ip", "管理ip地址", "MANAGEMENT_IP"):
+            with self.subTest(head=head):
+                rows, errors = ztp_positions.parse_positions_csv(
+                    "落位,%s,MAC\nA01-03-U61,10.0.0.61,aa:bb:cc:dd:ee:61\n" % head)
+                self.assertEqual(errors, [], errors)
+                self.assertEqual(rows[0]["mgmt_ip"], "10.0.0.61")
+        # 主机名的大小写/下划线写法
+        for head in ("HostName", "host_name", "主机名"):
+            with self.subTest(head=head):
+                rows, errors = ztp_positions.parse_positions_csv(
+                    "落位,管理IP,%s\nA01-03-U61,10.0.0.61,sw61\n" % head)
+                self.assertEqual(errors, [], errors)
+                self.assertEqual(rows[0]["hostname"], "sw61")
+
+    def test_data_rows_are_not_mistaken_for_headers(self):
+        """无表头时不能被误判成表头（数据行里认不出 ≥2 个字段名）。"""
+        csv_text = ("A01-01-U01,10.9.9.9,sw9,SN9,aa:bb:cc:dd:ee:09,备注\n"
+                    "A01-01-U02,10.9.9.10,sw10,SN10,aa:bb:cc:dd:ee:10,说明\n")
+        rows, errors = ztp_positions.parse_positions_csv(csv_text)
+        self.assertEqual(errors, [], errors)
+        self.assertEqual([r["position"] for r in rows], ["A01-01-U01", "A01-01-U02"])
+        self.assertEqual(rows[1]["mgmt_ip"], "10.9.9.10")
+
 
 class _ApiTestBase(unittest.TestCase):
     """落位 HTTP 接口测试：临时文件 SQLite + 覆盖 JWT/DB 依赖，不碰真实库。
