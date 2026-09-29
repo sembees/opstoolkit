@@ -167,10 +167,17 @@ async def list_devices(db: AsyncSession = Depends(get_db), _user=Depends(get_cur
 
 @router.post("/devices", response_model=ZtpDeviceOut)
 async def create_device(body: ZtpDeviceIn, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    # MAC 与落位接口用**同一套归一/校验**（外部审查 F5）：以前这里原样存库，
+    # 而生成时又原样写进 `dhcp-host=` —— 大写或 aabb.ccdd.eeff 写法的 MAC
+    # 要么让 dnsmasq 配置非法，要么与租约里的归一 MAC 对不上、设备静默只拿到 default.cfg。
     d = models.ZtpDevice(
         template_id=body.template_id,
-        hostname=body.hostname, mac=body.mac, serial=body.serial, mgmt_ip=body.mgmt_ip,
+        hostname=(body.hostname or "").strip(),
+        mac=ztp_positions.norm_mac(body.mac),
+        serial=(body.serial or "").strip(), mgmt_ip=body.mgmt_ip,
     )
+    if (body.mac or "").strip() and not d.mac:
+        raise HTTPException(status_code=422, detail="MAC 格式不正确：%s" % body.mac)
     db.add(d)
     await db.commit()
     await db.refresh(d)
@@ -327,6 +334,17 @@ async def import_positions(body: ZtpImportIn, db: AsyncSession = Depends(get_db)
     if not t:
         raise HTTPException(status_code=404, detail="模板不存在")
     rows, errors = ztp_positions.parse_positions_csv(body.csv)
+    # ⚠ 外部审查 F1（我复核确认，属**数据丢失**级）：`replace=true` 以前是**无条件先删**，
+    # 再按 rows 插入。CSV 用了错的分隔符 / 全部行都非法 / 干脆是空串时 rows 为空，
+    # 于是这次提交等于"纯删除"——整张落位表被清空，接口还返回 200（只显示"跳过 N 行"）。
+    # 现在：没有任何可用行时**直接拒绝**，一行都不删。
+    if body.replace and not rows:
+        raise HTTPException(
+            status_code=422,
+            detail=("replace=true，但这次 CSV 里没有任何一行可用（跳过 %d 行）；"
+                    "为防误清空，**已取消本次导入，未删除任何落位**。"
+                    "请修好 CSV（表头/列顺序/管理 IP）后重试。" % len(errors)),
+        )
     if body.replace:
         res = await db.execute(
             select(models.ZtpPosition).where(models.ZtpPosition.template_id == body.template_id)
@@ -339,25 +357,76 @@ async def import_positions(body: ZtpImportIn, db: AsyncSession = Depends(get_db)
     )
     existing = list(res.scalars().all())
     by_position = {e.position: e for e in existing}
-    by_ip = {(e.mgmt_ip or ""): e for e in existing}
-    by_mac = {(e.mac or ""): e for e in existing if e.mac}
-    created = updated = 0
+
+    # ── 两遍处理：**先算出"这份 CSV 的最终状态"，再落库**。
+    # 为什么不能边遍历边判重（外部审查 F6，我复核后确认第一版修法仍不够）：
+    # 把两条既有落位的管理 IP **互换**时，第一行换过去撞到"当前还属于另一条"的 IP，
+    # 只要拿当前状态判重就必然误报。批内互换是合法操作，必须按"最终状态"判。
+    planned = {}
     for row in rows:
         lineno = row.get("_line", "?")
         position, mgmt_ip = row["position"], row["mgmt_ip"]
-        mac = ztp_positions.norm_mac(row["mac"])
-        target = by_position.get(position)
-        # 管理 IP / MAC 撞到**别的**落位（含同批导入的行）→ 报错跳过：
-        # 否则要么 IntegrityError 500，要么悄悄覆盖别人的规划地址。
-        ip_owner = by_ip.get(mgmt_ip)
-        if ip_owner is not None and (target is None or ip_owner.id != target.id):
-            errors.append("第%s行: 管理 IP %s 与落位 %s 重复" % (lineno, mgmt_ip, ip_owner.position))
+        raw_mac = (row.get("mac") or "").strip()
+        mac = ztp_positions.norm_mac(raw_mac)
+        if raw_mac and not mac:
+            # 写了 MAC 但解析不出来：不能静默当成"没填"（那会让这条落位悄悄保持未认领）
+            errors.append("第%s行: MAC 格式不正确：%s" % (lineno, raw_mac))
             continue
+        planned[position] = {"row": row, "lineno": lineno, "mgmt_ip": mgmt_ip, "mac": mac}
+
+    # 批内唯一：同一 IP / 同一 MAC 出现在两个不同落位 → 报错并丢掉**后出现**的那条
+    ip_seen, mac_seen = {}, {}
+    for position, item in list(planned.items()):
+        ip, mac, ln = item["mgmt_ip"], item["mac"], item["lineno"]
+        if ip in ip_seen:
+            errors.append("第%s行: 管理 IP %s 与落位 %s 在本批次内重复" % (ln, ip, ip_seen[ip]))
+            del planned[position]
+            continue
+        if mac and mac in mac_seen:
+            errors.append("第%s行: MAC %s 与落位 %s 在本批次内重复" % (ln, mac, mac_seen[mac]))
+            del planned[position]
+            continue
+        ip_seen[ip] = position
         if mac:
-            mac_owner = by_mac.get(mac)
-            if mac_owner is not None and (target is None or mac_owner.id != target.id):
-                errors.append("第%s行: MAC %s 已被落位 %s 认领" % (lineno, mac, mac_owner.position))
-                continue
+            mac_seen[mac] = position
+
+    # 批外冲突：被本批"用到"的 IP/MAC 若属于**不在本批里**的既有落位 → 报错
+    batch_positions = set(planned)
+    for e in existing:
+        if e.position in batch_positions:
+            continue
+        if (e.mgmt_ip or "") in ip_seen:
+            owner = ip_seen[e.mgmt_ip or ""]
+            errors.append("第%s行: 管理 IP %s 与落位 %s 重复"
+                          % (planned[owner]["lineno"], e.mgmt_ip, e.position))
+            del planned[owner]
+            batch_positions.discard(owner)
+        if e.mac and e.mac in mac_seen:
+            owner = mac_seen[e.mac]
+            if owner in planned:
+                errors.append("第%s行: MAC %s 已被落位 %s 认领"
+                              % (planned[owner]["lineno"], e.mac, e.position))
+                del planned[owner]
+
+    created = updated = 0
+    # 第一趟：把**要改值**的行先挪到"临时唯一值"。
+    # 为什么必须这样：唯一约束 (template_id, mgmt_ip) 是**立即**生效的（SQLite 没有延迟唯一约束），
+    # 批内互换两条落位的管理 IP 时，第一条 UPDATE 就会撞上第二条**当前**还占着的地址，
+    # 直接 IntegrityError。先挪到 `__tmp__<行id>` 把"值"腾空，第二趟再写最终值。
+    for position, item in planned.items():
+        target = by_position.get(position)
+        if target is None:
+            continue
+        new_ip, new_mac = item["mgmt_ip"], item["mac"]
+        if (target.mgmt_ip or "") != new_ip or (new_mac and (target.mac or "") != new_mac):
+            target.mgmt_ip = "__tmp__%s" % target.id
+            target.mac = ""       # 非空 MAC 的部分唯一索引，空串不参与约束
+    await db.flush()
+
+    # 第二趟：写最终值
+    for position, item in planned.items():
+        row, mgmt_ip, mac = item["row"], item["mgmt_ip"], item["mac"]
+        target = by_position.get(position)
         if target is not None:
             target.hostname = row["hostname"]
             target.serial = row["serial"]
@@ -379,9 +448,6 @@ async def import_positions(body: ZtpImportIn, db: AsyncSession = Depends(get_db)
             db.add(target)
             created += 1
         by_position[position] = target
-        by_ip[mgmt_ip] = target
-        if mac:
-            by_mac[mac] = target
     await db.commit()
     return ZtpImportOut(created=created, updated=updated, skipped=len(errors), errors=errors)
 

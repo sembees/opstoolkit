@@ -87,9 +87,51 @@ def _ntp(p) -> str:
     return (getattr(p, "ntp_server", "") or "").strip()
 
 
+def _require_clean(value, field, allow_space=True):
+    """要拼进 **dnsmasq 配置** 或 **设备命令行** 的"单值"字段必须是干净的。
+
+    为什么 fail-closed 而不是转义（外部审查 F3/F7 指出、我复核确认）：
+      · `option:bootfile-name,"ztp/<stem>.cfg"` 里的引号会截断字符串，**换行**会直接
+        多出**一条新的 dnsmasq 指令**；
+      · `sysname/domain/snmp-agent community` 同理，换行等于向设备开局配置里注入 CLI。
+    最坏情况是注入一条"能过 `dnsmasq --test`、又不落在 6 条红线里"的指令
+    （例如 `dhcp-script=`），而这份配置会随 dnsmasq 生效，影响**整个装机网段**。
+    所以这里直接拒绝：引号、换行、制表、控制字符（口令另加：不允许空格，
+    因为空格会把 CLI 命令拆成两个参数）。
+    """
+    s = "" if value is None else str(value)
+    bad = [ch for ch in s if ch in ('"', "\n", "\r", "\t") or ord(ch) < 32]
+    if not allow_space and any(ch.isspace() for ch in s):
+        bad.append(" ")
+    if bad:
+        raise ValueError(
+            "%s 含不允许的字符（引号/换行/制表/控制字符%s）：%r。"
+            "这些值会被拼进 dnsmasq 配置与设备命令行，换行可以注入额外指令，"
+            "所以不允许出现 —— 请改成单行的普通文本。"
+            % (field, "或空格" if not allow_space else "", s[:60])
+        )
+    return s
+
+
+def _check_profile_values(p):
+    """模板里的"单值"字段统一过一遍（domain/SNMP/NTP/用户名/口令）。"""
+    for name, val, allow_space in (("domain_name", p.domain_name, True),
+                                   ("snmp_community", p.snmp_community, True),
+                                   ("ntp_server", p.ntp_server, True),
+                                   ("admin_user", p.admin_user, False),
+                                   ("admin_password", p.admin_password, False)):
+        if val:
+            _require_clean(val, "模板字段 " + name, allow_space=allow_space)
+
+
 def _file_stem(dev) -> str:
-    """配置文件名主干：优先 serial，其次 hostname。"""
-    return (dev.serial or dev.hostname or "device").strip()
+    """配置文件名主干：优先 serial，其次 hostname。
+
+    **必须过 _require_clean**：这个值会进文件名，而文件名会进 dnsmasq 的
+    `option:bootfile-name,"ztp/<stem>.cfg"` —— 带引号或换行就能注入配置。
+    """
+    stem = (dev.serial or dev.hostname or "device").strip()
+    return _require_clean(stem, "设备文件名主干(serial/hostname)", allow_space=False)
 
 
 def _position_device(pos) -> ZtpDevice:
@@ -134,6 +176,16 @@ def _vlan_id_of_interface(iface, fallback):
     if m:
         return int(m.group(1)), True
     return int(fallback or 1), False
+
+
+def _ports_vlan_id(p) -> int:
+    """接入/上联端口该划进哪个 VLAN —— 必须与 SVI 用**同一个**解析结果。
+
+    外部审查 F4（我复核确认）：`_ensure_vlan_lines_h3c` 按接口名推出 VLAN 100 并建了它，
+    而端口却按 `p.mgmt_vlan`(10) 划 —— 端口与管理口落在不同 VLAN，
+    管理 IP 从接入端口根本不可达，而配置里还有一行"以接口名为准"的注释自相矛盾。
+    """
+    return _vlan_id_of_interface(p.mgmt_interface, p.mgmt_vlan)[0]
 
 
 def _ensure_vlan_lines_h3c(p) -> list:
@@ -253,10 +305,12 @@ def h3c_config(dev, p) -> str:
     ip = dev.mgmt_ip or "10.0.0.1"
     user = p.admin_user or "admin"
     pw = _require_ztp_password(p)
+    _check_profile_values(p)
+    host = _require_clean(dev.hostname, "主机名")
     L = [
         "# H3C Comware 7 开局配置 (OpsToolkit 生成)",
-        f"# host={dev.hostname} mgmt=" + _mgmt_label(dev, ip, p),
-        "sysname " + dev.hostname,
+        f"# host={host} mgmt=" + _mgmt_label(dev, ip, p),
+        "sysname " + host,
         "#",
         "irf mac-address persistent always",
         "irf auto-update enable",
@@ -282,10 +336,10 @@ def h3c_config(dev, p) -> str:
         L.append("# 接入端口划入管理 VLAN")
         for port in p.access_ports:
             L += [f"interface {port}", " port link-mode bridge",
-                  f" port access vlan {p.mgmt_vlan}", "#"]
+                  f" port access vlan {_ports_vlan_id(p)}", "#"]
     if p.uplink_port:
         L += [f"interface {p.uplink_port}", " port link-mode bridge",
-              f" port access vlan {p.mgmt_vlan}", "#"]
+              f" port access vlan {_ports_vlan_id(p)}", "#"]
     dns = " ".join(p.dns_servers) if p.dns_servers else ""
     L += [
         # DHCP 取址时默认路由由 DHCP 给（ZTP 的 dnsmasq 配了 option:router），
@@ -390,11 +444,13 @@ def huawei_config(dev, p, vrp8=False) -> str:
     user = _require_vrp8_username(p) if vrp8 else (p.admin_user or "admin")
     pw = _require_ztp_password(p)
     community = _require_huawei_community(p)
+    _check_profile_values(p)
+    host = _require_clean(dev.hostname, "主机名")
     vlanif = p.mgmt_interface.replace("Vlan-interface", "Vlanif")
     L = [
         "# Huawei VRP 开局配置 (OpsToolkit 生成)",
-        f"# host={dev.hostname} mgmt=" + _mgmt_label(dev, ip, p),
-        "sysname " + dev.hostname,
+        f"# host={host} mgmt=" + _mgmt_label(dev, ip, p),
+        "sysname " + host,
         "#",
     ]
     L += _vlans_block_huawei(p)
@@ -415,10 +471,10 @@ def huawei_config(dev, p, vrp8=False) -> str:
         L.append("# 接入端口划入管理 VLAN")
         for port in p.access_ports:
             L += [f"interface {port}", " port link-type access",
-                  f" port default vlan {p.mgmt_vlan}", "#"]
+                  f" port default vlan {_ports_vlan_id(p)}", "#"]
     if p.uplink_port:
         L += [f"interface {p.uplink_port}", " port link-type access",
-              f" port default vlan {p.mgmt_vlan}", "#"]
+              f" port default vlan {_ports_vlan_id(p)}", "#"]
     L += [
         # DHCP 取址时默认路由由 DHCP 给，不写静态默认路由（理由同 h3c 分支）
         f"ip route-static 0.0.0.0 0.0.0.0 {p.mgmt_gateway}" if not dev.mgmt_via_dhcp else "",
@@ -481,12 +537,14 @@ def cisco_config(dev, p) -> str:
     ip = dev.mgmt_ip or "10.0.0.1"
     user = p.admin_user or "admin"
     pw = _require_ztp_password(p)
+    _check_profile_values(p)
+    host = _require_clean(dev.hostname, "主机名")
     enable = p.enable_secret or pw
     vlanif = p.mgmt_interface.replace("Vlan-interface", "Vlan")
     L = [
         "! Cisco IOS-XE 开局配置 (OpsToolkit 生成)",
-        f"! host={dev.hostname} mgmt=" + _mgmt_label(dev, ip, p),
-        "hostname " + dev.hostname,
+        f"! host={host} mgmt=" + _mgmt_label(dev, ip, p),
+        "hostname " + host,
         "!",
         "no ip domain-lookup",
     ]
@@ -513,10 +571,10 @@ def cisco_config(dev, p) -> str:
         L.append("! 接入端口划入管理 VLAN")
         for port in p.access_ports:
             L += [f"interface {port}", " switchport mode access",
-                  f" switchport access vlan {p.mgmt_vlan}", " no shutdown", "!"]
+                  f" switchport access vlan {_ports_vlan_id(p)}", " no shutdown", "!"]
     if p.uplink_port:
         L += [f"interface {p.uplink_port}", " switchport mode access",
-              f" switchport access vlan {p.mgmt_vlan}", " no shutdown", "!"]
+              f" switchport access vlan {_ports_vlan_id(p)}", " no shutdown", "!"]
     L += [
         # DHCP 取址时默认路由由 DHCP 给，不写静态默认路由（理由同 h3c 分支）
         f"ip route 0.0.0.0 0.0.0.0 {p.mgmt_gateway}" if not dev.mgmt_via_dhcp else "",
@@ -739,12 +797,22 @@ def dnsmasq(p, devices, positions=None) -> str:
     for d in devices:
         stem = _file_stem(d)
         fname = f"ztp/{stem}.{_ext(vendor)}"
-        if d.mac:
-            tag = "tag:set_" + d.mac.replace(":", "").lower()
-            L.append(f"dhcp-host={d.mac},set:set_{d.mac.replace(':', '').lower()}")
+        mac = _norm_mac_text(d.mac)
+        if d.mac and not mac:
+            # 设备清单里的 MAC 写得不对：**不能静默放过**——原样拼进 dhcp-host=
+            # 要么让 dnsmasq 配置非法（部署/重载失败），要么与租约里的归一 MAC 对不上，
+            # 于是设备静默地只拿到 default.cfg 而不是自己的配置（外部审查 F5）。
+            raise ValueError(
+                "设备 %s 的 MAC %r 不是合法 MAC：请写成 aa:bb:cc:dd:ee:ff "
+                "（也接受 AABB.CCDD.EEFF 与 AA-BB-CC-DD-EE-FF 写法）。"
+                % (getattr(d, "hostname", "?"), d.mac)
+            )
+        if mac:
+            tag = "tag:set_" + mac.replace(":", "")
+            L.append(f"dhcp-host={mac},set:set_{mac.replace(':', '')}")
             L.append(f'dhcp-option={tag},option:bootfile-name,"{fname}"')
         else:
-            L.append(f'# {d.hostname}: 缺少 MAC, 使用 default.cfg')
+            L.append(f'# {_require_clean(d.hostname, "主机名")}: 缺少 MAC, 使用 default.cfg')
     # 落位登记（认领后按 MAC 下发各自配置）：设备清单靠手抄 MAC，落位登记不需要 ——
     # MAC 是设备上电后从 DHCP 租约里自动学来的。
     L += build_dnsmasq_lines(positions, vendor=vendor)
@@ -897,6 +965,28 @@ def generate_all(p, devices=None, positions=None):
     devices = devices or []
     positions = list(positions or [])
     pos_devices = [_position_device(x) for x in positions]
+    # 文件名撞名检测（外部审查 F2，我复核确认机制）：
+    # 配置文件名主干来自 serial 或 hostname，而这两者**没有唯一性约束**。
+    # 撞名的后果不是"少生成一个文件"，而是 dict 覆盖 + dnsmasq 把**多个 MAC 指向同一份文件**
+    # ⇒ 两台真机拿到同一份 sysname 与同一个静态管理 IP（网络冲突），而接口报成功。
+    # 落位之间的撞名必须拒绝；"落位覆盖手工登记设备"是既定的兼容行为（有测试锁），保持不变。
+    def _dup_stems(items, label):
+        seen = {}
+        for d in items:
+            stem = _file_stem(d)
+            if stem in seen:
+                raise ValueError(
+                    "ZTP 配置文件名撞名：%s 里的 %r 与 %r 都落在 ztp/%s.cfg。"
+                    "撞名会让它们拿到同一份配置（主机名/管理 IP 都会重复）。"
+                    "请给不同的设备填不同的序列号或主机名。"
+                    % (label, seen[stem], getattr(d, "position", None) or d.hostname,
+                       stem)
+                )
+            seen[stem] = getattr(d, "position", None) or d.hostname
+        return seen
+
+    _dup_stems(list(devices), "设备清单")
+    _dup_stems(pos_devices, "落位登记")
     files = {}
     vendor = _norm_vendor(p.vendor)
     gen = VENDOR_CONFIG.get(vendor, h3c_config)
