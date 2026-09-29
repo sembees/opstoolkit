@@ -7,6 +7,7 @@ import socket
 from urllib.parse import quote, unquote
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crypto, models
@@ -328,7 +329,19 @@ async def create_install(body: PxeInstallIn, db: AsyncSession = Depends(get_db),
         mac=body.mac, ip=body.ip, status="pending",
     )
     db.add(inst)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # 外部审查 U7-F9：同一模板下 MAC 唯一。不接住的话是一个 500，
+        # 而运维真正需要知道的是"这台机器已经登记过了"（重复登记的后果是
+        # 生成器按 MAC 展开的文件互相覆盖，只有一条生效）。
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"该模板下已经登记过 MAC {body.mac} 的装机记录："
+                   f"同一台机器只能有一条（否则按 MAC 生成的菜单/应答文件会互相覆盖）；"
+                   f"请先删除旧记录",
+        )
     await db.refresh(inst)
     return inst
 

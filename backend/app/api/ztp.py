@@ -6,6 +6,7 @@ import ipaddress
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crypto, models
@@ -179,7 +180,18 @@ async def create_device(body: ZtpDeviceIn, db: AsyncSession = Depends(get_db), _
     if (body.mac or "").strip() and not d.mac:
         raise HTTPException(status_code=422, detail="MAC 格式不正确：%s" % body.mac)
     db.add(d)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # 外部审查 U7-F9：同一模板内非空 MAC 唯一。改前是 500，
+        # 而运维需要知道的是"这个 MAC 在本模板下已经登记过"（重复登记会让
+        # dnsmasq 里出现两条互相覆盖的 dhcp-host，设备拿到哪份看遍历顺序）。
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"本模板下已经登记过 MAC {d.mac} 的设备（或落位已认领该 MAC）："
+                   f"请先删除/解除旧记录再登记",
+        )
     await db.refresh(d)
     return d
 

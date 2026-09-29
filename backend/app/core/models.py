@@ -78,8 +78,15 @@ class Asset(Base):
     tags: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
     remark: Mapped[str] = mapped_column(Text, default="")
 
-    credential_id: Mapped[Optional[str]] = mapped_column(ForeignKey("credentials.id"), nullable=True)
-    credential: Mapped[Optional[Credential]] = relationship(back_populates="assets")
+    # ondelete="SET NULL" + passive_deletes（外部审查 U7-F12）：列上原来没有 ondelete，
+    # 而 SQLite 默认**不**开启外键校验，于是"凭据被删、资产还指着它"会留下悬挂引用，
+    # 之后巡检时取不到解密材料，报出来却是一句莫名其妙的认证失败。
+    # 接口层本来就会先校验引用并 409，这里是数据库层的兜底（新库直接生效；
+    # 已有库的列定义改不了，故另外在巡检入口把这种情况说清楚）。
+    credential_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("credentials.id", ondelete="SET NULL"), nullable=True)
+    credential: Mapped[Optional[Credential]] = relationship(
+        back_populates="assets", passive_deletes=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -122,6 +129,15 @@ class PxeProfile(Base):
 class PxeInstall(Base):
     """单台主机装机记录，通过 MAC 关联。"""
     __tablename__ = "pxe_installs"
+    __table_args__ = (
+        # 外部审查 U7-F9：同一模板下同一 MAC 只能有一条装机记录（空 MAC = 还没登记，
+        # 用 partial 唯一索引排除，与 ZtpPosition 同口径）。
+        # 为什么必须唯一：生成器按 MAC 展开文件 key（`boot/<mac_tag>.ipxe`、user-data/<tag>/）
+        # 与 dnsmasq 的 `dhcp-host=` 行 —— 同一个 MAC 两条记录时后一条**静默覆盖**前一条，
+        # 运维看到两条记录却只有一台的配置生效（最坑的是"谁生效取决于遍历顺序"）。
+        Index("uq_pxe_install_profile_mac", "profile_id", "mac", unique=True,
+              sqlite_where=text("mac <> ''")),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     profile_id: Mapped[str] = mapped_column(ForeignKey("pxe_profiles.id", ondelete="CASCADE"), index=True)
@@ -251,6 +267,14 @@ class ZtpTemplate(Base):
 class ZtpDevice(Base):
     """ZTP ??????? MAC/??????????"""
     __tablename__ = "ztp_devices"
+    __table_args__ = (
+        # 同 PxeInstall（外部审查 U7-F9）：同一模板内非空 MAC 唯一。
+        # 生成器按 MAC 展开 `dhcp-host=`/`option:bootfile-name`（见 ct/ztp/generator.dnsmasq），
+        # 同一 MAC 两条记录会写出两条互相覆盖的条目，设备拿到哪份取决于遍历顺序。
+        # 空串 = 还没登记 MAC，必须排除在唯一性之外。
+        Index("uq_ztp_dev_template_mac", "template_id", "mac", unique=True,
+              sqlite_where=text("mac <> ''")),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     template_id: Mapped[str] = mapped_column(ForeignKey("ztp_templates.id", ondelete="CASCADE"), index=True)

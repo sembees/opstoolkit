@@ -328,6 +328,11 @@ const validation = computed(() => {
       if (!list.length) push(idx, `${label}：从接口不能为空`)
       for (const s of list) if (!IFNAME_RE.test(s)) push(idx, `${label}：从接口「${s}」非法`)
     }
+    // 后端缺陷：primary 必须是本 bond 的成员端口（内核只认已加入该 bond 的从接口，
+    // 写成别的网卡这条参数不生效，后端也会 422）
+    if (row._type === "bond" && row.primary && !(row.slaves || []).includes(row.primary)) {
+      push(idx, `${label}：主接口「${row.primary}」不在从接口列表里（内核要求 primary 是本 bond 的成员端口）`)
+    }
 
     const parsed = parseIpCidr(row.ip)
     if (parsed && parsed.error) push(idx, `${label}：${parsed.error}`)

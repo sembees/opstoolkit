@@ -3001,3 +3001,111 @@ class PxeReviewFixesTest(unittest.TestCase):
         # 两个设备名各自带自己的容量条件（30G/40G 的字节数），不能都拿第一组
         self.assertIn(str(30 * 1024 ** 3), pre)
         self.assertIn(str(40 * 1024 ** 3), pre)
+
+
+class PxeProfileInputSurfaceTest(unittest.TestCase):
+    """U7-F4：PxeProfileIn 与 PxeGenerateIn 的校验面对齐（保存期就该拦住的东西）。
+
+    改前 PxeGenerateIn 有通配控制字符闸 + deploy_mode 白名单 + server_ip 校验 +
+    net_config 走 PxeNetConfigIn，而**模板保存**这边一个都没有 —— 于是"保存能过、
+    生成/部署期才 4xx"，而注入点恰恰在后面那一步（值会被拼进 kickstart / autoinstall /
+    dnsmasq.conf 的注释行，全都以换行分隔行）。
+    """
+
+    @staticmethod
+    def _client():
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.api import pxe as pxe_api
+        from app.core.auth import get_current_user
+        from app.database import get_db
+        app = FastAPI()
+        app.include_router(pxe_api.router, prefix="/api/it/pxe")
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": "t", "username": "t", "display_name": "t", "role": "admin"}
+        # 校验在进端点前完成，非法 payload 走不到 DB
+        app.dependency_overrides[get_db] = lambda: None
+        return TestClient(app)
+
+    def _post(self, **kw):
+        body = {"name": "t", "os_type": "ubuntu", "admin_password": "Test@123"}
+        body.update(kw)
+        r = self._client().post("/api/it/pxe/profiles", json=body)
+        self.assertEqual(r.status_code, 422, r.text)
+        return json.dumps(r.json()["detail"], ensure_ascii=False)
+
+    def test_deploy_mode_injection_is_rejected_at_save_time(self):
+        detail = self._post(deploy_mode="standalone\ndhcp-script=/tmp/evil")
+        self.assertIn("deploy_mode", detail)
+
+    def test_unknown_deploy_mode_is_rejected(self):
+        self.assertIn("deploy_mode", self._post(deploy_mode="magic"))
+
+    def test_single_line_fields_reject_control_chars(self):
+        for field in ("timezone", "locale", "keyboard", "os_version", "mirror",
+                      "http_root", "kernel_path", "initrd_path", "squashfs_path",
+                      "name", "remark"):
+            with self.subTest(field=field):
+                detail = self._post(**{field: "val\n%post\n  evil"})
+                self.assertIn(field, detail)
+
+    def test_list_fields_reject_control_chars(self):
+        self.assertIn("ssh_keys", self._post(ssh_keys=["ssh-rsa AAA\nrm -rf /"]))
+        self.assertIn("extra_packages", self._post(extra_packages=["curl\n%post"]))
+
+    def test_server_ip_and_net_mode_are_validated(self):
+        self.assertIn("server_ip", self._post(server_ip="not-an-ip"))
+        self.assertIn("net_mode", self._post(net_mode="magic"))
+
+    def test_net_config_goes_through_the_same_model(self):
+        detail = self._post(net_config={"interface": "eth0\nport=0"})
+        self.assertIn("net_config", detail)
+        self.assertIn("interface", detail)
+        self.assertIn("net_config", self._post(net_config={"gateway": "10.0.0.256"}))
+
+    def test_post_script_stays_multi_line(self):
+        """post_script 是**多行**字段（运维要贴多行脚本），必须仍然放行。"""
+        from app.core.schemas import PxeProfileIn
+        p = PxeProfileIn(name="t", os_type="ubuntu",
+                         post_script="#!/bin/bash\napt-get update -y\nsystemctl restart ssh\n")
+        self.assertIn("apt-get update", p.post_script)
+
+    def test_valid_single_line_values_still_pass(self):
+        """合法值一个都不能被误伤（含中文名、点分地址、正常 URL）。"""
+        from app.core.schemas import PxeProfileIn
+        p = PxeProfileIn(name="华灿-边缘节点", os_type="ubuntu", os_version="22.04.3",
+                         timezone="Asia/Shanghai", locale="en_US.UTF-8", keyboard="us",
+                         mirror="http://10.0.0.1/pxe/serve/repo",
+                         server_ip="10.128.118.113",
+                         http_root="http://10.128.118.113:8000/pxe/serve",
+                         deploy_mode="proxy", net_mode="STATIC")
+        self.assertEqual(p.deploy_mode, "proxy")
+        self.assertEqual(p.net_mode, "static")       # 归一化
+        self.assertEqual(p.name, "华灿-边缘节点")
+
+    def test_net_config_stays_a_plain_dict_with_unknown_keys(self):
+        """net_config 必须仍然是普通 dict（要存 JSON、生成器按 .get() 消费），
+
+        前端静态场景发的 interface/ip/netmask/gateway/dns 五个键一个都不能丢。
+        """
+        from app.core.schemas import PxeProfileIn
+        raw = {"interface": "ens33", "ip": "10.0.0.5", "netmask": "255.255.255.0",
+               "gateway": "10.0.0.1", "dns": ["8.8.8.8"]}
+        p = PxeProfileIn(name="t", os_type="ubuntu", net_mode="static", net_config=raw)
+        self.assertIsInstance(p.net_config, dict)
+        self.assertEqual(p.net_config, raw)
+
+    def test_generate_and_profile_agree_on_deploy_mode(self):
+        """两层白名单必须同口径：generate 接受的三值 == 保存接受的三值。"""
+        from app.core.schemas import PxeGenerateIn, PxeProfileIn
+        for mode in ("standalone", "proxy", "relay"):
+            with self.subTest(mode=mode):
+                self.assertEqual(PxeProfileIn(name="t", deploy_mode=mode).deploy_mode, mode)
+                self.assertEqual(PxeGenerateIn(deploy_mode=mode).deploy_mode, mode)
+        for bad in ("magic", "STANDALONE", "proxy "):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    PxeProfileIn(name="t", deploy_mode=bad)
+                with self.assertRaises(ValueError):
+                    PxeGenerateIn(deploy_mode=bad)

@@ -247,6 +247,16 @@ async def inspect_one(db: AsyncSession, asset: models.Asset, kind: str = "defaul
     emit = on_event or (lambda d: None)
     asset_name = asset.name or asset.host
     cred = await crud.get_credential_for_asset(db, asset)
+    if asset.credential_id and cred is None:
+        # 外部审查 U7-F12：列上原本没有 ondelete，SQLite 默认又不校验外键，
+        # 于是"凭据被删、资产还指着它"会留下悬挂引用。改前这里会静默退化成
+        # 空用户名/空口令去连设备，报出来的是一句莫名其妙的认证失败 ——
+        # 真实原因是凭据没了，就直接说清楚。
+        err = (f"该资产关联的凭据已不存在（credential_id={asset.credential_id}）："
+               f"请到「资产管理」重新为该资产选择凭据")
+        emit({"type": "error", "asset_id": asset.id, "asset_name": asset_name, "error": err})
+        return {"asset_id": asset.id, "asset_name": asset_name, "status": "failed",
+                "error": err, "metrics": {}, "raw": []}
     cred_plain = await crud.decrypt_credential(cred) if cred else {"username": "", "password": ""}
     key_text = cred_plain.get("ssh_key", "") if cred_plain else ""
     params = _build_connect_params(asset, cred_plain)

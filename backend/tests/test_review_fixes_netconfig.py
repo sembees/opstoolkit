@@ -10,6 +10,9 @@
   U4-F8  netmask/cidr 不校验（非连续掩码被静默算成 24、cidr=64 直接生成）
   U4-F9  netconfig 的 ValueError 未转 422（与 pxe 侧不一致）
   U4-F11 netplan renderer 未白名单（`|` / `>` 会吞掉整份 YAML 缩进块）
+  U7-F2  bond/bridge 的从接口名绕过 `_require_ifname` 白名单
+  U7-F7  bond/bridge/vlan 缺引用闭合校验 + **netplan 产物不自包含**（实证：真 netplan
+         因为「从接口没在 ethernets 里定义」拒绝整份配置 —— 既有用例正是这个形状）
 """
 import os
 import pathlib
@@ -293,6 +296,209 @@ class PxeInputSurfaceTest(unittest.TestCase):
         from app.core.schemas import PxeDiskTargetIn
         with pytest.raises(ValueError):
             PxeDiskTargetIn(mode="match", serial="SN1\nport=0")
+
+
+class NetConfigReferenceClosureTest(unittest.TestCase):
+    """U7-F7：bond/bridge/vlan 的**引用闭合**。
+
+    规则不是拍脑袋定的，是在 ubuntu:22.04（netplan 0.107.1-3ubuntu0.22.04.5，即目标
+    装机系统）里把生成结果喂给真 `netplan generate` 一条条试出来的：
+      · 从接口/父接口没在本文件里定义过 → 整份配置被拒（这条由**生成器**补 ethernets 解决，
+        见 NetplanImplicitEthernetsTest，所以 schema 侧**不**拒绝这种形状）；
+      · 同一网卡被两个聚合引用 → "already assigned to bond bond0" → 拒绝；
+      · 设备名撞名（含 VLAN 子接口名）→ "changes device type" / 静默丢一份 → 拒绝；
+      · primary 不是本 bond 成员 → netplan 放过（EXIT=0），但内核不生效 → 拒绝；
+      · 聚合互相嵌套成环 → netplan 静默接受 → 拒绝。
+    """
+
+    def _req(self, **kw):
+        from app.core.schemas import NetConfigRequest
+        base = dict(os="rhel", format="nmcli")
+        base.update(kw)
+        return NetConfigRequest(**base)
+
+    def test_duplicate_device_name_is_rejected(self):
+        with pytest.raises(ValueError) as e:
+            self._req(interfaces=[{"name": "eth0", "mode": "dhcp"},
+                                  {"name": "eth0", "mode": "dhcp"}])
+        self.assertIn("重复", str(e.value))
+
+    def test_bond_name_colliding_with_iface_is_rejected(self):
+        with pytest.raises(ValueError) as e:
+            self._req(interfaces=[{"name": "bond0", "mode": "dhcp"}],
+                      bonds=[{"name": "bond0", "mode": 1, "interfaces": ["eth0", "eth1"]}])
+        self.assertIn("重复", str(e.value))
+
+    def test_duplicate_vlan_subinterface_is_rejected(self):
+        with pytest.raises(ValueError) as e:
+            self._req(vlans=[{"parent": "eth0", "vlan_id": 10, "mode": "dhcp"},
+                             {"parent": "eth0", "vlan_id": 10, "mode": "dhcp"}])
+        self.assertIn("eth0.10", str(e.value))
+
+    def test_vlan_name_colliding_with_declared_iface_is_rejected(self):
+        """真 netplan 会以 "changes device type" 拒绝整份配置。"""
+        with pytest.raises(ValueError) as e:
+            self._req(interfaces=[{"name": "eth0.10", "mode": "dhcp"},
+                                  {"name": "eth0", "mode": "dhcp"}],
+                      vlans=[{"parent": "eth0", "vlan_id": 10, "mode": "dhcp"}])
+        self.assertIn("changes device type", str(e.value))
+
+    def test_slave_in_two_aggregates_is_rejected(self):
+        with pytest.raises(ValueError) as e:
+            self._req(bonds=[{"name": "bond0", "mode": 1, "interfaces": ["eth0", "eth1"]}],
+                      bridges=[{"name": "br0", "interfaces": ["eth0", "eth2"]}])
+        msg = str(e.value)
+        self.assertIn("eth0", msg)
+        self.assertIn("同时引用", msg)
+
+    def test_bond_primary_must_be_a_member_port(self):
+        with pytest.raises(ValueError) as e:
+            self._req(bonds=[{"name": "bond0", "mode": 1,
+                              "interfaces": ["eth0", "eth1"], "primary": "eth9"}])
+        self.assertIn("primary", str(e.value))
+
+    def test_aggregate_cannot_be_its_own_slave(self):
+        with pytest.raises(ValueError) as e:
+            self._req(bonds=[{"name": "bond0", "mode": 1, "interfaces": ["bond0"]}])
+        self.assertIn("自身", str(e.value))
+
+    def test_aggregate_reference_cycle_is_rejected(self):
+        """bond0 套 bond1、bond1 又套 bond0：netplan 实测静默接受，实际是自指环。"""
+        with pytest.raises(ValueError) as e:
+            self._req(bonds=[{"name": "bond0", "mode": 1, "interfaces": ["bond1"]},
+                             {"name": "bond1", "mode": 1, "interfaces": ["bond0"]}])
+        self.assertIn("成环", str(e.value))
+
+    def test_problems_are_reported_together(self):
+        """一次请求里的多个闭合问题要一并报出，而不是让运维改一个撞一个。"""
+        with pytest.raises(ValueError) as e:
+            self._req(interfaces=[{"name": "eth0", "mode": "dhcp"},
+                                  {"name": "eth0", "mode": "dhcp"}],
+                      bonds=[{"name": "bond0", "mode": 1,
+                              "interfaces": ["eth9"], "primary": "eth8"}])
+        msg = str(e.value)
+        self.assertIn("重复", msg)
+        self.assertIn("primary", msg)
+
+    def test_undeclared_slaves_are_allowed_on_purpose(self):
+        """从接口/父接口没单独声明**不**报错：生成器会补 ethernets。
+
+        这是刻意的分工（也是 ifcfg 分支早就支持的形状 —— 从接口没声明就单独生成一份
+        ifcfg-<slave>），所以这里把"允许"钉住，避免以后有人把它改成 422
+        而打死前端 bond 行的默认用法（从接口默认 eth0,eth1）。
+        """
+        req = self._req(interfaces=[{"name": "ens33", "mode": "dhcp"}],
+                        bonds=[{"name": "bond0", "mode": 1, "interfaces": ["ens35", "ens36"],
+                                "ip": "10.1.1.2", "cidr": 24}],
+                        vlans=[{"parent": "ens99", "vlan_id": 100, "mode": "dhcp"}])
+        self.assertEqual(len(req.bonds[0].interfaces), 2)
+
+
+class NetplanImplicitEthernetsTest(unittest.TestCase):
+    """U7-F7 的根因修复：netplan 产物必须自包含。
+
+    改前只有显式写了 interfaces[] 才输出 `ethernets:`，于是最常见的用法
+    （加一个 bond、从接口填 ens35,ens36、不再单独加两行物理接口 —— 前端 bond 行的默认值
+    就是 eth0,eth1）生成出来的 YAML 在真机上是**加载不了**的：
+    `netplan generate` 报 "bond0: interface 'ens35' is not defined" 并拒绝整份文件，
+    机器应用后就是没网。既有用例 test_netplan_full 正是这个形状，因为只断言字符串而没暴露。
+    """
+
+    def _script(self, **kw):
+        from app.core.schemas import NetConfigRequest
+        req = NetConfigRequest(os="ubuntu", format="netplan", hostname="h", **kw)
+        script, filename = generate_netconfig(req)
+        self.assertEqual(filename, "99-opstk.yaml")
+        return script
+
+    def _ethernet_names(self, script):
+        """取出 ethernets: 段里的设备名（4 空格缩进的键）。"""
+        lines = script.splitlines()
+        try:
+            start = lines.index("  ethernets:")
+        except ValueError:
+            return []
+        out = []
+        for ln in lines[start + 1:]:
+            if not ln.startswith("    ") or ln.startswith("      "):
+                if ln.strip() and not ln.startswith("    "):
+                    break
+                continue
+            out.append(ln.strip().rstrip(":"))
+        return out
+
+    def test_undeclared_bond_slaves_and_bridge_ports_are_added(self):
+        script = self._script(
+            interfaces=[{"name": "ens33", "mode": "dhcp"}],
+            bonds=[{"name": "bond0", "mode": 4, "interfaces": ["ens35", "ens36"],
+                    "ip": "10.1.1.2", "cidr": 24}],
+            bridges=[{"name": "br0", "interfaces": ["ens37"], "ip": "10.2.2.2", "cidr": 24}],
+        )
+        self.assertEqual(self._ethernet_names(script), ["ens33", "ens35", "ens36", "ens37"])
+        for name in ("ens35", "ens36", "ens37"):
+            self.assertEqual(script.count("    %s:" % name), 1, script)
+
+    def test_undeclared_vlan_parent_is_added(self):
+        script = self._script(vlans=[{"parent": "ens99", "vlan_id": 100,
+                                      "mode": "static", "ip": "10.3.3.2", "cidr": 24}])
+        self.assertEqual(self._ethernet_names(script), ["ens99"])
+        self.assertIn("      link: ens99", script)
+
+    def test_declared_slaves_are_not_duplicated(self):
+        """声明过的从接口只出现一次（重复键 netplan 会报 changes device type）。"""
+        script = self._script(
+            interfaces=[{"name": "ens35", "mode": "static", "ip": "10.1.1.3", "cidr": 24},
+                        {"name": "ens36", "mode": "static", "ip": "10.1.1.4", "cidr": 24}],
+            bonds=[{"name": "bond0", "mode": 1, "interfaces": ["ens35", "ens36"],
+                    "ip": "10.1.1.2", "cidr": 24}],
+        )
+        self.assertEqual(self._ethernet_names(script), ["ens35", "ens36"])
+        # 从接口不配地址（生成器整段跳过），仍然是 dhcp4: false
+        self.assertEqual(script.count("    ens35:"), 1)
+
+    def test_bond_over_vlan_is_not_redeclared_as_ethernet(self):
+        """从接口是 VLAN 子接口时，不能再把它当 ethernet 输出一遍（会 changes device type）。"""
+        script = self._script(
+            interfaces=[{"name": "ens40", "mode": "dhcp"}],
+            vlans=[{"parent": "ens40", "vlan_id": 100, "mode": "dhcp"}],
+            bonds=[{"name": "bond0", "mode": 1, "interfaces": ["ens40.100"]}],
+        )
+        self.assertEqual(self._ethernet_names(script), ["ens40"])
+        self.assertEqual(script.count("    ens40.100:"), 1)
+
+    def test_no_interfaces_rows_at_all_still_emits_ethernets(self):
+        """连一行物理接口都没有（只有 bond）时也必须输出 ethernets: —— 改前这里直接没有该段。"""
+        script = self._script(
+            bonds=[{"name": "bond0", "mode": 1, "interfaces": ["ens50", "ens51"],
+                    "primary": "ens50", "ip": "10.4.4.2", "cidr": 24}],
+            bridges=[{"name": "br5", "interfaces": ["bond0"]}],
+        )
+        self.assertEqual(self._ethernet_names(script), ["ens50", "ens51"])
+        self.assertIn("      interfaces: [bond0]", script)
+
+    def test_output_is_byte_stable(self):
+        """同一请求两次生成逐字节一致（自动补的名字按排序，不看 set 迭代顺序）。"""
+        kw = dict(
+            bonds=[{"name": "bond0", "mode": 1, "interfaces": ["ensB", "ensA"]}],
+            bridges=[{"name": "br0", "interfaces": ["ensC"]}],
+        )
+        self.assertEqual(self._script(**kw), self._script(**kw))
+        self.assertEqual(self._ethernet_names(self._script(**kw)), ["ensA", "ensB", "ensC"])
+
+    def test_legacy_test_netplan_full_shape_is_self_contained(self):
+        """把既有用例 test_netplan_full 的形状原样钉住（它在真 netplan 上曾是 EXIT=1）。"""
+        script = self._script(
+            interfaces=[{"name": "ens33", "mode": "dhcp"},
+                        {"name": "ens34", "mode": "static", "ip": "10.0.0.5", "cidr": 24,
+                         "gateway": "10.0.0.1", "dns": ["10.0.0.1"]}],
+            bonds=[{"name": "bond0", "mode": 4, "interfaces": ["ens35", "ens36"],
+                    "ip": "10.1.1.2", "cidr": 24, "gateway": "10.1.1.1"}],
+            vlans=[{"parent": "bond0", "vlan_id": 10, "mode": "static",
+                    "ip": "10.1.10.2", "cidr": 24}],
+            bridges=[{"name": "br0", "interfaces": ["ens37"], "ip": "10.2.2.2", "cidr": 24}],
+        )
+        self.assertEqual(self._ethernet_names(script),
+                         ["ens33", "ens34", "ens35", "ens36", "ens37"])
 
 
 class RequireRoleTest(unittest.TestCase):

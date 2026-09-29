@@ -97,7 +97,9 @@ def _asset_out(a: models.Asset) -> AssetOut:
 async def list_assets(category: str | None = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     stmt = select(models.Asset).order_by(models.Asset.created_at.desc())
     if category:
-        stmt = stmt.where(models.Asset.category == category)
+        # 写入侧已归一小写（AssetIn._check_category），筛选侧同样归一，
+        # 否则 ?category=CT 会静默返回空列表（外部审查 U7-F10）。
+        stmt = stmt.where(models.Asset.category == category.strip().lower())
     res = await db.execute(stmt)
     return [_asset_out(a) for a in res.scalars().all()]
 

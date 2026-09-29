@@ -365,6 +365,18 @@ def _build_netplan(req):
     out.append("# /etc/netplan/99-opstk.yaml")
     out.append("network:")
     out.append("  version: 2")
+    # ★ 外部审查 U7-F7 的实证根因：netplan **要求** bond/bridge 的从接口与 vlan 的
+    #   `link:` 都在同一份配置里被定义过，否则整份文件被拒：
+    #     bond0: interface 'ens35' is not defined      （netplan 0.107.1 @ ubuntu 22.04）
+    #     ens99.100: interface 'ens99' is not defined
+    #   而改前只有当请求里显式写了 interfaces[] 行时才输出 ethernets:，
+    #   于是「加一个 bond、从接口填 ens35,ens36、不另加物理接口行」这种最常见的用法
+    #   （前端 bond 行默认就是 eth0,eth1）生成出来的 YAML 在真机上是**加载不了**的 ——
+    #   既有用例 test_netplan_full 正是这个形状，只断言了字符串所以没暴露。
+    #   ifcfg 分支早就有对应处理（从接口没声明就单独生成一份 ifcfg-<slave>），
+    #   这里补齐 netplan 侧的同一件事：把"被引用但没声明"的口子补成 L2 态 ethernet。
+    #   已经声明过的设备（含 bond/bridge/vlan 子接口）不重复输出 —— 同名重复键会让
+    #   netplan 报 "changes device type" 或静默丢掉一份定义。
     # ★ 外部审查 U4-F11：renderer 是 YAML 的标量，`|` / `>` / `&a` / `*a` 这类结构字符
     #   虽然不含控制字符，却会把后面的整份缩进块吞掉（ethernets/bonds 在 netplan 里"消失"，
     #   apply 之后机器静默断网）。所以这里改成**白名单**，与文件开头"两层都拦"的说法对齐。
@@ -383,7 +395,16 @@ def _build_netplan(req):
         bridge_slaves.update(br.interfaces)
     metrics = _route_metrics(req)
 
-    if req.interfaces:
+    # 被引用（bond 从接口 / 网桥端口 / vlan 父接口）但没有自己的定义的名字 → 补成 L2 ethernet。
+    # 顺序固定（排序）以保证同一请求每次生成逐字节一致。
+    virtual_names = {o.name for o in req.bonds}
+    virtual_names.update(o.name for o in req.bridges)
+    virtual_names.update(f"{o.parent}.{o.vlan_id}" for o in req.vlans)
+    referenced = set(bond_slaves) | set(bridge_slaves) | {o.parent for o in req.vlans}
+    declared_ifaces = {o.name for o in req.interfaces}
+    implicit_ifaces = sorted(referenced - declared_ifaces - virtual_names)
+
+    if req.interfaces or implicit_ifaces:
         out.append("  ethernets:")
         for i, o in enumerate(req.interfaces):
             # 如果该接口被 bond 或 bridge 引用，仅设为禁用状态
@@ -396,6 +417,11 @@ def _build_netplan(req):
                 out, ind + "  ", o.model_dump(), dhcp_default=True,
                 metric=metrics.get(("iface", i)),
             )
+        for name in implicit_ifaces:
+            # DHCP/地址都没有：netplan 里留空即"不上电配置"，与 ifcfg 侧
+            # `DEVICE=x / MASTER=bond0 / SLAVE=yes` 那份文件语义一致。
+            out.append(f"{ind}{_yaml(name, '从接口/父接口名')}:")
+            out.append(f"{ind}  dhcp4: false")
     # 网卡聚合 (bond)：支持 active-backup/802.3ad 等模式
     if req.bonds:
         out.append("  bonds:")

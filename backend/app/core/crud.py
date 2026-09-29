@@ -36,7 +36,9 @@ async def delete_credential(db: AsyncSession, cid: str) -> None:
 async def list_assets(db: AsyncSession, category: Optional[str] = None) -> list[models.Asset]:
     stmt = select(models.Asset).order_by(models.Asset.created_at.desc())
     if category:
-        stmt = stmt.where(models.Asset.category == category)
+        # 同 api/assets.list_assets：分类写入侧已归一，读取侧也要归一，否则
+        # "CT" 会静默筛出空集（外部审查 U7-F10）。
+        stmt = stmt.where(models.Asset.category == category.strip().lower())
     res = await db.execute(stmt)
     return list(res.scalars().all())
 

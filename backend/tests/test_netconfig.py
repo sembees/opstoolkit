@@ -364,10 +364,15 @@ class NetConfigApiTest(unittest.TestCase):
         self.assert_rejected({"os": "rhel", "format": "ifcfg",
                               "bonds": [{"name": "bond0", "mode": 4, "interfaces": ["eth0", "eth1"],
                                          "xmit_hash_policy": "layer2;id"}]}, "xmit_hash_policy")
+        # 合法值必须是**本 bond 的成员端口**（U7-F7）：内核只认已加入该 bond 的从接口，
+        # primary 写别的网卡等于这条参数不生效（netplan 实测会静默放过）。
         body = self.assert_ok({"os": "rhel", "format": "ifcfg",
                                "bonds": [{"name": "bond0", "mode": 1, "interfaces": ["eth0", "eth1"],
-                                          "primary": "ens18"}]})
-        self.assertIn('BONDING_OPTS="mode=active-backup miimon=100 primary=ens18"', body["script"])
+                                          "primary": "eth0"}]})
+        self.assertIn('BONDING_OPTS="mode=active-backup miimon=100 primary=eth0"', body["script"])
+        self.assert_rejected({"os": "rhel", "format": "ifcfg",
+                              "bonds": [{"name": "bond0", "mode": 1, "interfaces": ["eth0", "eth1"],
+                                         "primary": "ens18"}]}, "primary")
 
     # ---------- 缺陷 6：mode=dhcp + ip ----------
     def test_defect6_dhcp_with_ip_rejected(self):

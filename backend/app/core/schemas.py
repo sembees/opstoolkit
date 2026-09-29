@@ -286,6 +286,13 @@ class CredentialIn(BaseModel):
     port: int = 22
     remark: str = ""
 
+    # ★ 外部审查 U7-F10：port 是裸 int —— 0 / -1 / 99999 都能存进库，
+    #   一直到真正连设备时才失败。端口范围是确定的，入口就拦。
+    @field_validator("port")
+    @classmethod
+    def _check_port(cls, v: int) -> int:
+        return _require_tcp_port(v, "port")
+
 
 class CredentialOut(ORMBase):
     id: str
@@ -314,6 +321,40 @@ class AssetIn(BaseModel):
     tags: dict[str, Any] = {}
     remark: str = ""
     credential_id: Optional[str] = None
+
+    # ★ 外部审查 U7-F10：port 是裸 int；category 是自由字符串（注释写明只有 ct/it）。
+    @field_validator("port")
+    @classmethod
+    def _check_port(cls, v: int) -> int:
+        return _require_tcp_port(v, "port")
+
+    @field_validator("category")
+    @classmethod
+    def _check_category(cls, v: str) -> str:
+        """ct / it 白名单 + 归一（外部审查 U7-F10）。
+
+        改前 category 是自由字符串：写 "CT" / "ct " / "windows" 都能入库。
+        列表按 category **精确相等**筛选（list_assets）、仪表盘按它 group by，
+        于是同一类"网络/安全设备"会分裂成 ct / CT / "ct " 三份，统计口径漂移。
+        """
+        t = (v or "").strip().lower()
+        if t not in _ASSET_CATEGORIES:
+            raise ValueError(
+                f"category 只允许 " + "/".join(_ASSET_CATEGORIES) + f"（ct=网络/安全设备，"
+                f"it=服务器），收到 {v!r}"
+            )
+        return t
+
+    @field_validator("mac")
+    @classmethod
+    def _check_mac(cls, v: Optional[str]) -> Optional[str]:
+        """MAC 归一为 aa:bb:cc:dd:ee:ff；空 = 没填（外部审查 U7-F10）。
+
+        改前这个叫 mac 的字段什么都能存（"aa-bb-cc" 也行）。它虽然还没被 PXE/ARP
+        关联逻辑用到，但**名字已经承诺了语义** —— 存进去的任意串一旦被后续功能
+        拿去比对就会误匹配，所以入口先归一。
+        """
+        return _require_mac_or_empty(v, "mac") or None
 
 
 class AssetOut(ORMBase):
@@ -981,6 +1022,74 @@ class PxeProfileIn(BaseModel):
     deploy_mode: str = "standalone"  # standalone / proxy / relay
 
 
+    # ★ 外部审查 U7-F4：PxeProfileIn 与 PxeGenerateIn 的校验面**严重不对等** ——
+    #   PxeGenerateIn 有通配控制字符闸 + deploy_mode 白名单 + server_ip 校验 + net_config
+    #   走 PxeNetConfigIn，而模板保存这边一个都没有。后果是"保存能过、生成/部署期才 4xx"，
+    #   而且注入点其实发生在后面那一步：这些值会被原样拼进 kickstart / autoinstall /
+    #   dnsmasq.conf 的注释行（`# 部署模式: `），全都以换行分隔行 —— 换行即注入一整行。
+    #   这里按**同一套规则**补上（白名单/校验函数直接复用，避免两份口径漂移）。
+    @field_validator("*")
+    @classmethod
+    def _reject_control_lines(cls, v, info):
+        """单行字段不允许换行/控制字符；post_script 是**多行**字段，刻意排除。
+
+        结构化字段（disk_config / net_config）走各自模型的校验，不在这里当字符串看。
+        列表字段逐个元素检查：ssh_keys 的每一项会变成 authorized_keys 的一行、
+        extra_packages 的每一项会变成 %packages / packages: 的一行，换行同样能注入。
+        """
+        field = info.field_name
+        if field in ("post_script", "disk_config", "net_config"):
+            return v
+        if isinstance(v, str):
+            return _reject_control(v, field)
+        if isinstance(v, list):
+            return [_reject_control(x, f"{field}[]") if isinstance(x, str) else x for x in v]
+        return v
+
+
+    @field_validator("deploy_mode")
+    @classmethod
+    def _check_deploy_mode(cls, v: str) -> str:
+        """与 PxeGenerateIn._check_deploy_mode 同一条白名单（未知值会被拼进 dnsmasq 注释行）。"""
+        if not v:
+            return v
+        if v not in ("standalone", "proxy", "relay"):
+            raise ValueError(
+                f"invalid deploy_mode {v!r}: must be one of standalone/proxy/relay"
+            )
+        return v
+
+
+    @field_validator("net_mode")
+    @classmethod
+    def _check_net_mode(cls, v: str) -> str:
+        """net_mode 决定生成器走 DHCP 还是静态分支：未知值会被当成 DHCP 静默处理。"""
+        t = (v or "").strip().lower()
+        if t not in ("dhcp", "static"):
+            raise ValueError(f"net_mode 只允许 dhcp / static，收到：{v!r}")
+        return t
+
+
+    @field_validator("server_ip")
+    @classmethod
+    def _check_server_ip(cls, v: str) -> str:
+        return v if not v else _require_ipv4(v, kind="server_ip")
+
+
+    @field_validator("net_config")
+    @classmethod
+    def _check_net_config(cls, v) -> dict:
+        """走 PxeNetConfigIn（与 generate/deploy 同一个模型），但仍**返回普通 dict**：
+
+        它要原样存进 models.PxeProfile.net_config(JSON) 并传给生成器按 .get() 消费，
+        换成 pydantic 对象会让落库与生成器全部失效（与 disk_config 同一处理）。
+        未知键保留（PxeNetConfigIn 是 extra="allow" + 自定义 model_serializer）。
+        """
+        if not v:
+            return {}
+        return PxeNetConfigIn.model_validate(v).model_dump()
+
+
 class PxeProfileOut(ORMBase):
     id: str
     name: str
@@ -1539,6 +1648,10 @@ class NetConfigRequest(BaseModel):
                 "只会生成一个只有 version+renderer 的空文件"
             )
 
+        problems = self._check_reference_closure()
+        if problems:
+            raise ValueError("；".join(problems))
+
         # 被 bond/bridge 引用的从接口不配地址（生成器整段跳过它），所以不要求它填 ip。
         slave_names: set[str] = set()
         for b in self.bonds:
@@ -1568,6 +1681,122 @@ class NetConfigRequest(BaseModel):
                 cidr=o.cidr, gateway=o.gateway,
             )
         return self
+
+    def _check_reference_closure(self) -> list[str]:
+        """设备引用闭合（外部审查 U7-F7）。返回问题清单（空 = 通过）。
+
+        这一层只拦「生成出来的配置一定不对」的形状。依据是**实测**，不是猜：
+        在 ubuntu:22.04（netplan 0.107.1-3ubuntu0.22.04.5，即目标装机系统）里把
+        生成器产出的 YAML 喂给真 `netplan generate`：
+
+          · 「bond0: interfaces: [ens35] 而 ens35 没在 ethernets 里声明」→
+            `Error in network definition: bond0: interface 'ens35' is not defined`
+            （vlan 的 `link:` 同理）——**整份配置被拒**，机器起来就是裸网。
+            处置是让生成器**自动补 ethernets**（见 generator._build_netplan），
+            所以这里**不**把「从接口/父接口没单独声明」判成错 —— 那正是 ifcfg 分支
+            一直在支持的形状（从接口没声明就单独生成一份 ifcfg-<slave>），
+            而且前端 bond 行默认从接口就是 eth0,eth1（不要求另加两行物理接口）。
+          · 「同一网卡被 bond 与 bridge 同时引用」→
+            `Error in network definition: br0: interface 'eth0' is already assigned
+             to bond bond0` ⇒ 拒绝。
+          · 「ethernets 里已有 eth0.100、vlans 里又定义 eth0.100」→
+            `Updated definition 'eth0.100' changes device type` ⇒ 拒绝。
+          · 「同一 mapping 里出现两个同名键」netplan **静默**只留最后一个；
+            nmcli 的 `connection add` 会因连接重名报错并让 `set -e` 的脚本中途停下
+            （留下改了一半的网络）；ifcfg 则是后写覆盖前写 ⇒ 同样拒绝。
+          · 「primary 不是本 bond 的成员端口」netplan **不**校验（实测 EXIT=0），
+            但内核要求 primary 必须是已加入该 bond 的从接口，否则这条参数不生效 ——
+            运维以为自己配了主口，其实没有 ⇒ 拒绝（这类"看起来对、实际没生效"最坑）。
+        """
+        problems: list[str] = []
+        declared: dict[str, str] = {}
+
+        def _declare(name: str, where: str) -> None:
+            if name in declared:
+                problems.append(
+                    f"设备名 {name!r} 重复（{declared[name]} 与 {where}）：netplan 对同一段里的"
+                    f"重复键只保留最后一个，nmcli 会因连接重名报错中断（脚本是 set -e，"
+                    f"会留下改了一半的网络），ifcfg 是后写覆盖前写"
+                )
+            else:
+                declared[name] = where
+
+        for i, o in enumerate(self.interfaces):
+            _declare(o.name, f"interfaces[{i}].name")
+        for i, o in enumerate(self.bonds):
+            _declare(o.name, f"bonds[{i}].name")
+        for i, o in enumerate(self.bridges):
+            _declare(o.name, f"bridges[{i}].name")
+
+        vlan_names: dict[str, int] = {}
+        for i, o in enumerate(self.vlans):
+            vname = f"{o.parent}.{o.vlan_id}"
+            if vname in vlan_names:
+                problems.append(
+                    f"VLAN 子接口名 {vname!r} 重复（vlans[{vlan_names[vname]}] 与 vlans[{i}]）"
+                )
+            else:
+                vlan_names[vname] = i
+            if vname in declared:
+                problems.append(
+                    f"VLAN 子接口名 {vname!r}（vlans[{i}]）与 {declared[vname]} 同名："
+                    f"netplan 会以 \"changes device type\" 拒绝整份配置"
+                )
+        # 已声明的 VLAN 子接口也是合法的 link 目标（bond over vlan 在 netplan 里是合法的）
+        for vname, i in vlan_names.items():
+            declared.setdefault(vname, f"vlans[{i}]")
+
+        master_loc: dict[str, str] = {}
+        master_name: dict[str, str] = {}
+
+        def _claim_slave(slave: str, owner_name: str, owner_loc: str) -> None:
+            if slave == owner_name:
+                problems.append(
+                    f"{owner_loc}.interfaces 里含自身 {slave!r}：设备不能是自己的从接口"
+                )
+                return
+            prev = master_loc.get(slave)
+            if prev is not None and prev != owner_loc:
+                problems.append(
+                    f"从接口 {slave!r} 被 {prev} 与 {owner_loc} 同时引用："
+                    f"netplan 报 \"interface '{slave}' is already assigned\" 并拒绝整份配置，"
+                    f"nmcli/ifcfg 则是两份配置互相覆盖"
+                )
+                return
+            master_loc.setdefault(slave, owner_loc)
+            master_name.setdefault(slave, owner_name)
+
+        for i, b in enumerate(self.bonds):
+            for s in b.interfaces:
+                _claim_slave(s, b.name, f"bonds[{i}]")
+            if b.primary and b.primary not in b.interfaces:
+                problems.append(
+                    f"bonds[{i}].primary={b.primary!r} 不在该 bond 的从接口 "
+                    f"{b.interfaces} 里：内核要求 primary 必须是本 bond 的成员端口，"
+                    f"否则这条 bonding 参数不生效（netplan 不校验它，会静默放过）"
+                )
+        for i, br in enumerate(self.bridges):
+            for s in br.interfaces:
+                _claim_slave(s, br.name, f"bridges[{i}]")
+
+        # 聚合套聚合时的环：bond0 套 bond1、bond1 又套 bond0 ——
+        # netplan 实测**静默接受**（EXIT=0），实际是自指环，networkd 起不来。
+        state: dict[str, int] = {}
+        for start in list(master_name):
+            chain: list[str] = []
+            cur = start
+            while cur in master_name and state.get(cur, 0) == 0:
+                state[cur] = 1
+                chain.append(cur)
+                cur = master_name[cur]
+            if cur in master_name and state.get(cur) == 1:
+                problems.append(
+                    "聚合引用成环：" + " -> ".join(chain + [cur])
+                    + "（设备不能既是上级又是自己的下级，netplan 会静默接受这种环）"
+                )
+            for n in chain:
+                state[n] = 2
+        return problems
 
 
 class NetConfigResult(BaseModel):
@@ -1681,6 +1910,40 @@ class ZtpGenerateResult(BaseModel):
 # 先按落位登记（MAC 留空）；设备上电后从 dnsmasq 租约里自动学到 MAC，
 # 运维做一步「认领」把它指到落位，之后即可按 MAC 下发各自配置 —— 全程不手抄 MAC。
 _MAC_HEX = set("0123456789abcdef")
+
+# 资产分类：ct(网络/安全设备) / it(服务器)。列表按精确相等筛选、仪表盘按它分组，
+# 所以必须是闭集合（外部审查 U7-F10）。
+_ASSET_CATEGORIES = ("ct", "it")
+
+
+def _require_tcp_port(value: Any, field: str = "port") -> int:
+    """TCP 端口范围 1..65535（外部审查 U7-F10）。
+
+    `port` 原来是裸 int：0 / -1 / 99999 都能存进库，直到真正连设备时才炸。
+    """
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} 必须是整数端口，收到 {value!r}")
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{field} 必须在 1..65535，收到 {value!r}")
+    return port
+
+
+def _reject_control(value: Any, field: str) -> str:
+    """单行字段闸：不允许换行/其它控制字符（外部审查 U7-F4）。
+
+    被拦下的值都会进 kickstart / autoinstall / iPXE 脚本 / dnsmasq.conf，
+    而它们全部以**换行分隔行** —— 一个换行就能注入一整行（甚至 root 级影响面：
+    dnsmasq.conf 由宿主机 root 的 dnsmasq 加载）。与 PxeGenerateIn 的同名闸同口径。
+    """
+    s = "" if value is None else str(value)
+    for ch in s:
+        if ord(ch) < 0x20 or ord(ch) == 0x7F:
+            raise ValueError(
+                f"{field} 不允许包含换行或控制字符（会造成配置注入）"
+            )
+    return s
 
 
 def _require_mac_or_empty(value: Optional[str], field: str = "mac") -> str:
