@@ -316,8 +316,12 @@
             <b>UUID</b> 或<b>卷标</b>（保留数据、不格式化）。<br />
             「挂已有文件系统」只在 <b>RHEL 系</b>（kickstart 的
             <code>part &lt;挂载点&gt; --onpart=UUID=… --noformat</code>）实现；
-            Ubuntu 侧的等价写法本项目<b>尚未验证</b>，后端会拒绝（fail-closed，不赌）。
-            填了它会自动关掉「格式化」并清空「文件系统」——这两列对已有文件系统没有意义。
+            Ubuntu 侧的 <code>preserve: true</code> 官方文档确实存在，但本项目<b>尚未验证</b>，
+            后端会拒绝（fail-closed，不赌）。填了它会自动关掉「格式化」——
+            既有文件系统不能被格式化。另外：用 clearpart 时 <code>--onpart</code> 只能指向
+            <b>主分区</b>（官方原文：不能用在逻辑分区上），产物里会写明这条边界。
+            「文件系统」列可留空：<code>--fstype</code> 在该组合下是否必需官方文档没说，
+            填了就原样写进产物。
           </div>
           <el-table :data="form.data_disks" size="small" style="margin-bottom: 6px">
             <el-table-column label="容量（识别用）" width="130">
@@ -363,7 +367,7 @@
             </el-table-column>
             <el-table-column label="文件系统" width="120">
               <template #default="{ row }">
-                <el-select v-model="row.fstype" clearable :disabled="!!row.existing_kind">
+                <el-select v-model="row.fstype" clearable>
                   <el-option v-for="f in FSTYPES" :key="f" :label="f" :value="f" />
                 </el-select>
               </template>
@@ -746,14 +750,13 @@ function addPartition(p) {
   form.partitions.push(p || { mount: "", size: "", fstype: "", vg: "", lv: "" })
 }
 
-// ★ 功能 G：选了「挂已有文件系统」就把「格式化」「文件系统」两列清掉并置灰。
-//   这两列对"保留既有文件系统"没有意义（后端对 existing_* + fstype/wipe 直接 422）。
-//   这里**显式**清（并让控件变灰），而不是在提交时偷偷改值 —— 运维看得见自己填的东西没了。
+// ★ 功能 G：选了「挂已有文件系统」就把「格式化」关掉并置灰 —— 既有文件系统不能格式化
+//   （后端对 existing_* + wipe=true 直接 422，因为 wipe 会清掉分区表、数据就没了）。
+//   这里**显式**关（并让控件变灰），而不是在提交时偷偷改值 —— 运维看得见自己填的东西变了。
+//   「文件系统」列**不动**：`--fstype` 在该组合下是否必需，pykickstart 文档没说，
+//   所以不替运维猜、也不拦 —— 填了就透传进产物。
 function onExistingKindChange(row) {
-  if (row.existing_kind) {
-    row.wipe = false
-    row.fstype = ""
-  }
+  if (row.existing_kind) row.wipe = false
 }
 // 规格里的标准布局：EFI + boot + swap + LVM 吃掉剩余空间
 function applyPreset() {
@@ -822,8 +825,8 @@ function buildDiskConfig() {
       }
       if (d.existing_kind === "uuid") o.existing_uuid = v
       else o.existing_label = v
-      // 既有文件系统不重新格式化：这两个值对后端没有意义（会被 422），这里显式清掉
-      o.fstype = ""
+      // 既有文件系统**不**重新格式化：wipe 必须为 false（后端对 wipe=true 会 422）。
+      // fstype 不动：`--fstype` 在该组合下是否必需文档没说，填了就透传（不替运维猜）。
       o.wipe = false
     }
     return o

@@ -691,11 +691,13 @@ def _disk_plan(c, dc):
                 f + "：existing_uuid/existing_label 与 wipe=true 互相矛盾 —— wipe=true 会清掉"
                 "这块盘的分区表，既有的文件系统就没了。要保留既有数据请设 wipe=false"
                 "（或去掉 wipe），两者只能选一个。")
-        if ex_id and str(d.get("fstype") or "").strip():
-            raise ValueError(
-                f + ".fstype：挂载**已有**文件系统不会重新格式化，文件系统类型由安装器现场"
-                "探测；这里给了也不会用（`--noformat` 下 anaconda 不读它），故拒绝。"
-                "请去掉 fstype。")
+        # ★ 功能 G：fstype **允许**给（并会透传成 `--fstype=`）。
+        #   为什么不拦：我最初想按"不格式化 ⇒ fstype 没意义 ⇒ 给了就拒绝"处理，但查了
+        #   pykickstart 的官方文档后**放弃了那个判断** —— 文档对 `--onpart --noformat`
+        #   组合下 `--fstype` 是否必需/是否被读**没有任何一句话**（原文只定义 fstype 是
+        #   "Sets the file system type for the partition"）。既然"必需"与"无用"都无法确证，
+        #   就给运维一个**可用**的表达方式（万一 anaconda 需要它，拦住等于让人装不上）；
+        #   留空也照常工作。**不拦 ≠ 静默丢弃**：给了就写进产物，产物里看得见。
         if not custom:
             # 非 custom 布局下我们不给数据盘生成任何一行，所以这两个值一定会被丢掉。
             if dmount:
@@ -717,13 +719,23 @@ def _disk_plan(c, dc):
                 "要挂**已有**文件系统，请额外给出 existing_uuid（或 existing_label）"
             )
         if ex_id and not is_rhel_family(c.os_type):
-            # 依据不足就不做：RHEL 侧有 pykickstart 原文可依（--onpart + --noformat），
-            # Ubuntu 侧的 curtin storage 能不能"保留并挂载既有分区"本会话**没有验证过**，
-            # 所以按 fail-closed 拒绝生成，而不是赌一条没验过的 YAML。
+            # 依据不足就不做（★ 这段文案在拿到官方文档原文后**改写过一次**）：
+            # RHEL 侧有 pykickstart 原文可依（--onpart + --noformat）。
+            # Ubuntu 侧：curtin/subiquity 的官方文档**确认存在** `preserve: true`
+            #   （"If the preserve key is set to true, curtin will not format the partition."），
+            #   也就是"能表达"；但本项目**从未在真机上验过**它的语义，而且官方还写明了一条
+            #   会丢数据的边界："For version 2 configs … Any partitions that already exist but
+            #   are not referenced in the new config are (superblock-) wiped and deleted."
+            #   —— 即"没被配置引用到的既有分区会被抹掉"。
+            #   ⇒ 结论仍是 fail-closed，但理由从"表达不出来"改成"能表达、没验过、且有已知丢数据边界"。
             raise ValueError(
-                f + ".existing_uuid/existing_label：挂载**已有**文件系统目前只在 RHEL 系"
-                "（kickstart：`part <挂载点> --onpart=UUID=… --noformat`）实现；"
-                "Ubuntu(subiquity/curtin) 侧的等价写法尚未验证，按 fail-closed 拒绝生成。"
+                f + ".existing_uuid/existing_label：挂载**已有**文件系统目前只在 RHEL 系实现"
+                "（kickstart 的 `part <挂载点> --onpart=UUID=… --noformat`，有 pykickstart "
+                "原文依据）。Ubuntu(subiquity/curtin) 侧**能**用 `preserve: true` 表达，"
+                "但这条能力在本项目**尚未验证**（没在真机上跑过），而且官方文档写明 version 2 "
+                "配置下"
+                "「没被配置引用到的既有分区会被（superblock）抹掉并删除」这条丢数据边界 —— "
+                "在验证之前按 fail-closed 拒绝生成，不拿客户的数据赌。"
                 "请改用 RHEL 系模板，或先手工挂载该文件系统。")
         entry = {
             "name": dname, "mount": dmount,
@@ -1170,9 +1182,20 @@ def _rhel_custom_lines(plan, disk, dd_dev=None) -> list:
             # ★ 功能 G：挂**已有**文件系统。按 pykickstart 原文，`--noformat` + `--onpart=`
             #   是"不格式化、用既有分区"的**唯一**写法（见 _existing_fs_id 上方的引文）。
             #   用 UUID/LABEL 而不是 /dev/sdX1：枚举顺序与分区编号都不用管（§5.42 同口径）。
-            #   注意这里**不发 --ondisk**、也不发 --fstype：既有的文件系统类型由 anaconda
-            #   现场探测，重新声明反而可能误导。
-            lines.append("part %s --onpart=%s --noformat" % (d["mount"], d["existing"]))
+            #   `--fstype` 只在运维显式给了才发（文档没说该组合下它是否必需，所以给一个
+            #   可用的表达方式，也**不**替运维猜）。
+            fs = (" --fstype=" + d["fstype"]) if d["fstype"] else ""
+            lines.append("part %s%s --onpart=%s --noformat"
+                         % (d["mount"], fs, d["existing"]))
+            # 官方明写的边界（pykickstart 的 clearpart 一节原文）："If the clearpart command
+            # is used, then the --onpart command cannot be used on a logical partition."
+            # 本模板上面就发了 clearpart ⇒ 既有分区必须是**主分区**；逻辑分区挂不上。
+            # 生成期无法知道那块盘上的分区是主分区还是逻辑分区（拿不到现场信息），
+            # 所以把边界写进产物里，让人在装之前就能看到。
+            lines.append("# ⚠ 上面这一行要求 %s 是**主分区**：本模板用了 clearpart，而 pykickstart"
+                         " 原文写明" % d["mount"])
+            lines.append("#   \"If the clearpart command is used, then the --onpart command cannot"
+                         " be used on a logical partition.\"（逻辑分区挂不上）")
             continue
         if d["wipe"] and d["mount"]:
             # R2-H3：要**主动分区/格式化**的数据盘，盘名必须来自 %pre 的反解结果，

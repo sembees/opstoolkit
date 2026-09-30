@@ -3175,6 +3175,40 @@ class ExistingFilesystemMountTest(unittest.TestCase):
         self.assertEqual(self._part_line(ks).strip(),
                          "part /data --onpart=LABEL=DATA-2026 --noformat")
 
+    def test_fstype_is_passed_through_when_given_but_never_invented(self):
+        """`--fstype` 是否必需，pykickstart 文档**没说** ⇒ 不替运维猜，但也不拦。
+
+        我最初按"不格式化 ⇒ fstype 没意义 ⇒ 给了就拒"写，拿到官方文档原文后**推翻了自己**：
+        文档对该组合下 --fstype 的作用一个字都没有。既然"必需"和"无用"都证不了，
+        就给一个可用表达方式（拦住可能让人装不上），并保证"给了必定出现在产物里"（不静默丢）。
+        """
+        from app.it.pxe.generator import generate_all
+        dd = {"name": "sdc", "size": "30G", "mount": "/data",
+              "existing_uuid": self.UUID, "fstype": "xfs"}
+        ks = generate_all(self._rhel(self._dc(dd)))["ks.cfg"]
+        self.assertEqual(self._part_line(ks).strip(),
+                         "part /data --fstype=xfs --onpart=UUID=%s --noformat" % self.UUID)
+        # 没给就不写（绝不替运维猜一个文件系统类型出来）
+        ks2 = generate_all(self._rhel(self._dc(
+            {"name": "sdc", "size": "30G", "mount": "/data",
+             "existing_uuid": self.UUID})))["ks.cfg"]
+        self.assertNotIn("--fstype", self._part_line(ks2))
+
+    def test_logical_partition_boundary_is_written_into_the_artifact(self):
+        """官方明写的边界：用了 clearpart 时 `--onpart` 不能指向**逻辑分区**。
+
+        原文（pykickstart clearpart 一节）："If the clearpart command is used, then the
+        --onpart command cannot be used on a logical partition."
+        生成期拿不到"那块盘上的分区是主分区还是逻辑分区"，所以不许静默 ——
+        必须把这条边界写进产物，让运维在装之前就看见。
+        """
+        from app.it.pxe.generator import generate_all
+        ks = generate_all(self._rhel(self._dc(
+            {"name": "sdc", "size": "30G", "mount": "/data",
+             "existing_uuid": self.UUID})))["ks.cfg"]
+        self.assertIn("logical partition", ks)
+        self.assertIn("主分区", ks)
+
     def test_disk_is_visible_but_never_cleared(self):
         """★ 这条是本特性的安全红线，不是"顺手断言"。"""
         from app.it.pxe.generator import generate_all
@@ -3229,9 +3263,6 @@ class ExistingFilesystemMountTest(unittest.TestCase):
             ("uuid 与 label 同时给", {"name": "sdc", "size": "30G", "mount": "/data",
                                       "existing_uuid": self.UUID, "existing_label": "L"},
              "只能给一个"),
-            ("fstype 白给", {"name": "sdc", "size": "30G", "mount": "/data",
-                             "existing_uuid": self.UUID, "fstype": "xfs"},
-             "不会重新格式化"),
             ("数值非法字符", {"name": "sdc", "size": "30G", "mount": "/data",
                               "existing_uuid": "AB CD;rm -rf /"},
              "含非法字符"),
@@ -3290,9 +3321,6 @@ class ExistingFilesystemMountTest(unittest.TestCase):
             ("两个都给", {"name": "sdc", "size": "30G", "mount": "/data",
                           "existing_uuid": self.UUID, "existing_label": "L"},
              "只能给一个"),
-            ("fstype 白给", {"name": "sdc", "size": "30G", "mount": "/data",
-                             "existing_uuid": self.UUID, "fstype": "xfs"},
-             "fstype"),
             ("非法字符", {"name": "sdc", "size": "30G", "mount": "/data",
                           "existing_uuid": "AB CD"},
              "含非法字符"),
