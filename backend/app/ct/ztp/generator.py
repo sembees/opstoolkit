@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from app.ct.ztp.positions import norm_mac as _norm_mac_text
@@ -129,7 +130,8 @@ def _check_profile_values(p):
     return p.mgmt_interface
 
 
-# 管理接口必须是** VLAN 接口**（SVI）：`Vlan-interface10`(Comware) / `Vlanif10`(VRP8) / `Vlan10`(IOS)。
+# 管理接口可以是 **VLAN 接口**（SVI：`Vlan-interface10` / `Vlanif10` / `Vlan10`），
+# 也可以是**物理口**（U3-2nd-F6：真机验证完成后放开，见 RUNBOOK §5.74）。
 _VLAN_IFACE_PREFIXES = ("vlan-interface", "vlanif", "vlan")
 
 
@@ -137,40 +139,98 @@ def _is_vlan_interface(iface: str) -> bool:
     return (iface or "").strip().lower().startswith(_VLAN_IFACE_PREFIXES)
 
 
-def _require_vlan_mgmt_interface(p) -> str:
-    """管理接口名：空 → 按厂商 + 管理 VLAN 推导 SVI；物理口 → 拒绝（外部审查 U3-2nd-F6）。
+# 物理口形式（真机见过 + 各厂商文档常见）：GigabitEthernet1/0/24、GE1/0/24、WGE1/0/4、
+# Ten-GigabitEthernet1/0/1、10GE1/0/1、25GE1/0/4、HundredGigE1/0/25、M-GigabitEthernet0/0/0、
+# MEth0/0/0、Ethernet1/0/1，以及聚合口 Eth-Trunk1 / Port-channel1 / Bridge-Aggregation1。
+# 判定不写死型号：**名字里必须带「数字(/数字)+」**（这样 400GE1/0/1 这类新型号不会被误拦），
+# 而 `eth0`、`uplink` 这类"不像交换机接口名"的写法仍然挡在外面。
+# ★ 写这个正则时我自己踩了一次：第一版写成 `(?:\d+/\d+)+` —— 那只能匹配"数字/数字"**成对**的
+#   形式，`1/0/24` 是三段，于是**所有**物理口都被判成非法（用例一跑就露）。机器规则也必须被
+#   用例验证，不能"看着对"就上线。
+_PHYS_IFACE_RE = re.compile(
+    r"^(?:(?:\d+)?[A-Za-z][A-Za-z0-9.\-]*\d+(?:/\d+)+"
+    r"|(?:Eth-Trunk|Port-channel|Bridge-Aggregation|Route-Aggregation)\d+)"
+    r"(?::\d+)?$")
 
-    为什么要拒绝物理口（不是嫌麻烦）：改前的行为是**从接口名尾部抠数字当 VLAN 号**
+# 物理口做管理口时，**先把二层口切成三层口**的命令 —— 全部来自厂商语法，其中
+# H3C / 华为 VRP8 两条是**真机回读验证过**的（RUNBOOK §5.74 有原文），另外两条验不了：
+#   · h3c（Comware 7，S6850 7.1.070，✅ 真机验证）：
+#       二层口配 `ip address` 被拒 —— 真机原文 `% Unrecognized command found at '^' position.`，
+#       且回读配置里确实没有那行；`port link-mode route` 之后才配得上（有回读原文）。
+#       另外真机看到：S6850 的 25G 口**默认就是 route 模式**（没碰过的 WGE1/0/5 回读也是
+#       `port link-mode route`），所以这一行在这类机型上是幂等的；但切模式会弹
+#       `... will be restored to the default. Continue? [Y/N]` —— 会清掉该口原有配置，
+#       这句话必须让运维看见（见下面产物里的注释）。
+#   · huawei-ce（VRP8 / CE6800 V200R005，✅ 真机验证）：二层口配 `ip address` 被拒
+#       （`Error: Unrecognized command found at '^' position.`），`undo portswitch` + `commit`
+#       之后配得上（有回读原文）。
+#   · huawei（VRP5，❌ 本环境验不了：EVE 里只有 VRP8 镜像）⇒ 按文档写法生成并标注未验证。
+#   · cisco（IOS-XE，❌ 本环境验不了：EVE 里只有 IOS-XR 镜像）⇒ 同上。
+_PHYS_L3_CMD = {
+    "h3c": ["port link-mode route"],
+    "huawei": ["undo portswitch"],
+    "huawei-ce": ["undo portswitch", "commit"],
+    "cisco": ["no switchport"],
+}
+_PHYS_L3_UNVERIFIED = ("huawei", "cisco")
+
+
+def _phys_l3_switch_lines(p, vendor: str, comment: str = "#") -> list:
+    """管理口是**物理口**时，插在 `interface <管理口>` 之后、`ip address` 之前的切模式命令。
+
+    VLAN 接口（SVI）返回 `[]` —— 老路径的输出因此**逐字不变**。
+    """
+    if _is_vlan_interface(_iface_or_derived(p)):
+        return []
+    cmds = _PHYS_L3_CMD.get(vendor) or []
+    out = [comment + " ⚠ 物理口做管理口：先切成三层口再配地址；切模式会把该口的"
+                     "原有配置恢复成默认（真机验证见 RUNBOOK §5.74）"]
+    out += [" " + c for c in cmds]
+    if vendor in _PHYS_L3_UNVERIFIED:
+        out.append(comment + " ⚠ 上面这条切三层命令**本环境没有真机可验**（EVE 里没有该平台镜像）"
+                             "—— 按厂商文档生成，首次上机请先手工敲一条确认")
+    return out
+
+
+def _iface_or_derived(p) -> str:
+    """模板里填的管理接口；没填就按厂商 + 管理 VLAN 推导 SVI（与最终产物同一规则）。"""
+    iface = (getattr(p, "mgmt_interface", "") or "").strip()
+    if iface:
+        return iface
+    vendor = _norm_vendor(getattr(p, "vendor", "h3c"))
+    vid = int(getattr(p, "mgmt_vlan", 0) or 1)
+    tmpl = {"huawei": "Vlanif%d", "huawei-ce": "Vlanif%d", "cisco": "Vlan%d"}.get(
+        vendor, "Vlan-interface%d")
+    return tmpl % vid
+
+
+def _require_vlan_mgmt_interface(p) -> str:
+    """管理接口名（名字是历史遗留，现在**两种形态都支持**）：空 → 推导 SVI；VLAN 口/物理口 → 放行。
+
+    为什么要区分这两种形态（U3-2nd-F6 的真根源）：改前是**从接口名尾部抠数字当 VLAN 号**
     （`GigabitEthernet1/0/24` → VLAN 24），于是模板里明明写的是"把管理 IP 配在这个物理口上"，
     生成出来的却是「凭空新建 `vlan 24` + 把上联/接入口划进 VLAN 24 + 在 GE1/0/24 上配 IP」——
     端口会因此被挪出它原本的 VLAN（上联口可能就是 trunk），而 Comware 上物理口默认是二层口，
-    `ip address` 根本不生效（要先把端口切三层：`port link-mode route`；VRP8 是 `undo portswitch`）。
-    也就是"看着对、其实把网络改坏"的那种配置。
+    `ip address` 根本不生效（要先把端口切三层）。那是"看着对、其实把网络改坏"的配置。
 
-    物理口做管理口是**合法设计**，但要按平台补切三层的命令；这条路径本会话没在真机上验证过，
-    所以这里 fail-closed 并给出替代做法，而不是继续生成一份错的配置。
+    现在物理口这条路已经**真机验证过**（RUNBOOK §5.74：H3C 与华为 VRP8 都有回读原文），
+    所以放开，但按平台补切三层的命令、且**不再**从接口名里抠 VLAN 号
+    （物理口做三层口不进任何 VLAN；端口 VLAN 一律用模板里的「管理 VLAN 号」）。
     """
     iface = (getattr(p, "mgmt_interface", "") or "").strip()
     if iface:
         # 第 3 层兜底：接口名会原样拼进设备命令行 —— 换行即注入一整条命令
         iface = _require_clean(iface, "管理接口")
-    vendor = _norm_vendor(getattr(p, "vendor", "h3c"))
     if not iface:
-        vid = int(getattr(p, "mgmt_vlan", 0) or 1)
-        tmpl = {"huawei": "Vlanif%d", "huawei-ce": "Vlanif%d", "cisco": "Vlan%d"}.get(
-            vendor, "Vlan-interface%d")
-        return tmpl % vid
-    if not _is_vlan_interface(iface):
-        raise ValueError(
-            "模板的「管理接口」填的是物理口 %r，而本生成器只支持**VLAN 接口**"
-            "（Vlan-interface10 / Vlanif10 / Vlan10）。原因：物理口做三层口要按平台先切模式"
-            "（Comware `port link-mode route`、VRP8 `undo portswitch`）再配 IP，这条路径尚未在"
-            "真机上验证；而改前的做法是从接口名尾部抠出数字当 VLAN 号（GE1/0/24 → VLAN 24），"
-            "会凭空新建 VLAN 并把上联/接入口划过去 —— 那等于把你的网络改坏。"
-            "请二选一：① 管理 IP 放在 VLAN 接口上（推荐，把这里改成 Vlan-interface<管理VLAN号>）；"
-            "② 这段物理口配置手工写。" % iface
-        )
-    return iface
+        return _iface_or_derived(p)
+    if _is_vlan_interface(iface) or _PHYS_IFACE_RE.match(iface):
+        return iface
+    raise ValueError(
+        "模板的「管理接口」既不像 VLAN 接口（Vlan-interface10 / Vlanif10 / Vlan10），"
+        "也不像物理口（GigabitEthernet1/0/24 / GE1/0/24 / WGE1/0/4 / 10GE1/0/1 …）：%r。"
+        "这个值会被原样拼进设备命令行，所以只接受上面两种形态；"
+        "留空则由生成器按厂商 + 管理 VLAN 推导成 Vlan-interface<N>/Vlanif<N>/Vlan<N>。" % iface
+    )
 
 
 def _file_stem(dev) -> str:
@@ -219,8 +279,15 @@ def _vlan_id_of_interface(iface, fallback):
     如果只按 `mgmt_vlan` 建 VLAN、却按接口名配 SVI，就会出现"建了 VLAN 10、
     却在配 Vlan-interface100"，设备直接报错。这里以**接口名为准**，
     并在两者不一致时往配置里写一行醒目注释。
+
+    ★ 但**物理口做管理口**时**不解析**（U3-2nd-F6 的真根源）：`GigabitEthernet1/0/24`
+      用 `(\\d+)$` 抠出来的是 **24**，于是"凭空新建 vlan 24、还把上联/接入口划进去"。
+      物理口做三层口根本不进任何 VLAN —— 端口 VLAN 一律用模板里的「管理 VLAN 号」。
+      真机依据（RUNBOOK §5.74）：WGE1/0/4 切成 bridge 后 `ip address` 被拒
+      （`% Unrecognized command found at '^' position.`），切回 route 才配得上。
     """
-    import re
+    if not _is_vlan_interface(iface):
+        return int(fallback or 1), False
     m = re.search(r"(\d+)\s*$", str(iface or ""))
     if m:
         return int(m.group(1)), True
@@ -372,12 +439,14 @@ def h3c_config(dev, p) -> str:
         L += [
             "# 管理口用 DHCP 取址（没有指定管理 IP，写死会与其它设备/地址池冲突）",
             f"interface {p.mgmt_interface}",
+        ] + _phys_l3_switch_lines(p, "h3c") + [
             " ip address dhcp-alloc",
             "#",
         ]
     else:
         L += [
             f"interface {p.mgmt_interface}",
+        ] + _phys_l3_switch_lines(p, "h3c") + [
             f" ip address {ip} {p.mgmt_netmask}",
             "#",
         ]
@@ -507,12 +576,14 @@ def huawei_config(dev, p, vrp8=False) -> str:
         L += [
             "# 管理口用 DHCP 取址（没有指定管理 IP）",
             f"interface {vlanif}",
+        ] + _phys_l3_switch_lines(p, "huawei-ce" if vrp8 else "huawei") + [
             " ip address dhcp-alloc",
             "#",
         ]
     else:
         L += [
             f"interface {vlanif}",
+        ] + _phys_l3_switch_lines(p, "huawei-ce" if vrp8 else "huawei") + [
             f" ip address {ip} {p.mgmt_netmask}",
             "#",
         ]
@@ -605,6 +676,7 @@ def cisco_config(dev, p) -> str:
         L += [
             "! 管理口用 DHCP 取址（没有指定管理 IP）",
             f"interface {vlanif}",
+        ] + _phys_l3_switch_lines(p, "cisco", comment="!") + [
             " ip address dhcp",
             " no shutdown",
             "!",
@@ -612,6 +684,7 @@ def cisco_config(dev, p) -> str:
     else:
         L += [
             f"interface {vlanif}",
+        ] + _phys_l3_switch_lines(p, "cisco", comment="!") + [
             f" ip address {ip} {p.mgmt_netmask}",
             " no shutdown",
             "!",

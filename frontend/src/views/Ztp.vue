@@ -182,7 +182,17 @@
         <el-divider content-position="left">管理网络</el-divider>
         <el-row :gutter="12">
           <el-col :span="6"><el-form-item label="管理VLAN"><el-input-number v-model="form.mgmt_vlan" :min="1" :max="4094" style="width:100%" /></el-form-item></el-col>
-          <el-col :span="9"><el-form-item label="管理SVI"><el-input v-model="form.mgmt_interface" /></el-form-item></el-col>
+          <el-col :span="9"><el-form-item label="管理SVI">
+            <el-input v-model="form.mgmt_interface" placeholder="Vlan-interface10 / Vlanif10" />
+            <div style="font-size:12px;line-height:1.5;color:#909399;margin-top:4px">
+              也可以填<b>物理口</b>（例：<code>GE1/0/24</code> / <code>WGE1/0/4</code>）——
+              生成时会在它上面配管理 IP，并按平台先切三层（Comware <code>port link-mode route</code>、
+              VRP8 <code>undo portswitch</code>、IOS <code>no switchport</code>）。
+              H3C 与华为 VRP8 这两条已<b>真机验证</b>；VRP5/思科本环境没有镜像，
+              产物里会标注「未真机验证」。物理口上的数字<b>不是</b> VLAN 号（不会再凭空建 VLAN），
+              接入/上联端口仍按上面的「管理VLAN」划分。留空 = 按厂商推导 SVI。
+            </div>
+          </el-form-item></el-col>
           <el-col :span="9"><el-form-item label="掩码"><el-input v-model="form.mgmt_netmask" /></el-form-item></el-col>
         </el-row>
         <el-row :gutter="12">

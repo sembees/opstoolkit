@@ -16,6 +16,10 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_serializer, m
 # 在校验层与生成层指到不同的分区（校验放行、生成物却把另一块分区做成 RAID 成员并抹掉它）。
 # 这也是本模块唯一一次 it/ → core/ 的反向依赖，为"单一换算来源"让路。
 from app.it.pxe.generator import RHEL_FAMILY as _RHEL_FAMILY, _raid_part_ref
+# 物理口形式的管理接口判定：**同一份正则**，从 ct/ztp/generator.py 导入（那边是它唯一的用处）。
+# 为什么不各抄一份：两层各写一份"什么样的接口名算物理口"，迟早漂移成
+# "保存能过、生成被拒"或者反过来 —— 本项目已经在 RAID 成员换算上吃过一次这种亏（见上）。
+from app.ct.ztp.generator import _PHYS_IFACE_RE
 
 
 class ORMBase(BaseModel):
@@ -606,9 +610,11 @@ def _disk_check_layout_rules(dc: dict, os_type: str, disk_scheme: str = "lvm") -
                     "要挂这块盘上**已有**的文件系统（不格式化、保留数据），请额外给出 "
                     "existing_uuid（或 existing_label）"
                 )
-    # ★ 功能 G：Ubuntu 侧不支持 —— RHEL 侧有 pykickstart 原文可依，curtin storage 能否
-    #   "保留并挂载既有分区"本项目**未验证**，所以不在 schema 层放行（否则错误会晚到生成期，
-    #   而生成期仍然拒绝，运维看到的只是"保存能过、生成被拒"）。
+    # ★ 功能 G：Ubuntu 侧不支持 —— RHEL 侧有 pykickstart 原文可依；Ubuntu 侧 curtin/subiquity
+    #   文档**确认有** `preserve: true`（"If the preserve key is set to true, curtin will not
+    #   format the partition."），也就是"能表达"，但本项目**从未在真机验过**它的语义，而且
+    #   官方写明 version 2 配置下"没被配置引用到的既有分区会被（superblock）抹掉并删除"这条
+    #   丢数据边界 ⇒ 在验证之前 fail-closed，不拿客户数据赌。
     if data and os_type not in _RHEL_FAMILY:
         for i, d in enumerate(data):
             if any(str((d or {}).get(k) or "").strip()
@@ -616,9 +622,11 @@ def _disk_check_layout_rules(dc: dict, os_type: str, disk_scheme: str = "lvm") -
                 raise ValueError(
                     f"disk_config.data_disks[{i}].existing_uuid/existing_label："
                     "挂载**已有**文件系统目前只在 RHEL 系实现（kickstart 的 "
-                    "`part <挂载点> --onpart=UUID=… --noformat`）；Ubuntu(subiquity/curtin) 侧"
-                    "的等价写法尚未验证，按 fail-closed 拒绝。请改用 RHEL 系模板，"
-                    "或先手工挂载该文件系统。"
+                    "`part <挂载点> --onpart=UUID=… --noformat`，有 pykickstart 原文依据）。"
+                    "Ubuntu(subiquity/curtin) 侧**能**用 `preserve: true` 表达，但这条能力在"
+                    "本项目**尚未验证**（没在真机上跑过），且官方文档写明 version 2 配置下"
+                    "「没被配置引用到的既有分区会被（superblock）抹掉并删除」—— 验证之前按 "
+                    "fail-closed 拒绝。请改用 RHEL 系模板，或先手工挂载该文件系统。"
                 )
     if custom and not any(str((p or {}).get("mount") or "").strip() == "/" for p in parts):
         raise ValueError(
@@ -861,10 +869,10 @@ class PxeDiskConfigIn(BaseModel):
                     raise ValueError(
                         f"data_disks[{i}]：{_ex[0]} 与 wipe=true 互相矛盾（wipe 会清掉既有"
                         "分区表，数据就没了），只能选一个")
-                if str(d.get("fstype") or "").strip():
-                    raise ValueError(
-                        f"data_disks[{i}].fstype：挂载**已有**文件系统不会重新格式化，"
-                        "文件系统类型由安装器现场探测；给了也不会被使用，故拒绝")
+                # ★ fstype **不拦**：查过 pykickstart 官方文档后确认"该组合下 --fstype 是否
+                #   必需"文档没说（原文只定义它是 "Sets the file system type for the
+                #   partition"）。既然无法确证"必需"还是"无用"，就给运维一个可用表达方式
+                #   （拦住可能让人装不上），留空也照常工作；给了会被透传成产物里的 --fstype=。
                 _exv = str(d.get(_ex[0]) or "").strip()
                 if not re.fullmatch(r"[A-Za-z0-9._:+-]{1,64}", _exv):
                     raise ValueError(
@@ -1925,12 +1933,13 @@ class ZtpTemplateIn(BaseModel):
     remark: str = ""
 
 
-    # ★ 外部审查 U3-2nd-F6：管理接口必须是 **VLAN 接口**（SVI 形式）。
-    #   物理口做管理口是合法设计，但生成器是"按接口名尾部的数字当 VLAN 号"处理的 ——
-    #   `GigabitEthernet1/0/24` 会被解析出 VLAN 24，于是凭空新建 vlan 24、把上联/接入口
-    #   划进 VLAN 24，再在物理口上配 IP；而 Comware 上物理口默认是二层口，`ip address`
-    #   根本不生效（要先 `port link-mode route`；VRP8 是 `undo portswitch`）。
-    #   改前是**静默生成一份会把网络改坏的配置**（真机上会被拒一句，但更糟的是端口被挪 VLAN）。
+    # ★ 外部审查 U3-2nd-F6：管理接口 = **VLAN 接口** 或 **物理口**。
+    #   物理口这条路径最初是 fail-closed 的，因为生成器当时"按接口名尾部的数字当 VLAN 号" ——
+    #   `GigabitEthernet1/0/24` 被解析出 VLAN 24，于是凭空新建 vlan 24、把上联/接入口划进去，
+    #   再在物理口上配 IP（而二层口上 `ip address` 不生效）。两端现在都改了：
+    #   生成器不再从物理口名字里抠 VLAN 号（端口 VLAN 一律用「管理 VLAN 号」），并按平台补
+    #   切三层的命令；切三层这条路径已**真机验证**（RUNBOOK §5.74：H3C S6850 与华为 CE6800
+    #   都有回读原文，二层口配 `ip address` 被拒的原文也记着）。
     #   留空允许：生成时按厂商 + 管理 VLAN 推导成 Vlan-interface<N>/Vlanif<N>/Vlan<N>。
     @field_validator("mgmt_interface")
     @classmethod
@@ -1940,15 +1949,16 @@ class ZtpTemplateIn(BaseModel):
             return ""      # 空 = 未填，生成时推导
         if any(ord(ch) < 32 or ord(ch) == 0x7F for ch in t):
             raise ValueError("mgmt_interface 不允许包含换行或控制字符（会造成配置注入）")
-        if not t.lower().startswith(("vlan-interface", "vlanif", "vlan")):
-            raise ValueError(
-                f"mgmt_interface 必须是 VLAN 接口（Vlan-interface10 / Vlanif10 / Vlan10），"
-                f"收到 {v!r}：物理口做三层口要按平台先切模式（Comware `port link-mode route`、"
-                f"VRP8 `undo portswitch`）再配 IP，本生成器不支持（改前会从接口名尾部抠数字"
-                f"当成 VLAN 号，凭空新建一个 VLAN 并把上联/接入口划过去）。"
-                f"请改成 Vlan-interface<管理VLAN号>，或把这段物理口配置手工写。"
-            )
-        return t
+        if t.lower().startswith(("vlan-interface", "vlanif", "vlan")):
+            return t
+        # 物理口：用的是 ct/ztp/generator.py 里那份**同一个**正则（模块顶部导入）
+        if _PHYS_IFACE_RE.match(t):
+            return t
+        raise ValueError(
+            f"mgmt_interface 必须是 VLAN 接口（Vlan-interface10 / Vlanif10 / Vlan10）"
+            f"或物理口（GigabitEthernet1/0/24 / GE1/0/24 / WGE1/0/4 / 10GE1/0/1 …），"
+            f"收到 {v!r}。这两种形态都会被原样拼进设备命令行，其余写法一律拒绝。"
+        )
 
 
 class ZtpTemplateOut(ORMBase):
