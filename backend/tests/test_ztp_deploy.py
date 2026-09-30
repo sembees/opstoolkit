@@ -67,6 +67,24 @@ class DhcpConfSafetyTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("占位值", why)
 
+    def test_placeholder_message_is_actionable(self):
+        """U3-2nd-F12（用户定案：**不改行为，只把话说明白**）：文案要给出"怎么办"。
+
+        原话只说"请明确填写"，而运维最常见的反应是"我填了啊（eth0）"，于是在
+        "保存能过"和"部署被拒"之间来回撞。现在必须说清三件事：
+          ① eth0/eth1/ens0 是"没填"的**哨兵值**（不是"禁止使用 eth0 这张网卡"）；
+          ② 该填什么 + 怎么查（`ip -br link`）；
+          ③ 真机网卡就叫 eth0 时怎么办（先改名）—— 本工具区分不了这两种情况。
+        以及：四个占位值一个都不能漏（含 ens0 —— 前端名单原来就漏了它）。
+        """
+        for ph in ("eth0", "eth1", "ens0"):
+            with self.subTest(iface=ph):
+                ok, why = dhcp.check_dhcp_conf_safety("interface=%s\n" % ph + GOOD, HOST_FACTS)
+                self.assertFalse(ok)
+                self.assertIn("哨兵值", why)
+                self.assertIn("ip -br link", why)
+                self.assertIn("改名", why)
+
     def test_missing_iface_is_rejected(self):
         """网卡不存在时 dnsmasq 配了 bind-interfaces 会**起不来** —— 而它同时服务 PXE。"""
         ok, why = dhcp.check_dhcp_conf_safety("interface=ens99\n" + GOOD, HOST_FACTS)
@@ -232,6 +250,14 @@ class ZtpGeneratorIfaceTest(unittest.TestCase):
         ok, why = dhcp.check_dhcp_conf_safety(files["dnsmasq.conf"], quick)
         self.assertFalse(ok, "占位配置竟然通过了红线检查")
         self.assertIn("占位值", why)
+
+    def test_generated_placeholder_outputs_say_what_to_do(self):
+        """产物里的警告也要给出"怎么办" —— 运维下载 ZIP 后最先看到的正是这两个文件。"""
+        p, files = self._gen("eth0")
+        for name in ("dnsmasq.conf", "README.txt"):
+            with self.subTest(file=name):
+                self.assertIn("哨兵值", files[name])
+                self.assertIn("改名", files[name])
 
     def test_conf_has_no_singleton_keyword(self):
         """真机实测：`port=0` 在 dnsmasq 里**不可重复**，而 PXE 的配置已经写了它。

@@ -736,7 +736,10 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
     """落盘前的红线检查。返回 (ok, 原因) —— 原因是要显示给运维的中文说明。
 
     六条，全部 fail-closed：
-      1. `interface=` 是占位值（eth0/eth1/空）⇒ 拒绝（说明生成器没拿到真实网卡）；
+      1. `interface=` 是占位值（eth0/eth1/ens0/空）⇒ 拒绝（说明生成器没拿到真实网卡）。
+         这是**哨兵值**而不是"不允许 eth0 这张网卡"：本工具无法区分「模板没填」与
+         「宿主机上真实网卡就叫 eth0」，所以把 eth0 保留为"没填"的标记（见 U3-2nd-F12，
+         用户定案：不改行为，只把提示文字写全 —— 真实网卡叫 eth0 时请先改名）；
       2. 目标网卡在宿主机上**不存在** ⇒ 拒绝。这条尤其重要：dnsmasq 配了
          `bind-interfaces` + 不存在的网卡会**起不来**，而 dnsmasq 同时服务着 PXE ——
          一个 ZTP 模板里的网卡笔误就能把整个装机网段的 DHCP/TFTP 一起打掉；
@@ -777,9 +780,17 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
     placeholders = {"eth0", "eth1", "ens0", ""}
     for i in ifaces:
         if i in placeholders:
-            return False, ("配置里的 DHCP 网卡是占位值 `" + i + "`：请在模板/参数里**明确填写**"
-                           "要把 DHCP 池开在哪张网卡上（容器内自动探测网卡不可靠 —— "
-                           "实测会猜到承载企业网的那张卡）。")
+            # ★ U3-2nd-F12（用户定案：不改行为，只把话说明白）：这里仍然是 fail-closed，
+            #   但把"为什么"和"怎么办"写全 —— 原文只说"请明确填写"，运维最容易的反应
+            #   就是"我填了啊（eth0）"，然后在保存通过、部署被拒之间来回撞。
+            return False, ("配置里的 DHCP 网卡是占位值 `" + i + "`：本工具把 eth0 / eth1 / ens0 / "
+                           "空 当作「模板里**没有填**网卡」的哨兵值 —— 容器内自动探测网卡不可靠"
+                           "（实测会猜到承载企业网的那张卡），所以宁可拒绝也不猜。"
+                           "请在模板/参数里明确填写宿主机上**真实存在**、且不承载默认路由的网卡名"
+                           "（例如 ens19；查看方法：在宿主机上执行 `ip -br link`）。"
+                           "如果你的宿主机上真实网卡**就叫** eth0：当前版本无法区分「没填」与"
+                           "「确实要用 eth0」，请先把该网卡改名（netplan/udev 重命名为 ens19 之类）"
+                           "再部署。")
     try:
         present = set(os.listdir("/sys/class/net"))
     except OSError as e:

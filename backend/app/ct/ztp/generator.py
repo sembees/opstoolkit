@@ -813,6 +813,8 @@ def dnsmasq(p, devices, positions=None) -> str:
             "#    那张卡（例如专用于开局/装机的 ens19），再重新生成。",
             "#    自动探测不可靠：容器里实测会探测到承载企业网的那张卡，",
             "#    而 standalone 模式会在这张卡上开 DHCP 池、抢答企业 DHCP。",
+            "#    `eth0` 是「没填」的**哨兵值**：若你的宿主机上真实网卡就叫 eth0，",
+            "#    请先把它改名（netplan/udev，例：ens19）再生成 —— 本工具区分不了这两种情况。",
             "",
         ]
     if p.deploy_mode == "relay":
@@ -993,7 +995,9 @@ def _readme(p, devices, positions=None) -> str:
                 "interface=eth0。\n"
                 "   这份配置**不能**直接部署: dnsmasq 配了 bind-interfaces, 网卡不存在会\n"
                 "   直接起不来(而它同时服务着 PXE); 若填错成骨干网卡, 则会在骨干网段上\n"
-                "   开 DHCP 池、抢答企业 DHCP。请填好网卡后重新生成。\n\n")
+                "   开 DHCP 池、抢答企业 DHCP。请填好网卡后重新生成。\n"
+                "   eth0/eth1/ens0 是「没填」的哨兵值: 若宿主机上真实网卡就叫 eth0,\n"
+                "   请先改名(netplan/udev, 例 ens19) —— 本工具区分不了这两种情况。\n\n")
     return (
         "OpsToolkit ZTP 开局部署说明\n"
         "==========================\n\n"

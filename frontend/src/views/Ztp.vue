@@ -226,7 +226,15 @@
           </el-col>
           <el-col :span="8"><el-form-item label="服务器IP"><el-input v-model="form.server_ip" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="DHCP网卡">
-            <el-input v-model="form.dhcp_iface" placeholder="必填，例：ens19（不能是承载默认路由的网卡）" />
+            <el-input v-model="form.dhcp_iface" placeholder="必填，例：ens19（宿主机上真实存在、且不承载默认路由的网卡）" />
+            <div style="font-size:12px;line-height:1.5;color:#909399;margin-top:4px">
+              留空或填 <b>eth0</b>/<b>eth1</b>/<b>ens0</b> 会被当成「没填网卡」——
+              能保存、能生成 ZIP，但 <b>部署时会被红线检查拒绝</b>。
+              真实网卡名在宿主机上执行 <b>ip -br link</b> 查看。
+            </div>
+            <div v-if="ifacePlaceholder" style="font-size:12px;line-height:1.5;color:#e6a23c;margin-top:2px">
+              ⚠ 当前值「{{ form.dhcp_iface || "（空）" }}」是占位值：请改成宿主机上真实存在的网卡名（例：ens19）
+            </div>
           </el-form-item></el-col>
         </el-row>
         <el-row :gutter="12">
@@ -428,9 +436,16 @@ const deploying = ref(false)
 const deployResult = ref([])
 const deployOk = ref(true)
 // R4：当前生成用的模板的 DHCP 网卡（空 / eth0 = 占位值，生成的配置不能部署）
+// ★ U3-2nd-F12（用户定案：**不改行为，只把话说明白**）：`eth0`/`eth1`/`ens0`/空/auto/detect
+// 在本工具里是「模板里没填网卡」的**哨兵值** —— 部署时会被 core/dhcp.py 的红线检查拒绝
+// （容器内自动探测网卡实测会猜到承载企业网的那张卡，所以宁可拒绝也不猜）。
+// 前端把这件事显式显示出来，运维就不用在"我明明填了 eth0"和"部署被拒"之间来回撞。
+// 这份名单必须与后端 `dhcp.check_dhcp_conf_safety` 的 placeholders 保持一致。
+const PLACEHOLDER_IFACES = ["", "eth0", "eth1", "ens0", "auto", "detect"]
+
 const genIface = ref("")
 const genIfacePlaceholder = computed(
-  () => ["", "eth0", "eth1", "auto", "detect"].includes((genIface.value || "").trim().toLowerCase())
+  () => PLACEHOLDER_IFACES.includes((genIface.value || "").trim().toLowerCase())
 )
 const inlineDevDialog = ref(false)
 
@@ -445,6 +460,11 @@ const emptyForm = () => ({
   dhcp_start: "10.0.0.100", dhcp_end: "10.0.0.200", http_root: "http://10.0.0.250:8000/ztp",
 })
 const form = reactive(emptyForm())
+
+// 模板表单里的网卡是不是占位值（决定要不要把那行红字显示出来）
+const ifacePlaceholder = computed(
+  () => PLACEHOLDER_IFACES.includes((form.dhcp_iface || "").trim().toLowerCase())
+)
 
 const devForm = reactive({ template_id: "", hostname: "", mac: "", serial: "", mgmt_ip: "" })
 const inlineDev = reactive({ hostname: "", mac: "", serial: "", mgmt_ip: "" })
@@ -541,9 +561,12 @@ async function saveTemplate() {
   // R4：DHCP 网卡是必填的 —— 留空/占位 eth0 时生成的配置会被部署接口直接拒绝
   // （占位值、不存在的网卡、承载默认路由的骨干网卡都不允许）。与其让运维撞 422，
   // 不如在保存模板时就说清楚。
+  // ★ 名单与后端 dhcp.check_dhcp_conf_safety 的 placeholders 对齐（原来漏了 ens0）。
   const iface = (form.dhcp_iface || "").trim().toLowerCase()
-  if (!iface || ["eth0", "eth1", "auto", "detect"].includes(iface)) {
-    ElMessage.warning("请填写「DHCP网卡」：宿主机上真实存在、且不承载默认路由的那张卡（例：ens19）")
+  if (PLACEHOLDER_IFACES.includes(iface) || iface === "auto" || iface === "detect") {
+    ElMessage.warning("请填写「DHCP网卡」：宿主机上真实存在、且不承载默认路由的那张卡"
+      + "（例：ens19；eth0/eth1/ens0 在本工具里是「没填」的哨兵值）。"
+      + "在宿主机上执行 ip -br link 可以看到所有网卡名")
     return
   }
   // 新建时必须有设备管理员口令：ZTP 生成器现在**不代填**默认口令（旧的 ChangeMe@123
