@@ -375,6 +375,44 @@ def _raid_member_ref(tok, partitions, field):
     return idx, disk
 
 
+# 功能 G：挂载数据盘上**已有**的文件系统（不新建分区、不格式化）。
+# 用 UUID / LABEL 定位，而不是设备名 —— 依据是 pykickstart 3.78 的原文（不是我印象里的写法）：
+#   · `part` 命令说明："All partitions created will be formatted as part of the installation
+#     process unless ``--noformat`` and ``--onpart`` are used."
+#   · `--noformat`："Tells the installation program not to format the partition, for use with
+#     the ``--onpart`` command."
+#   · `--onpart`："Put the partition on an already existing device. Use ``--onpart=LABEL=name``
+#     or ``--onpart=UUID=name`` to specify a partition by label or uuid respectively."
+#     "Anaconda may create partitions in any particular order, so it is safer to use labels
+#     than absolute partition names."
+#   ⇒ 与 §5.42「设备名不是身份」同一口径：产物里根本不出现设备名，枚举顺序反转也不受影响。
+_EXISTING_KEYS = ("existing_uuid", "existing_label")
+# 值会原样拼进 ks 的 `--onpart=`，因此与 serial/wwid 同一套白名单（不含空格/引号/等号）。
+_EXISTING_VALUE_RE = re.compile(r"[A-Za-z0-9._:+-]{1,64}")
+
+
+def _existing_fs_id(d, field) -> str:
+    """把 `existing_uuid` / `existing_label` 归一成 `--onpart=` 的取值（`UUID=<u>`/`LABEL=<l>`）。
+
+    返回 "" 表示"这条数据盘声明不是用来挂既有文件系统的"。
+    """
+    got = [(k, str(d.get(k) or "").strip()) for k in _EXISTING_KEYS]
+    got = [(k, v) for k, v in got if v]
+    if not got:
+        return ""
+    if len(got) > 1:
+        raise ValueError(
+            field + "：existing_uuid 与 existing_label 只能给一个"
+            "（两个都给无法确定用哪个去匹配既有文件系统）")
+    k, v = got[0]
+    if not _EXISTING_VALUE_RE.fullmatch(v):
+        raise ValueError(
+            field + "." + k + " 含非法字符（只允许字母数字与 . _ : + -，最多 64 字符）："
+            + repr(v[:40]) + " —— 这个值会被拼进 kickstart 的 --onpart=；"
+            "卷标里带空格/引号/等号的，请改用 existing_uuid（文件系统 UUID）")
+    return ("UUID=" if k == "existing_uuid" else "LABEL=") + v
+
+
 def _disk_plan(c, dc):
     """把 disk_config 归一化为内部结构；返回 None 表示走【既有路径】（逐字不变）。
 
@@ -629,9 +667,12 @@ def _disk_plan(c, dc):
             raise ValueError(
                 f + ".name：Ubuntu 布局必须给出盘名 —— curtin 的 storage 配置只认 "
                 "path=/dev/<name>，只给 size/serial/wwid 无法表达要写到哪块盘。")
-        if not dname and mode == "name" and d.get("wipe"):
+        if not dname and mode == "name" and (d.get("wipe")
+                                             or any(str(d.get(k) or "").strip()
+                                                    for k in _EXISTING_KEYS)):
             raise ValueError(
-                f + ".name：target.mode=name 下要格式化（wipe=true）的数据盘必须给出盘名 —— "
+                f + ".name：target.mode=name 下要在产物里**显式引用**这块数据盘"
+                "（wipe=true 要清它，或用 existing_uuid/existing_label 挂它）时必须给出盘名 —— "
                 "该模式下没有 %pre 可以现场反解设备名。")
         # 缺陷 #1 的 schema 侧交叉检查：mode=name 时 target.name 与数据盘同名是自相矛盾
         # （同一块盘既当系统盘又当"别碰"的数据盘）。auto/match 下 name 不参与选盘，不做要求。
@@ -639,6 +680,22 @@ def _disk_plan(c, dc):
             raise ValueError(f + ".name 不能与目标盘同名 " + repr(dname))
         dmount = _safe_mount(d.get("mount", ""), f + ".mount")
         dwipe = _as_bool(d.get("wipe"), f + ".wipe", default=False)
+        # 功能 G：这条声明是不是"挂载既有文件系统"（UUID/LABEL 定位，不格式化）
+        ex_id = _existing_fs_id(d, f)
+        if ex_id and not dmount:
+            raise ValueError(
+                f + ".existing_uuid/existing_label：挂载**已有**文件系统必须同时给出 mount"
+                "（挂到哪个目录）—— 只给 UUID 我们不知道要挂到哪儿。")
+        if ex_id and dwipe:
+            raise ValueError(
+                f + "：existing_uuid/existing_label 与 wipe=true 互相矛盾 —— wipe=true 会清掉"
+                "这块盘的分区表，既有的文件系统就没了。要保留既有数据请设 wipe=false"
+                "（或去掉 wipe），两者只能选一个。")
+        if ex_id and str(d.get("fstype") or "").strip():
+            raise ValueError(
+                f + ".fstype：挂载**已有**文件系统不会重新格式化，文件系统类型由安装器现场"
+                "探测；这里给了也不会用（`--noformat` 下 anaconda 不读它），故拒绝。"
+                "请去掉 fstype。")
         if not custom:
             # 非 custom 布局下我们不给数据盘生成任何一行，所以这两个值一定会被丢掉。
             if dmount:
@@ -651,14 +708,24 @@ def _disk_plan(c, dc):
                     f + ".wipe=true：layout=" + layout
                     + " 不清数据盘（只有 layout=custom 才生成 clearpart），该值会被丢弃，故拒绝"
                 )
-        elif dmount and not dwipe:
+        elif dmount and not dwipe and not ex_id:
             # custom 布局：wipe=false 表示"不碰这块盘的既有分区表"，那就没有地方可以安全地
-            # 新建并挂载一个分区（挂载盘上既有文件系统我们表达不出来）—— mount 会被丢掉。
+            # 新建并挂载一个分区 —— mount 会被丢掉。
             raise ValueError(
                 f + ".mount：wipe=false 时不会给数据盘建分区/格式化，挂载点会被丢弃，故拒绝；"
-                "要建分区并挂载请设 wipe=true（或去掉 mount）"
+                "要建分区并挂载请设 wipe=true（或去掉 mount）；"
+                "要挂**已有**文件系统，请额外给出 existing_uuid（或 existing_label）"
             )
-        data.append({
+        if ex_id and not is_rhel_family(c.os_type):
+            # 依据不足就不做：RHEL 侧有 pykickstart 原文可依（--onpart + --noformat），
+            # Ubuntu 侧的 curtin storage 能不能"保留并挂载既有分区"本会话**没有验证过**，
+            # 所以按 fail-closed 拒绝生成，而不是赌一条没验过的 YAML。
+            raise ValueError(
+                f + ".existing_uuid/existing_label：挂载**已有**文件系统目前只在 RHEL 系"
+                "（kickstart：`part <挂载点> --onpart=UUID=… --noformat`）实现；"
+                "Ubuntu(subiquity/curtin) 侧的等价写法尚未验证，按 fail-closed 拒绝生成。"
+                "请改用 RHEL 系模板，或先手工挂载该文件系统。")
+        entry = {
             "name": dname, "mount": dmount,
             "fstype": _safe_fstype(d.get("fstype", ""), f + ".fstype", dmount),
             # 生产红线：数据盘默认不碰，必须显式 wipe=true 才动（规格 §2）
@@ -668,7 +735,13 @@ def _disk_plan(c, dc):
             "size": str(d.get("size") or "").strip(),
             "serial": _safe_matcher_value(d["serial"], "serial", k) if d.get("serial") else "",
             "wwid": _safe_matcher_value(d["wwid"], "wwid", k) if d.get("wwid") else "",
-        })
+        }
+        if ex_id:
+            # 功能 G：非空表示"挂既有文件系统"（UUID=<u> / LABEL=<l>），与 wipe 互斥。
+            # **只在真的用到时才加这个键** —— 没给 existing_* 的老配置，plan 的字面形状
+            # 与改动前逐字一致（有 golden 用例对整个 plan 做等值断言）。
+            entry["existing"] = ex_id
+        data.append(entry)
 
     # ── 目标盘与数据盘的"身份重叠"校验（生产安全，§5.47）────────────────────
     # 同一块盘不能**既当系统盘、又被声明为要保护的数据盘** —— 那不是配置笔误这么简单：
@@ -1003,14 +1076,26 @@ def _rhel_custom_lines(plan, disk, dd_dev=None) -> list:
         没列出的盘 anaconda 一概不碰（pykickstart: "only disks listed here will be used
         during installation"），比"--drives= 再声明一次"更强也更省事。
     """
-    used = [disk] + [_dev(k, d) for k, d in enumerate(plan["data_disks"]) if d["wipe"]]
-    lines = ["ignoredisk --only-use=" + ",".join(used)]
+    # ★ 功能 G：`--only-use`（哪些盘**可见**）与 `clearpart --drives`（哪些盘**会被清**）
+    #   从此是**两个集合** —— 挂既有文件系统的数据盘必须"可见"（否则 anaconda 的函数树里
+    #   根本没有它的分区，`--onpart=UUID=…` 找不到设备），但**绝不能出现在 clearpart 里**
+    #   （那会把要保留的数据抹掉）。改动前这两个集合是同一个 `used`，直接加进去就会抹盘。
+    only_use = [disk] + [_dev(k, d) for k, d in enumerate(plan["data_disks"])
+                         if d["wipe"] or d.get("existing")]
+    clear_drives = [disk] + [_dev(k, d) for k, d in enumerate(plan["data_disks"]) if d["wipe"]]
+    lines = ["ignoredisk --only-use=" + ",".join(only_use)]
     if plan["wipe"]:
-        lines.append("clearpart --drives=" + ",".join(used) + " --all --initlabel")
+        lines.append("clearpart --drives=" + ",".join(clear_drives) + " --all --initlabel")
     else:
         lines.append("# disk_config.wipe=false：不执行 clearpart（沿用磁盘上已有分区表）")
     for d in plan["data_disks"]:
-        if not d["wipe"]:
+        if d.get("existing"):
+            lines.append("# 数据盘 " + (d["name"] or "(未命名)") + " (existing_"
+                         + ("uuid" if d["existing"].startswith("UUID=") else "label")
+                         + "=" + d["existing"].split("=", 1)[1] + ")：**挂载既有文件系统，"
+                         "不新建分区、不格式化** —— 已加入 ignoredisk --only-use（否则装不到），"
+                         "但**不在** clearpart --drives 里（保存数据）")
+        elif not d["wipe"]:
             # 生产红线：没确认就不动数据盘。
             # 这里**故意不再发 `ignoredisk --drives=<d>`**：第二条 ignoredisk 会让 pykickstart
             # 直接报 "One of --drives or --only-use must be specified"（见函数开头），
@@ -1081,6 +1166,14 @@ def _rhel_custom_lines(plan, disk, dd_dev=None) -> list:
         lines.append("logvol " + (p["mount"] or p["lv"]) + " " + " ".join(opts))
 
     for k, d in enumerate(plan["data_disks"]):
+        if d.get("existing") and d["mount"]:
+            # ★ 功能 G：挂**已有**文件系统。按 pykickstart 原文，`--noformat` + `--onpart=`
+            #   是"不格式化、用既有分区"的**唯一**写法（见 _existing_fs_id 上方的引文）。
+            #   用 UUID/LABEL 而不是 /dev/sdX1：枚举顺序与分区编号都不用管（§5.42 同口径）。
+            #   注意这里**不发 --ondisk**、也不发 --fstype：既有的文件系统类型由 anaconda
+            #   现场探测，重新声明反而可能误导。
+            lines.append("part %s --onpart=%s --noformat" % (d["mount"], d["existing"]))
+            continue
         if d["wipe"] and d["mount"]:
             # R2-H3：要**主动分区/格式化**的数据盘，盘名必须来自 %pre 的反解结果，
             # 不能写死 —— 否则枚举顺序一反转就格式化到别的盘上。
@@ -1323,8 +1416,13 @@ def _rhel_pick_target_lines(plan) -> list:
     # 反解不出来就中止：宁可不装，绝不按猜的盘去格式化。
     groups = _data_disk_matcher_specs(plan)
     for i, d in enumerate(plan["data_disks"]):
-        if not d["wipe"]:
+        # ★ 功能 G：**挂既有文件系统**的数据盘也要反解设备名 —— 它必须出现在
+        #   `ignoredisk --only-use=` 里（否则 anaconda 看不到这块盘上的既有分区，
+        #   `--onpart=UUID=…` 就找不到设备）。它**不**进 clearpart，所以只是"可见"。
+        if not (d["wipe"] or d.get("existing")):
             continue
+        what = "wipe=true" if d["wipe"] else "existing_" + (
+            "uuid" if d["existing"].startswith("UUID=") else "label")
         g = "|".join(groups[i])
         lines += [
             "ddev%d=$(lsblk -bdnP -o NAME,TYPE,RM,TRAN,SIZE,SERIAL,WWN | "
@@ -1337,11 +1435,11 @@ def _rhel_pick_target_lines(plan) -> list:
             #   "两条数据盘"这种常见配置直接装不下去。**单组就必须传 gi=1**。
             % (i + 1, 1, g, _LSBLK_AWK_PRELUDE + _AWK_PICK_BY_GROUP),
             "if [ -z \"$ddev%d\" ]; then" % (i + 1),
-            "  pxelog '!! 第 %d 个数据盘（wipe=true）按稳定条件找不到设备 —— 拒绝继续"
-            "（按猜的盘格式化会清错盘）'" % (i + 1),
+            "  pxelog '!! 第 %d 个数据盘（%s）按稳定条件找不到设备 —— 拒绝继续"
+            "（按猜的盘格式化会清错盘；挂既有文件系统也会挂错盘）'" % (i + 1, what),
             "  echo 'PXE: 待格式化的数据盘无法按稳定条件定位，装机中止' >&2; exit 1",
             "fi",
-            "pxelog \"第 %d 个数据盘（wipe=true）解析为 $ddev%d\"" % (i + 1, i + 1),
+            "pxelog \"第 %d 个数据盘（%s）解析为 $ddev%d\"" % (i + 1, what, i + 1),
         ]
     lines.append("pxelog \"选定目标盘 target='${target:-<空>}'\"")
     lines.append("if [ -z \"$target\" ]; then "
@@ -1359,9 +1457,10 @@ def _rhel_disk_block(plan, use_pre) -> list:
     disk = "$target" if use_pre else plan["name"]
 
     if custom:
-        # use_pre 时把"要主动清除的数据盘"也换成 %pre 反解出来的 $ddevN（R2-H3）
+        # use_pre 时把"要主动清除的数据盘"与"要挂既有文件系统的数据盘"都换成
+        # %pre 反解出来的 $ddevN（R2-H3 / 功能 G：后者要进 ignoredisk --only-use）
         dd_dev = ({i: "$ddev%d" % (i + 1) for i, d in enumerate(plan["data_disks"])
-                   if d["wipe"]} if use_pre else None)
+                   if d["wipe"] or d.get("existing")} if use_pre else None)
         body = _rhel_custom_lines(plan, disk, dd_dev)
         if use_pre:
             boot = "bootloader --location=mbr --boot-drive=$target"

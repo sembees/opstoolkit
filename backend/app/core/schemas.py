@@ -590,13 +590,35 @@ def _disk_check_layout_rules(dc: dict, os_type: str, disk_scheme: str = "lvm") -
         )
     if custom:
         for i, d in enumerate(data):
+            # ★ 功能 G：`existing_uuid/existing_label` = "挂这块盘上**已有**的文件系统"，
+            #   这正是原来那句"挂载既有文件系统我们表达不出来"的补充表达方式 ——
+            #   有它就不该再报"wipe=false 时挂载点会被丢弃"。
+            has_ex = any(str((d or {}).get(k) or "").strip()
+                         for k in ("existing_uuid", "existing_label"))
             # wipe=false 表示"不碰这块盘上的既有分区表"，那就没有地方可以安全地新建并挂载一个
-            # 分区（挂载既有文件系统我们表达不出来）—— mount 会被丢掉，所以拒绝。
+            # 分区 —— mount 会被丢掉，所以拒绝（除非明确给了 existing_*，那才挂得上去）。
             if (str((d or {}).get("mount") or "").strip()
-                    and (d or {}).get("wipe") is not True):
+                    and (d or {}).get("wipe") is not True
+                    and not has_ex):
                 raise ValueError(
                     f"disk_config.data_disks[{i}].mount：wipe=false 时不会给数据盘建分区/格式化，"
-                    "挂载点会被丢弃，故拒绝；要建分区并挂载请设 wipe=true（或去掉 mount）"
+                    "挂载点会被丢弃，故拒绝；要建分区并挂载请设 wipe=true（或去掉 mount）；"
+                    "要挂这块盘上**已有**的文件系统（不格式化、保留数据），请额外给出 "
+                    "existing_uuid（或 existing_label）"
+                )
+    # ★ 功能 G：Ubuntu 侧不支持 —— RHEL 侧有 pykickstart 原文可依，curtin storage 能否
+    #   "保留并挂载既有分区"本项目**未验证**，所以不在 schema 层放行（否则错误会晚到生成期，
+    #   而生成期仍然拒绝，运维看到的只是"保存能过、生成被拒"）。
+    if data and os_type not in _RHEL_FAMILY:
+        for i, d in enumerate(data):
+            if any(str((d or {}).get(k) or "").strip()
+                   for k in ("existing_uuid", "existing_label")):
+                raise ValueError(
+                    f"disk_config.data_disks[{i}].existing_uuid/existing_label："
+                    "挂载**已有**文件系统目前只在 RHEL 系实现（kickstart 的 "
+                    "`part <挂载点> --onpart=UUID=… --noformat`）；Ubuntu(subiquity/curtin) 侧"
+                    "的等价写法尚未验证，按 fail-closed 拒绝。请改用 RHEL 系模板，"
+                    "或先手工挂载该文件系统。"
                 )
     if custom and not any(str((p or {}).get("mount") or "").strip() == "/" for p in parts):
         raise ValueError(
@@ -814,10 +836,41 @@ class PxeDiskConfigIn(BaseModel):
             # 只给 size/serial/wwid 表达不出来 → 盘名必填。
             # 与 generator._disk_plan 里的同名护栏成对：这里让界面保存时就 422，
             # 那边兜住"从库里直接读出来的老配置"（绕过 schema 的那条路）。
+            # ★ 功能 G：用 existing_uuid/existing_label 挂既有文件系统时，产物里同样要
+            #   显式引用这块盘（要进 ignoredisk --only-use），所以 name 也是必填。
+            _ex_keys = ("existing_uuid", "existing_label")
+            _ex = [k for k in _ex_keys if str(d.get(k) or "").strip()]
             if d.get("wipe") and not str(d.get("name") or "").strip():
                 raise ValueError(
                     f"data_disks[{i}].name：wipe=true 时必须给出盘名"
                     "（产物里要显式清这块盘，只给 size/serial/wwid 无法表达）")
+            if _ex and not str(d.get("name") or "").strip():
+                raise ValueError(
+                    f"data_disks[{i}].name：挂载**已有**文件系统时必须给出盘名"
+                    "（产物里要把它列进 ignoredisk --only-use，只给 size/serial/wwid 无法表达）")
+            if len(_ex) > 1:
+                raise ValueError(
+                    f"data_disks[{i}]：existing_uuid 与 existing_label 只能给一个"
+                    "（两个都给无法确定用哪个去匹配既有文件系统）")
+            if _ex:
+                if not str(d.get("mount") or "").strip():
+                    raise ValueError(
+                        f"data_disks[{i}].{_ex[0]}：挂载**已有**文件系统必须同时给出 mount"
+                        "（挂到哪个目录）")
+                if d.get("wipe"):
+                    raise ValueError(
+                        f"data_disks[{i}]：{_ex[0]} 与 wipe=true 互相矛盾（wipe 会清掉既有"
+                        "分区表，数据就没了），只能选一个")
+                if str(d.get("fstype") or "").strip():
+                    raise ValueError(
+                        f"data_disks[{i}].fstype：挂载**已有**文件系统不会重新格式化，"
+                        "文件系统类型由安装器现场探测；给了也不会被使用，故拒绝")
+                _exv = str(d.get(_ex[0]) or "").strip()
+                if not re.fullmatch(r"[A-Za-z0-9._:+-]{1,64}", _exv):
+                    raise ValueError(
+                        f"data_disks[{i}].{_ex[0]} 含非法字符（只允许字母数字与 . _ : + -，"
+                        f"最多 64 字符）：{_exv[:40]!r} —— 这个值会被拼进 kickstart 的 "
+                        "--onpart=；卷标里带空格/引号的请改用 existing_uuid")
             mount = _disk_mount_check(d.get("mount", ""), f"data_disks[{i}].mount")
             _disk_fstype_check(d.get("fstype", ""), f"data_disks[{i}].fstype", mount)
         return v

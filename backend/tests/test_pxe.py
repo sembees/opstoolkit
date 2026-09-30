@@ -3109,3 +3109,234 @@ class PxeProfileInputSurfaceTest(unittest.TestCase):
                     PxeProfileIn(name="t", deploy_mode=bad)
                 with self.assertRaises(ValueError):
                     PxeGenerateIn(deploy_mode=bad)
+
+
+class ExistingFilesystemMountTest(unittest.TestCase):
+    """功能 G：挂载数据盘上**已有**的文件系统（不新建分区、不格式化）。
+
+    依据是 pykickstart 3.78 的**原文**（我下载源码核对过，见 RUNBOOK §5.74）：
+      · `part` 命令说明："All partitions created will be formatted as part of the
+        installation process unless ``--noformat`` and ``--onpart`` are used."
+      · `--noformat`："Tells the installation program not to format the partition, for
+        use with the ``--onpart`` command."
+      · `--onpart`："Put the partition on an already existing device. Use
+        ``--onpart=LABEL=name`` or ``--onpart=UUID=name`` to specify a partition by label
+        or uuid respectively." + "it is safer to use labels than absolute partition names."
+    ⇒ 用 UUID/LABEL 定位，产物里**不出现设备名**（与 §5.42「设备名不是身份」同口径）。
+
+    这条特性最危险的地方不是"挂不上"，而是**为了挂上而把盘放进了会被清空的集合**：
+    anaconda 的 `ignoredisk --only-use` 决定"哪些盘可见"，`clearpart --drives` 决定
+    "哪些盘会被清"。挂既有文件系统的盘必须**可见**（否则它的分区根本不在设备树里，
+    `--onpart` 找不到），但**绝不能被清**。所以下面对这两条逐字断言。
+    """
+
+    PARTS = [{"mount": "/boot", "size": "1G", "fstype": "ext4"},
+             {"mount": "/", "size": "rest", "fstype": "ext4"}]
+    UUID = "1b2c3d4e-5f60-4718-9a0b-1c2d3e4f5061"
+
+    def _rhel(self, dc, os_type="rhel"):
+        import importlib
+        m = importlib.import_module("tests.test_pxe")
+        kw = dict(disk_config=dc, os_type=os_type)
+        if os_type == "rhel":
+            kw.update(os_version="9", mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/")
+        else:
+            kw.update(os_version="22.04", mirror="")
+        return m._cfg(**kw)
+
+    def _dc(self, dd):
+        """custom + disk_config.wipe=true（有 clearpart）—— 最容易抹错盘的组合。"""
+        return {"target": {"mode": "auto"}, "layout": "custom", "wipe": True,
+                "partitions": self.PARTS, "data_disks": [dd]}
+
+    @staticmethod
+    def _part_line(ks):
+        """取出 ks 里那一行 `part … --onpart=…`。"""
+        lines = [l for l in ks.splitlines() if "--onpart=" in l]
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    def test_uuid_mount_uses_onpart_noformat(self):
+        from app.it.pxe.generator import generate_all
+        ks = generate_all(self._rhel(self._dc(
+            {"name": "sdc", "size": "30G", "mount": "/data",
+             "existing_uuid": self.UUID})))["ks.cfg"]
+        line = self._part_line(ks)
+        self.assertEqual(line.strip(), "part /data --onpart=UUID=%s --noformat" % self.UUID)
+        # 这条行里**不能**出现 --ondisk/--fstype（既有的文件系统不重新格式化）
+        self.assertNotIn("--ondisk", line)
+        self.assertNotIn("--fstype", line)
+
+    def test_label_mount_is_supported_too(self):
+        from app.it.pxe.generator import generate_all
+        ks = generate_all(self._rhel(self._dc(
+            {"name": "sdc", "size": "30G", "mount": "/data",
+             "existing_label": "DATA-2026"})))["ks.cfg"]
+        self.assertEqual(self._part_line(ks).strip(),
+                         "part /data --onpart=LABEL=DATA-2026 --noformat")
+
+    def test_disk_is_visible_but_never_cleared(self):
+        """★ 这条是本特性的安全红线，不是"顺手断言"。"""
+        from app.it.pxe.generator import generate_all
+        ks = generate_all(self._rhel(self._dc(
+            {"name": "sdc", "size": "30G", "mount": "/data",
+             "existing_uuid": self.UUID})))["ks.cfg"]
+        # 可见：进了 --only-use（并且是按 %pre 反解出来的设备名，不是写死的盘名）
+        self.assertIn("ignoredisk --only-use=$target,$ddev1", ks)
+        # 不可清：clearpart 只有目标盘
+        self.assertIn("clearpart --drives=$target --all --initlabel", ks)
+        self.assertNotIn("clearpart --drives=$target,$ddev1", ks)
+        # 反解护栏在（解不出来就中止，不会"按猜的盘挂"）
+        self.assertIn("ddev1=$(lsblk", ks)
+        self.assertIn("existing_uuid", ks)          # %pre 日志里点名是哪条声明
+
+    def test_wipe_disk_and_existing_disk_together_stay_apart(self):
+        """同时有"要格式化的数据盘"和"要保留的数据盘"时，两个集合不能串。"""
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "auto"}, "layout": "custom", "wipe": True,
+              "partitions": self.PARTS,
+              "data_disks": [{"name": "sdc", "size": "30G", "mount": "/data",
+                              "fstype": "xfs", "wipe": True},
+                             {"name": "sdd", "size": "60G", "mount": "/keep",
+                              "existing_uuid": self.UUID}]}
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        self.assertIn("ignoredisk --only-use=$target,$ddev1,$ddev2", ks)
+        self.assertIn("clearpart --drives=$target,$ddev1 --all --initlabel", ks)
+        self.assertIn("--ondisk=$ddev1", ks)                       # 被格式化的那块
+        self.assertIn("part /keep --onpart=UUID=%s --noformat" % self.UUID, ks)
+
+    def test_name_mode_uses_the_given_name_and_skips_pre_resolution(self):
+        from app.it.pxe.generator import generate_all
+        dc = {"target": {"mode": "name", "name": "sda"}, "layout": "custom", "wipe": True,
+              "partitions": self.PARTS,
+              "data_disks": [{"name": "sdc", "size": "30G", "mount": "/data",
+                              "existing_uuid": self.UUID}]}
+        ks = generate_all(self._rhel(dc))["ks.cfg"]
+        self.assertNotIn("ddev1=", ks)
+        self.assertIn("ignoredisk --only-use=sda,sdc", ks)
+        self.assertIn("clearpart --drives=sda --all --initlabel", ks)
+        self.assertIn("part /data --onpart=UUID=%s --noformat" % self.UUID, ks)
+
+    def test_generator_rejects_contradictions_and_unsupported_combos(self):
+        """生成器侧也必须拦（库里读出来的老配置绕过 schema 的那条路）。"""
+        from app.it.pxe.generator import generate_all
+        cases = [
+            ("缺 mount", {"name": "sdc", "size": "30G", "existing_uuid": self.UUID},
+             "必须同时给出 mount"),
+            ("与 wipe=true 矛盾", {"name": "sdc", "size": "30G", "mount": "/data",
+                                   "existing_uuid": self.UUID, "wipe": True},
+             "互相矛盾"),
+            ("uuid 与 label 同时给", {"name": "sdc", "size": "30G", "mount": "/data",
+                                      "existing_uuid": self.UUID, "existing_label": "L"},
+             "只能给一个"),
+            ("fstype 白给", {"name": "sdc", "size": "30G", "mount": "/data",
+                             "existing_uuid": self.UUID, "fstype": "xfs"},
+             "不会重新格式化"),
+            ("数值非法字符", {"name": "sdc", "size": "30G", "mount": "/data",
+                              "existing_uuid": "AB CD;rm -rf /"},
+             "含非法字符"),
+            ("mode=name 无盘名", {"size": "30G", "mount": "/data",
+                                  "existing_uuid": self.UUID},
+             "必须给出盘名"),
+            ("非 custom 布局", {"name": "sdc", "size": "30G", "mount": "/data",
+                                "existing_uuid": self.UUID},
+             "只有 layout=custom 才生成"),
+        ]
+        for label, dd, needle in cases:
+            with self.subTest(case=label):
+                dc = self._dc(dd)
+                if label == "mode=name 无盘名":
+                    dc["target"] = {"mode": "name", "name": "sda"}
+                if label == "非 custom 布局":
+                    # 非 custom 时**不能**再给 partitions（那是另一条更早的拒绝），
+                    # 这里要考的是"非 custom + existing_*"这条。
+                    dc["layout"] = "lvm"
+                    dc.pop("partitions", None)
+                with self.assertRaises(ValueError) as ctx:
+                    generate_all(self._rhel(dc))
+                self.assertIn(needle, str(ctx.exception), label)
+
+    def test_ubuntu_is_fail_closed_because_unverified(self):
+        """Ubuntu 侧等价写法（curtin 的 preserve 之类）本会话**没有验证过** ⇒ 拒绝，不赌。"""
+        from app.it.pxe.generator import generate_all
+        dc = self._dc({"name": "sdc", "size": "30G", "mount": "/data",
+                       "existing_uuid": self.UUID})
+        with self.assertRaises(ValueError) as ctx:
+            generate_all(self._rhel(dc, os_type="ubuntu"))
+        self.assertIn("尚未验证", str(ctx.exception))
+
+    def test_schema_rejects_the_same_things_with_field_path(self):
+        """保存期（schema）就要 422 并点名字段，别让运维"保存成功、生成被拒"。"""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.api import pxe as pxe_api
+        from app.core.auth import get_current_user
+        from app.database import get_db
+        app = FastAPI()
+        app.include_router(pxe_api.router, prefix="/api/it/pxe")
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": "t", "username": "t", "display_name": "t", "role": "admin"}
+        app.dependency_overrides[get_db] = lambda: None
+        client = TestClient(app)
+
+        base = {"layout": "custom", "wipe": True, "partitions": self.PARTS}
+        cases = [
+            ("缺 mount", {"name": "sdc", "size": "30G", "existing_uuid": self.UUID},
+             "existing_uuid"),
+            ("与 wipe 矛盾", {"name": "sdc", "size": "30G", "mount": "/data",
+                              "existing_uuid": self.UUID, "wipe": True},
+             "wipe"),
+            ("两个都给", {"name": "sdc", "size": "30G", "mount": "/data",
+                          "existing_uuid": self.UUID, "existing_label": "L"},
+             "只能给一个"),
+            ("fstype 白给", {"name": "sdc", "size": "30G", "mount": "/data",
+                             "existing_uuid": self.UUID, "fstype": "xfs"},
+             "fstype"),
+            ("非法字符", {"name": "sdc", "size": "30G", "mount": "/data",
+                          "existing_uuid": "AB CD"},
+             "含非法字符"),
+            ("无盘名", {"size": "30G", "mount": "/data", "existing_uuid": self.UUID},
+             "name"),
+            ("缺稳定匹配条件", {"name": "sdc", "mount": "/data",
+                                "existing_uuid": self.UUID},
+             "稳定匹配条件"),
+        ]
+        for label, dd, needle in cases:
+            with self.subTest(case=label):
+                dc = dict(base, data_disks=[dd])
+                r = client.post("/api/it/pxe/profiles", json={
+                    "name": "x", "os_type": "rhel", "os_version": "9",
+                    "mirror": "http://mirror.example/rocky/9/BaseOS/x86_64/os/",
+                    "admin_password": "Test@123", "disk_config": dc})
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertIn(needle, json.dumps(r.json()["detail"], ensure_ascii=False), label)
+
+    def test_schema_accepts_the_supported_combination(self):
+        """正例：rhel + custom + 稳定匹配条件 + 盘名 + mount + existing_uuid ⇒ 通过。"""
+        from app.core.schemas import PxeProfileIn
+        p = PxeProfileIn(name="ok", os_type="rhel", os_version="9",
+                         mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/",
+                         disk_config=self._dc(
+                             {"name": "sdc", "size": "30G", "mount": "/data",
+                              "existing_uuid": self.UUID}))
+        dd = p.disk_config["data_disks"][0]
+        self.assertEqual(dd["existing_uuid"], self.UUID)
+
+    def test_ubuntu_schema_rejection_mentions_unverified(self):
+        from app.core.schemas import PxeProfileIn
+        with self.assertRaises(ValueError) as ctx:
+            PxeProfileIn(name="u", os_type="ubuntu", os_version="22.04",
+                         disk_config=self._dc(
+                             {"name": "sdc", "size": "30G", "mount": "/data",
+                              "existing_uuid": self.UUID}))
+        self.assertIn("尚未验证", str(ctx.exception))
+
+    def test_no_regression_for_plain_data_disks(self):
+        """没有 existing_* 的老配置：产物必须与改动前一致（不受影响）。"""
+        from app.it.pxe.generator import generate_all
+        ks = generate_all(self._rhel(self._dc(
+            {"name": "sdc", "size": "30G", "fstype": "xfs"})))["ks.cfg"]
+        self.assertNotIn("--onpart", ks)
+        self.assertIn("ignoredisk --only-use=$target", ks)
+        self.assertIn("clearpart --drives=$target --all --initlabel", ks)

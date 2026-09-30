@@ -310,9 +310,14 @@
             拿它当"别碰这块盘"的判据会把系统盘排除掉、让安装落到数据盘上并抹掉它（真机实测过）。
             盘名只作备注。容量写法如 <code>30G</code>（G/M/T 按二进制，GB/MB/TB 按十进制）。<br />
             <!-- 后端契约：不格式化时不会建分区，挂载点会被丢弃 ⇒ 直接 422（fail-closed），
-                 别让运维填完挂载点才撞一个 422。挂载**已有**文件系统尚未支持（见 RUNBOOK §4-G）。 -->
-            <b style="color: var(--el-color-warning)">要给数据盘填「挂载点」就必须同时打开「格式化」</b>：
-            不格式化时不会建分区，挂载点没有承载物、后端会拒绝（挂载<b>已有</b>文件系统尚未支持）。
+                 别让运维填完挂载点才撞一个 422。 -->
+            <b style="color: var(--el-color-warning)">要给数据盘填「挂载点」必须二选一</b>：
+            ① 打开「格式化」（建新分区再挂）；② 在「挂已有文件系统」里填该分区文件系统的
+            <b>UUID</b> 或<b>卷标</b>（保留数据、不格式化）。<br />
+            「挂已有文件系统」只在 <b>RHEL 系</b>（kickstart 的
+            <code>part &lt;挂载点&gt; --onpart=UUID=… --noformat</code>）实现；
+            Ubuntu 侧的等价写法本项目<b>尚未验证</b>，后端会拒绝（fail-closed，不赌）。
+            填了它会自动关掉「格式化」并清空「文件系统」——这两列对已有文件系统没有意义。
           </div>
           <el-table :data="form.data_disks" size="small" style="margin-bottom: 6px">
             <el-table-column label="容量（识别用）" width="130">
@@ -336,15 +341,37 @@
             <el-table-column label="挂载点" width="150">
               <template #default="{ row }"><el-input v-model="row.mount" placeholder="/data" /></template>
             </el-table-column>
+            <el-table-column label="挂已有文件系统" width="240">
+              <template #default="{ row }">
+                <el-select
+                  v-model="row.existing_kind"
+                  clearable
+                  placeholder="不用"
+                  style="width: 84px"
+                  @change="onExistingKindChange(row)"
+                >
+                  <el-option label="UUID" value="uuid" />
+                  <el-option label="卷标" value="label" />
+                </el-select>
+                <el-input
+                  v-if="row.existing_kind"
+                  v-model="row.existing_value"
+                  placeholder="文件系统 UUID / 卷标"
+                  style="width: 146px; margin-left: 4px"
+                />
+              </template>
+            </el-table-column>
             <el-table-column label="文件系统" width="120">
               <template #default="{ row }">
-                <el-select v-model="row.fstype" clearable>
+                <el-select v-model="row.fstype" clearable :disabled="!!row.existing_kind">
                   <el-option v-for="f in FSTYPES" :key="f" :label="f" :value="f" />
                 </el-select>
               </template>
             </el-table-column>
             <el-table-column label="格式化" width="90">
-              <template #default="{ row }"><el-switch v-model="row.wipe" /></template>
+              <template #default="{ row }">
+                <el-switch v-model="row.wipe" :disabled="!!row.existing_kind" />
+              </template>
             </el-table-column>
             <el-table-column label="操作" width="70">
               <template #default="scope">
@@ -355,7 +382,7 @@
           <div style="margin-bottom: 12px">
             <el-button
               size="small"
-              @click="form.data_disks.push({ size: '', serial: '', wwid: '', name: '', mount: '', fstype: 'xfs', wipe: false })"
+              @click="form.data_disks.push({ size: '', serial: '', wwid: '', name: '', mount: '', fstype: 'xfs', wipe: false, existing_kind: '', existing_value: '' })"
             >
               + 加一块数据盘
             </el-button>
@@ -718,6 +745,16 @@ function onOsChange() {
 function addPartition(p) {
   form.partitions.push(p || { mount: "", size: "", fstype: "", vg: "", lv: "" })
 }
+
+// ★ 功能 G：选了「挂已有文件系统」就把「格式化」「文件系统」两列清掉并置灰。
+//   这两列对"保留既有文件系统"没有意义（后端对 existing_* + fstype/wipe 直接 422）。
+//   这里**显式**清（并让控件变灰），而不是在提交时偷偷改值 —— 运维看得见自己填的东西没了。
+function onExistingKindChange(row) {
+  if (row.existing_kind) {
+    row.wipe = false
+    row.fstype = ""
+  }
+}
 // 规格里的标准布局：EFI + boot + swap + LVM 吃掉剩余空间
 function applyPreset() {
   form.partitions = [
@@ -764,10 +801,33 @@ function buildDiskConfig() {
       '用它识别"别碰这块盘"会把系统盘排除掉、让安装落到数据盘上并抹掉它。' +
       '请至少填一个识别条件（推荐容量，如 30G）。')
   }
-  const dd = ddRaw.map(d => ({
-    size: d.size || "", serial: d.serial || "", wwid: d.wwid || "",
-    name: d.name || "", mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe,
-  }))
+  const dd = ddRaw.map(d => {
+    const o = {
+      size: d.size || "", serial: d.serial || "", wwid: d.wwid || "",
+      name: d.name || "", mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe,
+    }
+    // ★ 功能 G：挂**已有**文件系统（UUID / 卷标，不格式化、保留数据）。
+    //   这里**不静默丢值**：填了种类没填值、或填在 Ubuntu 上，都在本地直接拦住并说清原因
+    //   （后端也会拒，但让运维等到点保存才知道没必要）。
+    if (d.existing_kind) {
+      const v = String(d.existing_value || "").trim()
+      if (!v) {
+        throw new Error("有数据盘选了「挂已有文件系统」但没填 UUID/卷标：请填上，或把这一列清空。")
+      }
+      if (form.os_type !== "rhel") {
+        throw new Error(
+          "「挂已有文件系统」目前只在 RHEL 系模板实现（kickstart 的 " +
+          "part <挂载点> --onpart=UUID=… --noformat）；Ubuntu 侧的等价写法尚未验证，" +
+          "后端会按 fail-closed 拒绝。请改用 RHEL 系模板，或先手工挂载。")
+      }
+      if (d.existing_kind === "uuid") o.existing_uuid = v
+      else o.existing_label = v
+      // 既有文件系统不重新格式化：这两个值对后端没有意义（会被 422），这里显式清掉
+      o.fstype = ""
+      o.wipe = false
+    }
+    return o
+  })
   if (dd.length) dc.data_disks = dd
   const rd = form.raid
     .filter(r => r.name && r.devices)
@@ -826,6 +886,9 @@ function fillForm(p) {
   form.data_disks = (dc.data_disks || []).map(d => ({
     size: d.size || "", serial: d.serial || "", wwid: d.wwid || "",
     name: d.name || "", mount: d.mount || "", fstype: d.fstype || "xfs", wipe: !!d.wipe,
+    // 功能 G：把 existing_uuid / existing_label 折回界面上的"种类 + 值"两段
+    existing_kind: d.existing_uuid ? "uuid" : (d.existing_label ? "label" : ""),
+    existing_value: d.existing_uuid || d.existing_label || "",
   }))
   form.raid = (dc.raid || []).map(r => ({
     name: r.name || "", level: r.level || 1,
