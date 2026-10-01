@@ -574,25 +574,31 @@ def _make_room(dst: str, base_abs: str, log) -> list:
     return removed
 
 
-def _restore_previous(prev, removed_paths, conf_prev, flat_default, log) -> dict:
+def _restore_previous(prev, removed_paths, conf_prev, flat_default, log,
+                      written_sha=None, conf_written_sha=None) -> dict:
     """把本次部署已经写下的文件恢复成部署前的内容（R3 的"零落盘"补救）。
 
     真正的实现在 filestore.restore_previous；这里只补 PXE 自己的两件事：
     配置文件名，以及"全局唯一的那份默认菜单"需要的那把进程内锁。
+    ★ U2-F7：`written_sha`/`conf_written_sha` 是"本次写入内容的 sha"，回滚前拿它
+      确认磁盘上还是我们写的那份（被别人改过的路径一律不动、如实报告）。
     """
     return _filestore.restore_previous(
         prev, removed_paths, conf_prev, "opstk-pxe.conf", log,
-        lock=_FLAT_DEFAULT_LOCK, lock_path=flat_default)
+        lock=_FLAT_DEFAULT_LOCK, lock_path=flat_default,
+        written_sha=written_sha, conf_written_sha=conf_written_sha)
 
 
-def _try_rollback(log, errors, prev, removed_paths, conf_prev, flat_default, written):
+def _try_rollback(log, errors, prev, removed_paths, conf_prev, flat_default, written,
+                  written_sha=None, conf_written_sha=None):
     """失败收尾：能安全回滚就回滚。返回 (errors, written, extra)。
 
     见 filestore.try_rollback —— 调用方必须先证明"宿主机没重启过 dnsmasq"。
     """
     return _filestore.try_rollback(
         log, errors, prev, removed_paths, conf_prev, "opstk-pxe.conf", written,
-        lock=_FLAT_DEFAULT_LOCK, lock_path=flat_default)
+        lock=_FLAT_DEFAULT_LOCK, lock_path=flat_default,
+        written_sha=written_sha, conf_written_sha=conf_written_sha)
 
 
 def _deploy_fail(log, errors, scope="", written=None, extra=None):
@@ -734,6 +740,10 @@ def _deploy_files_impl(files, pid="") -> dict:
                    + "（与按 MAC 的应答目录同名冲突，已被按 MAC 的那份取代）")
 
     written = []
+    # ★ U2-F7：`written` 是给运维看的**标签/相对名**（`rel`），键的命名空间与回滚快照
+    #   `prev`（绝对路径 `d`）**不是一回事**，所以"本次写入内容的 sha"必须单独记一份，
+    #   并且**用 `prev` 的键**（绝对路径）。回滚前靠它判断"磁盘上还是不是我写的那份"。
+    written_sha = {}
     # 每个落盘目标的"部署前内容"快照 —— 失败时据此把磁盘恢复成原样（R3 的回滚）。
     # removed_paths 记录 _make_room 为让路删掉的东西：删掉的恢复不了，
     # 所以只要有它就整体放弃回滚（见 _restore_previous）。
@@ -768,6 +778,8 @@ def _deploy_files_impl(files, pid="") -> dict:
                         prev[d] = _snapshot(d)
                     removed_paths += _make_room(d, base_abs, log)
                     _atomic_write(d, content)
+                    # 内容 sha 与 prev 的键（绝对路径）对齐 —— 回滚前要拿它比对磁盘现值
+                    written_sha[d] = _filestore.content_sha(content)
             except OSError as e:
                 errors.append("写入失败 " + rel + "：" + str(e)[:120])
                 continue
@@ -786,7 +798,8 @@ def _deploy_files_impl(files, pid="") -> dict:
         # 还没碰 dnsmasq（配置一个字都没写），所以回滚是**无条件安全**的：
         # 把已经换掉的 HTTP 文件恢复成原样，就等于什么都没发生。
         errs, written, extra = _try_rollback(
-            log, errors, prev, removed_paths, None, flat_default, written)
+            log, errors, prev, removed_paths, None, flat_default, written,
+            written_sha=written_sha)
         return _deploy_fail(log, errs, scope, written, extra)
 
     # 2) 文件全部就位后才写 dnsmasq 配置、才重启
@@ -817,7 +830,8 @@ def _deploy_files_impl(files, pid="") -> dict:
             #   就把 DHCP/TFTP 全弄丢）。所以这里必须把**已经取好的 conf_prev 快照**
             #   交给回滚（以前传 None，等于把截断的文件留在原地），并且文案要说实话。
             errs, written, extra = _try_rollback(
-                log, errors, prev, removed_paths, conf_prev, flat_default, written)
+                log, errors, prev, removed_paths, conf_prev, flat_default, written,
+                written_sha=written_sha, conf_written_sha=want_sha)
             errs = list(errs) + [
                 "配置写入失败，且**文件可能已被截断**（open('w') 会先清空）："
                 "已尝试用部署前的快照恢复 dnsmasq 配置；若恢复也失败，"
@@ -864,7 +878,8 @@ def _deploy_files_impl(files, pid="") -> dict:
                 # （not_before：只认本次部署之后写下的 FAIL；陈旧的/别人的 FAIL 不算数，
                 #   那时宿主机可能早已因别的事件重启过 —— 外部审查 U2-F8）
                 errs, written, extra = _try_rollback(
-                    log, [detail], prev, removed_paths, conf_prev, flat_default, written)
+                    log, [detail], prev, removed_paths, conf_prev, flat_default, written,
+                    written_sha=written_sha, conf_written_sha=want_sha)
                 if extra.get("rolled_back") and extra.get("rollback_conf_sha"):
                     # 回滚会把旧配置写回去，从而再触发一次宿主脚本；宿主机本来就跑着
                     # 这份配置（内容未变 ⇒ 不重启），等一小会儿只为把结论说实。

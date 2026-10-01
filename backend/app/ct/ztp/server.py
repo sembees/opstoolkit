@@ -186,6 +186,10 @@ def _deploy_files_impl(files: dict, tid: str = "") -> dict:
 
     # ③ 设备配置落盘：TFTP（设备来取）与 HTTP（人工核对/大文件）两个根，原子写
     written = []
+    # ★ U2-F7：`written` 装的是给运维看的标签（`tftp/…`、`web/…`），与回滚快照 `prev`
+    #   的键（绝对路径 `dst`）**不是同一个命名空间**；"本次写入内容的 sha"必须单独记，
+    #   且要用 `prev` 的键。回滚前靠它判断"磁盘上还是不是我写的那份"。
+    written_sha = {}
     prev = {}
     removed_paths = []
     for name, content in files.items():
@@ -206,6 +210,7 @@ def _deploy_files_impl(files: dict, tid: str = "") -> dict:
                     # 目录挡路：**不删**（ztp/ 目录是正常结构，删它代价远大于收益）
                     raise OSError("目标已存在且是目录")
                 _filestore.atomic_write(dst, content)
+                written_sha[dst] = _filestore.content_sha(content)
             except OSError as e:
                 errors.append("写入失败 " + tag + "：" + str(e)[:120])
                 continue
@@ -214,7 +219,8 @@ def _deploy_files_impl(files: dict, tid: str = "") -> dict:
     if errors:
         # 还没碰 dnsmasq ⇒ 回滚无条件安全
         errs, written, extra = _filestore.try_rollback(
-            log, errors, prev, removed_paths, None, "opstk-ztp.conf", written)
+            log, errors, prev, removed_paths, None, "opstk-ztp.conf", written,
+            written_sha=written_sha)
         return _deploy_fail(log, errs, written, extra)
 
     # ④ dnsmasq 配置 + 握手
@@ -233,7 +239,8 @@ def _deploy_files_impl(files: dict, tid: str = "") -> dict:
             # 同 PXE 侧（外部审查 U2-F1）：write_conf 失败时文件**可能已被截断**，
             # 必须把已取好的 conf_prev 交给回滚，而不是传 None 把半截配置留在原地。
             errs, written, extra = _filestore.try_rollback(
-                log, errors, prev, removed_paths, conf_prev, "opstk-ztp.conf", written)
+                log, errors, prev, removed_paths, conf_prev, "opstk-ztp.conf", written,
+                written_sha=written_sha)
             errs = list(errs) + [
                 "配置写入失败，且**文件可能已被截断**（open('w') 会先清空）："
                 "已尝试用部署前的快照恢复 dnsmasq 配置。",
@@ -265,7 +272,8 @@ def _deploy_files_impl(files: dict, tid: str = "") -> dict:
             )
             if _dhcp.reload_failure_is_pre_restart(st, not_before=not_before):
                 errs, written, extra = _filestore.try_rollback(
-                    log, [detail], prev, removed_paths, conf_prev, "opstk-ztp.conf", written)
+                    log, [detail], prev, removed_paths, conf_prev, "opstk-ztp.conf", written,
+                    written_sha=written_sha, conf_written_sha=want_sha)
                 if extra.get("rolled_back") and extra.get("rollback_conf_sha"):
                     back = _dhcp.wait_host_reload(
                         extra["rollback_conf_sha"], timeout=min(8.0, _dhcp.HOST_RELOAD_WAIT),

@@ -2837,11 +2837,54 @@ class DeployPreflightAndRollbackTest(unittest.TestCase):
         # 关键断言：磁盘逐字节回到部署前（含 dnsmasq 配置，且新增的文件要被删掉）
         self.assertEqual(self._tree(), before)
 
+    def test_externally_modified_file_is_not_overwritten_by_rollback(self):
+        """★ U2-F7：回滚之前先确认"磁盘上现在还是本次写下的那份"。
+
+        场景：部署写到一半失败、正要回滚，而**在我们写完之后有别的程序或人改了其中一个文件**。
+        改前的行为是把部署前的旧内容写回去 —— 等于**悄悄覆盖别人的改动**，还报"已回滚"。
+        现在这类路径一律不动、在结论里点名；其余路径照常回滚。
+
+        注入点选 `dhcp_control`：它在"文件全部写完"之后、"等宿主机重载/回滚"之前被调用，
+        正好是那个窗口。
+        """
+        pid = "b" * 32
+        self._delegate()
+        self._wait(self.WAIT_OK)
+        self.assertTrue(self.server.deploy_files(self._files(pid), pid)["ok"])
+        flat = self.os.path.join(self.web, "boot.ipxe")
+        self.assertTrue(self.os.path.exists(flat), "扁平默认菜单没被写出来，用例前提不成立")
+        before = self._tree()
+
+        def edit_then_report(*a, **k):
+            with open(flat, "w", encoding="utf-8") as fh:
+                fh.write("EXTERNALLY-EDITED\n")
+            return {"ok": True, "action": "restart", "managed": False,
+                    "reload_delegated": True, "msg": "容器内，等待宿主机重载", "running": True}
+
+        self.dhcp_control.side_effect = edit_then_report
+        # 第二次部署（换一台机器）在 `--test` 阶段失败 ⇒ 可安全回滚
+        self._wait(self.WAIT_TEST_FAILED, self.WAIT_OK)
+        res = self.server.deploy_files(
+            self._files(pid, mac="aa:bb:cc:dd:ee:ff", hostname="db-02"), pid)
+
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["rolled_back"], res)
+        self.assertTrue(any("部分未回滚" in e for e in res["errors"]), res["errors"])
+        self.assertTrue(any("别的程序或人" in e for e in res["errors"]), res["errors"])
+        # ★ 核心断言：别人的改动原样留着
+        with open(flat, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "EXTERNALLY-EDITED\n")
+        # 其余文件照常回滚（本次新建的删掉、改写的回到旧字节）
+        after = self._tree()
+        self.assertEqual({k: v for k, v in after.items() if k != "boot.ipxe"},
+                         {k: v for k, v in before.items() if k != "boot.ipxe"})
+        # 写入没有被真正撤回 ⇒ files_written 必须保留（不能谎报"什么都没发生"）
+        self.assertTrue(res["files_written"], res)
+
     def test_rollback_removes_files_that_did_not_exist_before(self):
         """第一次部署就失败时，回滚要把这次**新建**的文件删掉。
 
-        只删文件、不删目录：空目录不承载任何配置内容（HTTP 侧对缺失文件就是 404），
-        而"删目录"会和并发的另一次部署抢同一条路径。所以这里断言的是 scope 下
+        只删文件、不删目录：空目录不承载任何配置内容（HTTP 侧对缺失文件就是 404），        而"删目录"会和并发的另一次部署抢同一条路径。所以这里断言的是 scope 下
         **没有任何文件**残留，而不是整个目录不存在（`user-data/` 本来就是目录）。
         """
         pid = "a" * 32
