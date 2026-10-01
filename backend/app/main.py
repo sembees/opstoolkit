@@ -45,12 +45,55 @@ async def health() -> dict:
 
 # PXE/ZTP HTTP 文件服务 (本机部署后生效，必须在根路径前注册)
 # 如果本机已部署 PXE/ZTP ，挂载静态文件服务
+class _TokenStatic(StaticFiles):
+    """给 `/pxe/serve` 加一道 token 门禁（外部审查第 J 条）。
+
+    为什么需要：这个根是**无认证**的，而它给出的 `ks.cfg` / `user-data` 里含 root 与管理员
+    口令的**哈希**（`rootpw --iscrypted $6$…`）。主要缓解是网络隔离，token 是第二层。
+
+    为什么包在 StaticFiles 外面而不是自己写 FileResponse：Starlette 的 StaticFiles 已经处理好了
+    路径归一化、目录穿越（`..`）、符号链接与 range 请求 —— 自己重写一遍就是重造一个更容易出错的轮子。
+    这里只做"校验 → 摘掉路径里的 token 段 → 交给 StaticFiles"。
+
+    token 两种写法都接受（见 core/serve_token.py 的说明）：
+      · 路径段 `/pxe/serve/<token>/ks.cfg`（生成器默认；`http_root` 里带一段，链路全自动带上）
+      · 查询串 `/pxe/serve/ks.cfg?t=<token>`（浏览器/手工核对方便）
+    **未配置 token ⇒ 与改造前逐字相同：不校验。**
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not serve_token.get_token():
+            return await super().__call__(scope, receive, send)
+        # ★ 坑：Starlette 的 `Mount` **不改写 `scope["path"]`** —— 它把挂载点写进
+        #   `root_path`，子应用要自己用 `get_route_path(scope)` 求出"挂载点之后那一段"。
+        #   我第一版直接拿 `scope["path"]` 当相对路径，于是 `/pxe/serve/<token>/ks.cfg`
+        #   里的 token 段被当成"文件名的一部分"，永远匹配不上 ⇒ 一律 403。
+        #   （StaticFiles 内部也是用 get_route_path 求相对路径的，所以要改写也得按同一口径。）
+        root = scope.get("root_path", "") or ""
+        route_path = get_route_path(scope)
+        new_route, provided = serve_token.take_from_path(route_path)
+        if not provided:
+            provided = serve_token.from_query(scope.get("query_string", b""))
+        if not serve_token.token_ok(provided):
+            resp = Response("403：/pxe/serve 需要 URL 里带 token（见 README）", status_code=403)
+            return await resp(scope, receive, send)
+        if new_route != route_path:
+            # 交给 StaticFiles 之前把 token 段摘掉（否则它会去 <root>/<token>/... 找文件）
+            full = root + new_route
+            scope = dict(scope, path=full, raw_path=full.encode("utf-8"))
+        return await super().__call__(scope, receive, send)
+
+
 try:
     from pathlib import Path
 
+    from starlette.routing import get_route_path
+
+    from app.core import serve_token
+
     _pxe_web = Path("/srv/opstk/pxe-web")
     if _pxe_web.is_dir():
-        app.mount("/pxe/serve", StaticFiles(directory=str(_pxe_web)), name="pxe-serve")
+        app.mount("/pxe/serve", _TokenStatic(directory=str(_pxe_web)), name="pxe-serve")
 except Exception:  # noqa: BLE001
     pass
 

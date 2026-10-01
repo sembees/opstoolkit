@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     secret_key: str = ""
     access_token_expire_minutes: int = 1440
     credential_key: str = ""
+    # ★ 外部审查第 J 条：`/pxe/serve` 是**无认证**的 HTTP 根，它提供的 ks.cfg / user-data 里
+    #   含 root 与管理员口令的**哈希**（`rootpw --iscrypted $6$…`）。主要缓解是网络隔离，
+    #   这一项是第二层：URL 里带一个不可猜的串，装机机自己取得到、别人猜不到。
+    #   **空 = 不启用**（与改造前逐字相同）—— 开关是运维**有意**做的，不是"重启就变"。
+    #   启用/更换之后必须**重新部署**一次（dnsmasq 的 dhcp-boot 与生成的 boot.ipxe/ks.cfg
+    #   里都带 URL）。细节见 app/core/serve_token.py。
+    pxe_serve_token: str = ""
 
     database_url: str = f"sqlite+aiosqlite:///{_DEFAULT_DB}"
 

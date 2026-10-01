@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import crypto, models
+from app.core import crypto, models, serve_token
 from app.core.auth import get_current_user, require_role
 from app.core.schemas import PxeGenerateIn, PxeGenerateResult, PxeInstallIn, PxeInstallOut, PxeProfileIn, PxeProfileOut
 from app.database import get_db
@@ -137,10 +137,14 @@ WEB_ROOT = "/srv/opstk/pxe-web"
 
 
 def _local_served_path(url):
-    """把本机发布的 URL 映射回真实目录（只认 /pxe/serve/ 前缀，防路径穿越）。"""
+    """把本机发布的 URL 映射回真实目录（只认 /pxe/serve/ 前缀，防路径穿越）。
+
+    ★ J：URL 里可能带 token 路径段（`/pxe/serve/<token>/…`）—— 先剥掉再映射，
+    否则会去 `<web_root>/<token>/…` 找文件（必然找不到）。
+    """
     if not url or SERVE_MARK not in url:
         return ""
-    rel = str(url).split(SERVE_MARK, 1)[1].strip("/")
+    rel = serve_token.strip_for_local_path(str(url).split(SERVE_MARK, 1)[1].strip("/"))
     if not rel or ".." in rel:
         return ""
     return os.path.join(WEB_ROOT, rel)
@@ -148,7 +152,7 @@ def _local_served_path(url):
 
 def _serve_url(path, server_ip):
     rel = os.path.relpath(path, WEB_ROOT).replace(os.sep, "/")
-    return "http://" + (server_ip or "192.168.1.100") + ":8000" + SERVE_MARK + rel + "/"
+    return serve_token.serve_base(server_ip) + "/" + rel + "/"
 
 
 def _detect_rhel_media(mirror, server_ip):
@@ -227,7 +231,8 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
         post_script=p.post_script,
         server_ip=server_ip or "192.168.1.100",
         # H5: 静态服务实际挂载在 :8000/pxe/serve（见 app/main.py），兜底路径必须带 /serve
-        http_root=http_root or ("http://" + (server_ip or "192.168.1.100") + ":8000/pxe/serve"),
+        # J：启用 pxe_serve_token 时这一段是 /pxe/serve/<token>（所有由它拼出的 URL 都带上）
+        http_root=http_root or serve_token.serve_base(server_ip or "192.168.1.100"),
         # E1: 只有**应答文件 / iPXE 菜单**可以按模板隔离（部署时指向 profiles/<pid>）；
         # 媒体必须继续走 http_root 的扁平路径。留空 = 与 http_root 相同。
         answer_root=answer_root,
@@ -464,7 +469,11 @@ async def download_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
 @router.get("/server/status")
 async def server_status(_user=Depends(get_current_user)):
     """查看本机 PXE 服务状态 (dnsmasq + TFTP + HTTP 文件 + 端口)。"""
-    return pxe_server.server_status()
+    out = pxe_server.server_status()
+    # ★ J：把"/pxe/serve 有没有开 token 门禁"如实报出来（只报状态，不返回 token 本身）——
+    #   否则运维会以为它在保护，而实际上 .env 里那行是空的。
+    out["serve_token"] = serve_token.enforcement_state()
+    return out
 
 
 @router.post("/server/service")
@@ -506,7 +515,7 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     # 上一版修复把 http_root 整体指到 profiles/<pid>，媒体 URL 于是变成
     # profiles/<pid>/ubuntu/22.04/vmlinuz（文件不在那儿）→ iPXE "Could not boot image"，
     # 生产 PXE 被打断，因此被回退（190c1f8）。隔离必须只作用于**应答/引导脚本**。
-    body.http_root = "http://" + body.server_ip + ":8000/pxe/serve"
+    body.http_root = serve_token.serve_base(body.server_ip)
 
     # 模板作用域：pid 校验失败直接 400（不静默脱敏 —— 否则会以为隔离了、实际落到别处）
     try:
@@ -515,8 +524,9 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
         raise HTTPException(status_code=400, detail="非法的模板 id：" + str(e)) from e
     # 该前缀必须与 deploy_files 的落盘前缀一一对应：WEB_ROOT/profiles/<pid>。
     # 目录名常量取自 server.PROFILE_SCOPE_DIR，避免两边各写一份字符串而漂移。
-    answer_root = ("http://" + body.server_ip + ":8000" + SERVE_MARK
-                   + pxe_server.PROFILE_SCOPE_DIR + "/" + scope)
+    # J：serve_base 已经含 /pxe/serve（启用时还含 token 段），所以这里只接作用域目录。
+    answer_root = (serve_token.serve_base(body.server_ip)
+                   + "/" + pxe_server.PROFILE_SCOPE_DIR + "/" + scope)
 
     payload = body.model_dump(exclude_none=True)
     # 合并 net_config：以 detect_network() 为底，调用方显式传入的键覆盖它。
