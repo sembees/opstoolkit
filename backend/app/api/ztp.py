@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import crypto, models
+from app.core import crypto, models, serve_token
 from app.core.auth import get_current_user, require_role
 from app.core.schemas import (
     ZtpClaimIn,
@@ -584,6 +584,14 @@ async def _gen_ztp_files(tid: str, body: dict, db: AsyncSession) -> dict:
     if body.get("http_root"):
         prof.http_root = body["http_root"]
 
+    # ★ J 的第二个落点：**所有** ZTP 生成/部署/下载都走这里，所以 token 只在这一处接。
+    #   启用了 ztp_serve_token 时，把 token 作为路径段接在 http_root 后面 ⇒
+    #   华为中间文件的 "HTTP file server"、思科 bootstrap 的 server 变量、README 里的
+    #   HTTP 地址**全都自动带上**；`with_token()` 是幂等的（重复调用不会越接越长）。
+    #   ⚠ H3C 的 auto-config 走 DHCP option 67 + **TFTP**（`ztp/<stem>.cfg`），**不经过 HTTP**
+    #     ⇒ 这条开关对 H3C 那条链路既无保护也无影响；真机复验见 RUNBOOK §5.78。
+    prof.http_root = serve_token.ZTP.with_token(prof.http_root)
+
     res = await db.execute(
         select(models.ZtpDevice).where(models.ZtpDevice.template_id == tid)
     )
@@ -628,7 +636,11 @@ async def download_files(tid: str, body: dict = None, db: AsyncSession = Depends
 @router.get("/server/status")
 async def server_status(_user=Depends(get_current_user)):
     """查看本机 ZTP 服务状态 (TFTP/HTTP 目录 + dnsmasq)。"""
-    return ztp_server.server_status()
+    out = ztp_server.server_status()
+    # ★ J 的第二个落点：把 `/ztp` 有没有开 token 门禁如实报出来（只报状态，不含 token）。
+    #   顺带把 PXE 那个一起报，运维在一个页面就能看到两个静态根的保护状态。
+    out["serve_token"] = serve_token.states()
+    return out
 
 
 @router.post("/server/service")

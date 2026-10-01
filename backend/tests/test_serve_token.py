@@ -190,3 +190,110 @@ class TokenStaticGateTest(unittest.TestCase):
                     r = client.get("/pxe/serve" + path)
                     self.assertIn(r.status_code, (400, 403, 404), r.text)
                     self.assertNotIn("pxe_serve_token", r.text)
+
+
+class ZtpScopeTest(unittest.TestCase):
+    """J 的第二个落点：`/ztp`（设备配置里是**明文**口令，比 PXE 那侧更敏感）。
+
+    与 PXE 侧共用一套实现（`serve_token.StaticScope`），差别只在：
+      · `http_root` 是模板里存好的**完整 URL**（不是从 IP 拼的）⇒ 用 `with_token()` 接；
+      · 所有 ZTP 生成/部署/下载都经过 `_gen_ztp_files` 这一处，token 只在那里接一次。
+    """
+
+    TOK = "Zt9Qw3pLm7Xr5bNc1sYd4fGh"
+
+    def test_with_token_idempotent_and_scoped(self):
+        from app.config import settings
+        from app.core import serve_token
+
+        with mock.patch.object(settings, "ztp_serve_token", self.TOK):
+            want = "http://10.0.0.1:8000/ztp/" + self.TOK
+            self.assertEqual(serve_token.ZTP.with_token("http://10.0.0.1:8000/ztp"), want)
+            self.assertEqual(serve_token.ZTP.with_token("http://10.0.0.1:8000/ztp/"), want)
+            self.assertEqual(serve_token.ZTP.with_token(want), want)          # 幂等
+            self.assertEqual(serve_token.ZTP.with_token(want + "/"), want)
+            # 不是本 scope 的根 ⇒ 原样返回（别把别人的 URL 改坏）
+            self.assertEqual(serve_token.ZTP.with_token("http://10.0.0.1:8000/pxe/serve"),
+                             "http://10.0.0.1:8000/pxe/serve")
+            self.assertEqual(serve_token.ZTP.with_token("http://x/other"), "http://x/other")
+            self.assertEqual(serve_token.ZTP.with_token(""), "")
+            # 两个 scope 的开关互不影响
+            self.assertEqual(serve_token.PXE.get_token(), "")
+            self.assertEqual(serve_token.ZTP.get_token(), self.TOK)
+
+    def test_default_off_keeps_old_behaviour(self):
+        from app.config import settings
+        from app.core import serve_token
+        with mock.patch.object(settings, "ztp_serve_token", ""):
+            self.assertEqual(serve_token.ZTP.with_token("http://10.0.0.1:8000/ztp"),
+                             "http://10.0.0.1:8000/ztp")
+            self.assertTrue(serve_token.ZTP.token_ok(""))
+
+    def test_ztp_gate_403_without_token_200_with(self):
+        """真的把 `/ztp` 挂起来打请求（含路径段与查询串两种写法）。"""
+        import os
+        import tempfile
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.config import settings
+        from app.core import serve_token
+        from app.main import _TokenStatic
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        os.makedirs(os.path.join(tmp.name, "ztp"))
+        with open(os.path.join(tmp.name, "ztp", "SW1.cfg"), "w", encoding="utf-8") as fh:
+            fh.write("password simple MINGWEN-SECRET\n")
+        app = FastAPI()
+        app.mount("/ztp", _TokenStatic(directory=tmp.name, scope=serve_token.ZTP))
+        client = TestClient(app)
+        with mock.patch.object(settings, "ztp_serve_token", self.TOK):
+            self.assertEqual(client.get("/ztp/ztp/SW1.cfg").status_code, 403)
+            self.assertEqual(client.get("/ztp/ztp/SW1.cfg?t=wrong").status_code, 403)
+            r = client.get("/ztp/%s/ztp/SW1.cfg" % self.TOK)
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertIn("MINGWEN-SECRET", r.text)
+            r = client.get("/ztp/ztp/SW1.cfg?t=%s" % self.TOK)
+            self.assertEqual(r.status_code, 200, r.text)
+        # 关掉之后与改造前一样（不校验）
+        with mock.patch.object(settings, "ztp_serve_token", ""):
+            self.assertEqual(client.get("/ztp/ztp/SW1.cfg").status_code, 200)
+
+    def test_generated_artifacts_carry_the_token(self):
+        """生成侧：给带 token 的 http_root，产物里的 HTTP 地址就该带 token。
+
+        华为中间文件的 `"HTTP file server"` 与思科 bootstrap 的 `server` 变量都取自
+        `http_root` —— 所以只要 API 那一步把 token 接上（`with_token`），产物自然带上。
+        真正消费这个 HTTP 地址的是**华为/思科**；**H3C 走 TFTP（option 67）不经过 HTTP**，
+        见 test_h3c_note_is_tftp_only。
+        """
+        import importlib
+
+        from app.config import settings
+        from app.core import serve_token
+        from app.ct.ztp.generator import generate_all
+
+        m = importlib.import_module("tests.test_ztp_baseline")
+        with mock.patch.object(settings, "ztp_serve_token", self.TOK):
+            url = serve_token.ZTP.with_token("http://10.0.0.1:8000/ztp")
+            p = m.prof("huawei-ce", http_root=url, admin_user="opstkadm",
+                       snmp_community="Opstk@2026")
+            files = generate_all(p, [m.DEV])
+        mid = next(v for k, v in files.items() if k.endswith("ztp_intermediate.txt"))
+        self.assertIn('"HTTP file server"', mid)
+        self.assertIn(url, mid, mid)
+
+    def test_h3c_note_is_tftp_only(self):
+        """把"H3C 那条链路不经过 HTTP"钉成事实 —— 免得以后有人以为 token 保护了它。"""
+        import importlib
+
+        from app.ct.ztp.generator import generate_all
+
+        m = importlib.import_module("tests.test_ztp_baseline")
+        p = m.prof("h3c", http_root="http://10.0.0.1:8000/ztp")
+        files = generate_all(p, [m.DEV])
+        note = next(v for k, v in files.items() if k.endswith("ztp_note.txt"))
+        self.assertIn("DHCP option", note)
+        self.assertNotIn("http://", note)      # H3C 的说明文件里根本没有 HTTP 地址

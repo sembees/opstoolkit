@@ -46,23 +46,28 @@ async def health() -> dict:
 # PXE/ZTP HTTP 文件服务 (本机部署后生效，必须在根路径前注册)
 # 如果本机已部署 PXE/ZTP ，挂载静态文件服务
 class _TokenStatic(StaticFiles):
-    """给 `/pxe/serve` 加一道 token 门禁（外部审查第 J 条）。
+    """给**无认证静态根**加一道 token 门禁（外部审查第 J 条；`/pxe/serve` 与 `/ztp` 共用一个实现）。
 
-    为什么需要：这个根是**无认证**的，而它给出的 `ks.cfg` / `user-data` 里含 root 与管理员
-    口令的**哈希**（`rootpw --iscrypted $6$…`）。主要缓解是网络隔离，token 是第二层。
+    为什么需要：这两个根都是无认证的，而它们给出的东西里有**机密**
+    （`/pxe/serve` 是口令哈希，`/ztp` 是**明文**设备口令）。主要缓解是网络隔离，token 是第二层。
 
     为什么包在 StaticFiles 外面而不是自己写 FileResponse：Starlette 的 StaticFiles 已经处理好了
     路径归一化、目录穿越（`..`）、符号链接与 range 请求 —— 自己重写一遍就是重造一个更容易出错的轮子。
     这里只做"校验 → 摘掉路径里的 token 段 → 交给 StaticFiles"。
 
     token 两种写法都接受（见 core/serve_token.py 的说明）：
-      · 路径段 `/pxe/serve/<token>/ks.cfg`（生成器默认；`http_root` 里带一段，链路全自动带上）
+      · 路径段 `/pxe/serve/<token>/ks.cfg`（生成器默认；根 URL 里带一段，链路全自动带上）
       · 查询串 `/pxe/serve/ks.cfg?t=<token>`（浏览器/手工核对方便）
     **未配置 token ⇒ 与改造前逐字相同：不校验。**
     """
 
+    def __init__(self, *args, scope=None, **kwargs):
+        # scope 省略 = PXE（历史调用点与用例都按这个默认写）
+        self.scope = scope or serve_token.PXE
+        super().__init__(*args, **kwargs)
+
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or not serve_token.get_token():
+        if scope.get("type") != "http" or not self.scope.get_token():
             return await super().__call__(scope, receive, send)
         # ★ 坑：Starlette 的 `Mount` **不改写 `scope["path"]`** —— 它把挂载点写进
         #   `root_path`，子应用要自己用 `get_route_path(scope)` 求出"挂载点之后那一段"。
@@ -71,11 +76,12 @@ class _TokenStatic(StaticFiles):
         #   （StaticFiles 内部也是用 get_route_path 求相对路径的，所以要改写也得按同一口径。）
         root = scope.get("root_path", "") or ""
         route_path = get_route_path(scope)
-        new_route, provided = serve_token.take_from_path(route_path)
+        new_route, provided = self.scope.take_from_path(route_path)
         if not provided:
-            provided = serve_token.from_query(scope.get("query_string", b""))
-        if not serve_token.token_ok(provided):
-            resp = Response("403：/pxe/serve 需要 URL 里带 token（见 README）", status_code=403)
+            provided = self.scope.from_query(scope.get("query_string", b""))
+        if not self.scope.token_ok(provided):
+            resp = Response("403：%s 需要 URL 里带 token（见 README）" % self.scope.mount,
+                            status_code=403)
             return await resp(scope, receive, send)
         if new_route != route_path:
             # 交给 StaticFiles 之前把 token 段摘掉（否则它会去 <root>/<token>/... 找文件）
@@ -93,16 +99,21 @@ try:
 
     _pxe_web = Path("/srv/opstk/pxe-web")
     if _pxe_web.is_dir():
-        app.mount("/pxe/serve", _TokenStatic(directory=str(_pxe_web)), name="pxe-serve")
+        app.mount("/pxe/serve", _TokenStatic(directory=str(_pxe_web), scope=serve_token.PXE),
+                  name="pxe-serve")
 except Exception:  # noqa: BLE001
     pass
 
 try:
     from pathlib import Path
 
+    from app.core import serve_token
+
     _ztp_web = Path("/srv/opstk/ztp-web")
     if _ztp_web.is_dir():
-        app.mount("/ztp", StaticFiles(directory=str(_ztp_web)), name="ztp-serve")
+        # ★ J 的第二个落点：ZTP 静态根同样是"无认证 + 含机密"（这里是**明文**设备口令）。
+        app.mount("/ztp", _TokenStatic(directory=str(_ztp_web), scope=serve_token.ZTP),
+                  name="ztp-serve")
 except Exception:  # noqa: BLE001
     pass
 

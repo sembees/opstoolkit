@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     #   启用/更换之后必须**重新部署**一次（dnsmasq 的 dhcp-boot 与生成的 boot.ipxe/ks.cfg
     #   里都带 URL）。细节见 app/core/serve_token.py。
     pxe_serve_token: str = ""
+    # 同一套机制的第二个落点：ZTP 的静态根 `/ztp`（`/srv/opstk/ztp-web`）。
+    # 它比 /pxe/serve 更敏感 —— 设备配置里是**明文**口令（H3C `password simple …` /
+    # VRP8 `irreversible-cipher …`）。**同样：空 = 不启用**。
+    # 注意：H3C 的 auto-config 走 DHCP option 67 + **TFTP**，不经过 HTTP ⇒ 这条开关
+    # 对 H3C 那条链路既无保护也无影响；它保护的是 HTTP 取配置/下载的路径。
+    ztp_serve_token: str = ""
 
     database_url: str = f"sqlite+aiosqlite:///{_DEFAULT_DB}"
 

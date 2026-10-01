@@ -20,9 +20,10 @@ from app.config import settings
 @pytest.fixture(autouse=True)
 def _hermetic_settings(monkeypatch):
     """把所有"会被 .env 影响"的设置钉死，让用例的结果只取决于代码本身。"""
-    # J：`/pxe/serve` 的 token 门禁。默认**关**（= 与改造前逐字相同的行为），
+    # J：`/pxe/serve` 与 `/ztp` 的 token 门禁。默认**关**（= 与改造前逐字相同的行为），
     # 需要测门禁的用例自己 patch 成想要的值（见 tests/test_serve_token.py）。
     monkeypatch.setattr(settings, "pxe_serve_token", "", raising=False)
+    monkeypatch.setattr(settings, "ztp_serve_token", "", raising=False)
     yield
 
 
