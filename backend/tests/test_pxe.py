@@ -3331,13 +3331,15 @@ class ExistingFilesystemMountTest(unittest.TestCase):
                 self.assertIn(needle, str(ctx.exception), label)
 
     def test_ubuntu_is_fail_closed_because_unverified(self):
-        """Ubuntu 侧等价写法（curtin 的 preserve 之类）本会话**没有验证过** ⇒ 拒绝，不赌。"""
+        """Ubuntu 侧：**读实现验过**（§5.80）之后仍然拒绝 —— 因为 curtin 的 partition 条目
+        要求既有分区的 size/offset（生成期拿不到），而不是"没试过"。
+        """
         from app.it.pxe.generator import generate_all
         dc = self._dc({"name": "sdc", "size": "30G", "mount": "/data",
                        "existing_uuid": self.UUID})
         with self.assertRaises(ValueError) as ctx:
             generate_all(self._rhel(dc, os_type="ubuntu"))
-        self.assertIn("尚未验证", str(ctx.exception))
+        self.assertIn("表达不出来", str(ctx.exception))
 
     def test_schema_rejects_the_same_things_with_field_path(self):
         """保存期（schema）就要 422 并点名字段，别让运维"保存成功、生成被拒"。"""
@@ -3394,14 +3396,17 @@ class ExistingFilesystemMountTest(unittest.TestCase):
         dd = p.disk_config["data_disks"][0]
         self.assertEqual(dd["existing_uuid"], self.UUID)
 
-    def test_ubuntu_schema_rejection_mentions_unverified(self):
+    def test_ubuntu_schema_rejection_mentions_why(self):
+        """保存期就要 422，并且说明**为什么**（读实现得到的理由：需要既有分区的 size/offset）。"""
         from app.core.schemas import PxeProfileIn
         with self.assertRaises(ValueError) as ctx:
             PxeProfileIn(name="u", os_type="ubuntu", os_version="22.04",
                          disk_config=self._dc(
                              {"name": "sdc", "size": "30G", "mount": "/data",
                               "existing_uuid": self.UUID}))
-        self.assertIn("尚未验证", str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertIn("表达不出来", msg)
+        self.assertIn("offset", msg)
 
     def test_no_regression_for_plain_data_disks(self):
         """没有 existing_* 的老配置：产物必须与改动前一致（不受影响）。"""

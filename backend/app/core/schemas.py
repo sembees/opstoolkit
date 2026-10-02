@@ -610,11 +610,11 @@ def _disk_check_layout_rules(dc: dict, os_type: str, disk_scheme: str = "lvm") -
                     "要挂这块盘上**已有**的文件系统（不格式化、保留数据），请额外给出 "
                     "existing_uuid（或 existing_label）"
                 )
-    # ★ 功能 G：Ubuntu 侧不支持 —— RHEL 侧有 pykickstart 原文可依；Ubuntu 侧 curtin/subiquity
-    #   文档**确认有** `preserve: true`（"If the preserve key is set to true, curtin will not
-    #   format the partition."），也就是"能表达"，但本项目**从未在真机验过**它的语义，而且
-    #   官方写明 version 2 配置下"没被配置引用到的既有分区会被（superblock）抹掉并删除"这条
-    #   丢数据边界 ⇒ 在验证之前 fail-closed，不拿客户数据赌。
+    # ★ 功能 G：Ubuntu 侧不放行 —— RHEL 侧有 pykickstart 原文可依；Ubuntu 侧**读实现验过了**
+    #   （§5.80：本机 installer.squashfs → subiquity_6066.snap → curtin 源码），
+    #   结论是**表达不出来**：`partition` 的 schema 里 `size` 必填、v2 按 `offset` 匹配既有分区
+    #   （匹配不上直接报错），而生成期拿不到既有分区的 size/offset；且未标记 `preserve: true` 的
+    #   既有分区会被 superblock 擦除。⇒ 维持 fail-closed，但理由现在有实现依据（不再是"没试过"）。
     if data and os_type not in _RHEL_FAMILY:
         for i, d in enumerate(data):
             if any(str((d or {}).get(k) or "").strip()
@@ -623,10 +623,11 @@ def _disk_check_layout_rules(dc: dict, os_type: str, disk_scheme: str = "lvm") -
                     f"disk_config.data_disks[{i}].existing_uuid/existing_label："
                     "挂载**已有**文件系统目前只在 RHEL 系实现（kickstart 的 "
                     "`part <挂载点> --onpart=UUID=… --noformat`，有 pykickstart 原文依据）。"
-                    "Ubuntu(subiquity/curtin) 侧**能**用 `preserve: true` 表达，但这条能力在"
-                    "本项目**尚未验证**（没在真机上跑过），且官方文档写明 version 2 配置下"
-                    "「没被配置引用到的既有分区会被（superblock）抹掉并删除」—— 验证之前按 "
-                    "fail-closed 拒绝。请改用 RHEL 系模板，或先手工挂载该文件系统。"
+                    "Ubuntu(subiquity/curtin) 侧**表达不出来**：curtin 的 `partition` 条目要求"
+                    "既有分区的 size 与 offset（schema 里 size 必填，v2 按 offset 匹配既有分区、"
+                    "匹配不上直接报错），生成期拿不到这两个值；未声明 `preserve: true` 的既有分区"
+                    "还会被 superblock 擦除。故 fail-closed 拒绝。"
+                    "请改用 RHEL 系模板，或先手工挂载该文件系统。"
                 )
     if custom and not any(str((p or {}).get("mount") or "").strip() == "/" for p in parts):
         raise ValueError(

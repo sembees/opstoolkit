@@ -719,24 +719,25 @@ def _disk_plan(c, dc):
                 "要挂**已有**文件系统，请额外给出 existing_uuid（或 existing_label）"
             )
         if ex_id and not is_rhel_family(c.os_type):
-            # 依据不足就不做（★ 这段文案在拿到官方文档原文后**改写过一次**）：
+            # 依据不足就不做（★ 这段文案在**读到 curtin 实现**之后第二次改写，见 §5.80）：
             # RHEL 侧有 pykickstart 原文可依（--onpart + --noformat）。
-            # Ubuntu 侧：curtin/subiquity 的官方文档**确认存在** `preserve: true`
-            #   （"If the preserve key is set to true, curtin will not format the partition."），
-            #   也就是"能表达"；但本项目**从未在真机上验过**它的语义，而且官方还写明了一条
-            #   会丢数据的边界："For version 2 configs … Any partitions that already exist but
-            #   are not referenced in the new config are (superblock-) wiped and deleted."
-            #   —— 即"没被配置引用到的既有分区会被抹掉"。
-            #   ⇒ 结论仍是 fail-closed，但理由从"表达不出来"改成"能表达、没验过、且有已知丢数据边界"。
+            # Ubuntu 侧**读实现验过了**（本机 installer.squashfs → subiquity_6066.snap → curtin 源码），
+            # 结论是**表达不出来**，而不是"没试过"：
+            #   · `PARTITION` 的 `required = ['id','type','device','size']` —— **size 必填**；
+            #   · v2 用 `_find_part_info(sfdisk_info, offset)` **按 offset** 匹配既有分区，
+            #     匹配不上直接抛 `could not find existing partition by offset`；
+            #   · `_wipe_for_action()`：`preserve: true` ⇒ 不擦，否则 ⇒ `'superblock'`；
+            #     且未进 `preserved_offsets` 的既有分区会被 `wipe_volume(..., 'superblock')` 擦掉。
+            #   ⇒ 要挂既有文件系统，就必须在配置里写出那个分区**既有的 size 与 offset**
+            #     （生成期拿不到；让运维去查 offset 是把风险转嫁给最容易出错的一方）。
             raise ValueError(
                 f + ".existing_uuid/existing_label：挂载**已有**文件系统目前只在 RHEL 系实现"
                 "（kickstart 的 `part <挂载点> --onpart=UUID=… --noformat`，有 pykickstart "
-                "原文依据）。Ubuntu(subiquity/curtin) 侧**能**用 `preserve: true` 表达，"
-                "但这条能力在本项目**尚未验证**（没在真机上跑过），而且官方文档写明 version 2 "
-                "配置下"
-                "「没被配置引用到的既有分区会被（superblock）抹掉并删除」这条丢数据边界 —— "
-                "在验证之前按 fail-closed 拒绝生成，不拿客户的数据赌。"
-                "请改用 RHEL 系模板，或先手工挂载该文件系统。")
+                "原文依据）。Ubuntu(subiquity/curtin) 侧**表达不出来**：curtin 的 `partition` 条目"
+                "**必须给出既有分区的 size 与 offset**（schema 里 size 必填，v2 按 offset 匹配既有"
+                "分区，匹配不上会直接报错），而生成期拿不到这两个值；并且未声明为 `preserve: true` "
+                "的既有分区会被 superblock 擦除。因此按 fail-closed 拒绝生成，"
+                "不拿客户的数据赌。请改用 RHEL 系模板，或先手工挂载该文件系统。")
         entry = {
             "name": dname, "mount": dmount,
             "fstype": _safe_fstype(d.get("fstype", ""), f + ".fstype", dmount),
