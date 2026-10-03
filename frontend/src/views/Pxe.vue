@@ -23,18 +23,18 @@
       </el-descriptions>
       <el-row :gutter="16" style="margin-top: 8px" v-if="serverStatus.supported">
         <el-col :span="12">
-          <div style="font-size: 12px; color: #999; margin-bottom: 4px">TFTP 文件</div>
+          <div style="font-size: 12px; color: var(--ot-text-3); margin-bottom: 4px">TFTP 文件</div>
           <el-tag v-for="f in serverStatus.tftp_files" :key="f" size="small" style="margin: 2px">{{ f }}</el-tag>
-          <span v-if="!serverStatus.tftp_files || !serverStatus.tftp_files.length" style="color: #ccc; font-size: 12px">空</span>
+          <span v-if="!serverStatus.tftp_files || !serverStatus.tftp_files.length" style="color: var(--ot-text-4); font-size: 12px">空</span>
         </el-col>
         <el-col :span="12">
-          <div style="font-size: 12px; color: #999; margin-bottom: 4px">HTTP 文件</div>
+          <div style="font-size: 12px; color: var(--ot-text-3); margin-bottom: 4px">HTTP 文件</div>
           <el-tag v-for="f in serverStatus.web_files" :key="f" size="small" style="margin: 2px">{{ f }}</el-tag>
-          <span v-if="!serverStatus.web_files || !serverStatus.web_files.length" style="color: #ccc; font-size: 12px">空</span>
+          <span v-if="!serverStatus.web_files || !serverStatus.web_files.length" style="color: var(--ot-text-4); font-size: 12px">空</span>
         </el-col>
       </el-row>
       <div v-if="deployLog.length" style="margin-top: 8px">
-        <div style="font-size: 12px; color: #999; margin-bottom: 4px">部署日志</div>
+        <div style="font-size: 12px; color: var(--ot-text-3); margin-bottom: 4px">部署日志</div>
         <div class="terminal-output" style="white-space: pre; max-height: 200px">{{ deployLog.join("\n") }}</div>
       </div>
       <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" style="margin-top: 8px">本机部署需 Linux 环境（当前：{{ serverStatus.platform }}），可用「下载 ZIP」手动部署</el-alert>
@@ -64,7 +64,7 @@
             </el-table-column>
           </el-table>
           <div v-if="extractLog.length" style="margin-top: 8px">
-            <div style="font-size: 12px; color: #999; margin-bottom: 4px">提取日志</div>
+            <div style="font-size: 12px; color: var(--ot-text-3); margin-bottom: 4px">提取日志</div>
             <div class="terminal-output" style="white-space: pre; max-height: 200px">{{ extractLog.join('\n') }}</div>
           </div>
         </el-card>

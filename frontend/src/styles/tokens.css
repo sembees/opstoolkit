@@ -1,0 +1,96 @@
+/* ============================================================================
+   OpsToolkit 设计 token（方案 A：以 Element Plus 自身语义色为基座）
+
+   为什么以组件库自己的色值为基座：
+     界面里的 el-card/el-table/el-tag/el-alert/按钮都由 Element Plus 渲染，它自带一套语义色。
+     如果我们的 token 另起一套色值，就会出现"组件是 A 色、页面是 B 色"的花色问题；
+     而且 EP 的组件依赖**派生色阶**（--el-color-primary-light-3/5/7/8/9、-dark-2 做浅底/边框/
+     hover/active），只改主色不改色阶会出现"主色变了、浅底还是旧色"的 bug。
+     所以：token 沿用 EP 的语义取值，再由 element-bridge.css 把 --el-* 映射到 --ot-*。
+     以后要换品牌色（方案 B）只需改本文件里的 --ot-primary 并重算色阶，页面一个字都不用动。
+
+   取值来源（可复算）：frontend/node_modules/element-plus/dist/index.css 的 :root 段
+   （117 个 --el-* 键），由 mimo/extract_el_palette.py 抽出，非凭记忆。
+
+   规则：**页面里只允许出现语义名（var(--ot-*)），不允许出现 #hex / rgb()。**
+   ============================================================================ */
+:root {
+  /* ── 间距刻度：8px 网格 + 4px 半步（现状是 2/6/10/13/18… 随手写） ── */
+  --ot-space-1: 4px;
+  --ot-space-2: 8px;
+  --ot-space-3: 12px;
+  --ot-space-4: 16px;
+  --ot-space-5: 24px;
+  --ot-space-6: 32px;
+
+  /* ── 圆角 ── */
+  --ot-radius-sm: 4px;
+  --ot-radius: 6px;      /* 现状最常用值，保持零变化 */
+  --ot-radius-lg: 8px;
+
+  /* ── 字阶（EP 自己的档位） ── */
+  --ot-font-xs: 12px;
+  --ot-font-sm: 13px;
+  --ot-font: 14px;
+  --ot-font-lg: 16px;
+  --ot-font-xl: 20px;
+  --ot-font-display: 28px;
+
+  /* ── 文字（--el-text-color-*） ── */
+  --ot-text-1: #303133;          /* 主要   ← 收编现状的 #333 */
+  --ot-text-2: #606266;          /* 常规   ← 收编现状的 #666 / #555 */
+  --ot-text-3: #909399;          /* 次要   ← 收编现状的 #999(26 处!) / #90a4ae */
+  --ot-text-4: #c0c4cc;          /* 禁用   ← 收编现状的 #ccc / #bbb */
+  --ot-text-inverse: #fff;       /* 深底上的白字（侧栏/终端） */
+
+  /* ── 背景 ── */
+  --ot-bg-page: #f0f2f5;         /* 页面底（= EP --el-fill-color，保持零变化） */
+  --ot-bg-container: #fff;       /* 卡片/容器 */
+  --ot-bg-hover: #f5f7fa;        /* 悬停（= EP --el-fill-color-light） */
+  --ot-bg-code: #1e1e1e;         /* 代码块底（Help 用，原 VS Code 深色） */
+
+  /* ── 边框/分隔 ── */
+  --ot-border: #dcdfe6;          /* ← 收编现状的 #dcdfe6 */
+  --ot-border-light: #e4e7ed;    /* ← 收编现状的 #e8e8e8 */
+  --ot-divide: #ebeef5;
+
+  /* ── 语义色（与 EP 同值；换肤时只改这里） ── */
+  --ot-primary: #409eff;
+  --ot-success: #67c23a;
+  --ot-warning: #e6a23c;
+  --ot-danger: #f56c6c;
+  --ot-info: #909399;
+
+  /* ── 分类强调色：**仅**用于"指标卡/状态分类"这类需要区分彼此的场合 ──
+        （不是语义色，不要用在成功/失败/警告上）
+        accent-4 是全套里唯一的非 EP 色值，只为了保持 4 个指标可区分；
+        若不需要区分，把 accent-1..4 全指向 --ot-primary 即可。 */
+  --ot-accent-1: #409eff;
+  --ot-accent-2: #67c23a;
+  --ot-accent-3: #e6a23c;
+  --ot-accent-4: #722ed1;
+
+  /* ── 侧栏（P2 布局改版前先把现状值等值收进 token，改版时只动这里） ── */
+  --ot-sider-bg: #001529;
+  --ot-sider-bg-hover: #001121;  /* 等值搬自 EP 的老算法 TinyColor('#001529').shade(20)：
+                                    菜单 hover 底色原由 el-menu 的 background-color prop 经 JS 算出；
+                                    改走 CSS 变量后必须显式给出，否则 hover 会退回无色/黑色 */
+  --ot-sider-text: #a6adb4;
+  --ot-sider-active: #fff;
+
+  /* ── 终端输出（原 main.css 是 Material 色，现并入同一套语义色） ── */
+  --ot-term-bg: #1a1a2e;
+  --ot-term-fg: #e0e0e0;
+  --ot-term-cmd: #409eff;        /* 命令      ← 原 Material #4fc3f7 */
+  --ot-term-ok: #67c23a;         /* 成功       ← 原 Material #81c784 */
+  --ot-term-warn: #e6a23c;       /* 警告       ← 原 Material #ffb74d */
+  --ot-term-err: #f56c6c;        /* 错误       ← 原 Material #ef5350 */
+  --ot-term-info: #909399;       /* 普通输出   ← 原 Material #90a4ae */
+
+  /* ── 代码块前景（Help） ── */
+  --ot-code-fg: #d4d4d4;
+
+  /* ── 登录页渐变（P2 重做登录页时改这里） ── */
+  --ot-login-from: #1a2a6c;
+  --ot-login-to: #2d4373;
+}

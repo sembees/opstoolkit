@@ -12,7 +12,7 @@
                 <!-- ===== 小白手册 ===== -->
         <el-tab-pane label="小白手册" name="beginner">
           <h3>OpsToolkit 小白入门手册</h3>
-          <p style="color:#666">本手册面向零基础用户，从“这个工具是什么”开始，一直讲到“能独立完成一次巡检和一次裸机装机”。</p>
+          <p style="color:var(--ot-text-2)">本手册面向零基础用户，从“这个工具是什么”开始，一直讲到“能独立完成一次巡检和一次裸机装机”。</p>
 
           <el-collapse v-model="beginnerActive">
 
@@ -28,19 +28,19 @@
             </el-collapse-item>
 
             <el-collapse-item title="代码在哪？服务在哪？" name="b1">
-              <p style="font-weight:600;color:#409eff">本地（你的电脑）— 开发和修改代码的地方</p>
+              <p style="font-weight:600;color:var(--ot-primary)">本地（你的电脑）— 开发和修改代码的地方</p>
               <el-table :data="localPaths" border size="small">
                 <el-table-column prop="name" label="名称" width="120" />
                 <el-table-column prop="path" label="路径" />
               </el-table>
-              <p style="margin-top:8px;color:#999;font-size:13px">本地是 Windows，可运行 Web 界面、生成配置、下载文件，但 PXE 装机需要 Linux，本地不能直接装机。</p>
+              <p style="margin-top:8px;color:var(--ot-text-3);font-size:13px">本地是 Windows，可运行 Web 界面、生成配置、下载文件，但 PXE 装机需要 Linux，本地不能直接装机。</p>
 
-              <p style="font-weight:600;color:#67c23a;margin-top:12px">远程服务器（真正跑服务的地方）</p>
+              <p style="font-weight:600;color:var(--ot-success);margin-top:12px">远程服务器（真正跑服务的地方）</p>
               <el-table :data="remotePaths" border size="small">
                 <el-table-column prop="name" label="名称" width="130" />
                 <el-table-column prop="path" label="位置" />
               </el-table>
-              <p style="margin-top:8px;color:#999;font-size:13px">远程服务器 IP: <b>10.128.118.113</b>，用户: <b>yang</b>，密码: <b>yang</b>。用 SSH 连接后可管理服务。</p>
+              <p style="margin-top:8px;color:var(--ot-text-3);font-size:13px">远程服务器 IP: <b>10.128.118.113</b>，用户: <b>yang</b>，密码: <b>yang</b>。用 SSH 连接后可管理服务。</p>
             </el-collapse-item>
 
             <el-collapse-item title="我要巡检设备，从头怎么操作？" name="b2">
@@ -189,7 +189,7 @@ npm run build</pre>
             </el-collapse-item>
 
             <el-collapse-item title="远程服务器完整部署（从零开始）" name="q2">
-              <p style="color:#999;font-size:13px">以 Rocky Linux 9 为例, 其他 RHEL 系或 Ubuntu 类似。详细命令见「部署指南」标签页。</p>
+              <p style="color:var(--ot-text-3);font-size:13px">以 Rocky Linux 9 为例, 其他 RHEL 系或 Ubuntu 类似。详细命令见「部署指南」标签页。</p>
               <pre class="code-block"># ===== 第 1 步: 安装系统依赖 =====
 dnf install -y dnsmasq ipxe util-linux python3 python3-pip
 
@@ -322,7 +322,7 @@ cp /opt/opstk/backend/data/ops.db /backup/</pre>
         <!-- ===== 网络配置 ===== -->
         <el-tab-pane label="网络配置生成" name="netconfig">
           <h3>服务器网络配置生成器</h3>
-          <p style="color:#666">统一表格编辑器 + 实时预览面板，支持任意数量的接口/多Bond/VLAN/Bridge自由组合。三种输出格式：netplan / nmcli / ifcfg。</p>
+          <p style="color:var(--ot-text-2)">统一表格编辑器 + 实时预览面板，支持任意数量的接口/多Bond/VLAN/Bridge自由组合。三种输出格式：netplan / nmcli / ifcfg。</p>
 
           <el-table :data="netconfigRows" border size="small" style="margin:12px 0">
             <el-table-column prop="item" label="配置项" width="140" />
@@ -390,7 +390,7 @@ Bridge br0: 从接口 bond0, IP 192.168.122.1/24</pre>
                      按模板配置: 磁盘分区、账号密码、网络、软件包
   ↓
 安装完成，重启进入新系统✔</pre>
-              <p style="margin-top:8px;color:#999;font-size:13px">其中 (1)(2) 由 dnsmasq 完成，(3)(4)(5) 由 OpsToolkit 的 HTTP 文件服务提供支持。整个过程不需要人工干预。</p>
+              <p style="margin-top:8px;color:var(--ot-text-3);font-size:13px">其中 (1)(2) 由 dnsmasq 完成，(3)(4)(5) 由 OpsToolkit 的 HTTP 文件服务提供支持。整个过程不需要人工干预。</p>
             </el-collapse-item>
 
             <el-collapse-item title="三种部署模式怎么选" name="p2">
@@ -435,7 +435,7 @@ scp ubuntu-22.04.iso yang@服务器IP:/srv/opstk/iso/</pre>
                 <li>点「提取」按钮，系统自动挂载 ISO 并提取引导文件</li>
                 <li>期待结果：vmlinuz (~12MB) + initrd (~108MB) + squashfs (~499MB)</li>
               </ol>
-              <p style="margin-top:4px;color:#999;font-size:13px">提取后的文件会放到 /srv/opstk/pxe-web/ubuntu/22.04/ 目录，前端可在 PXE 服务器面板的 HTTP 文件列表中看到。</p>
+              <p style="margin-top:4px;color:var(--ot-text-3);font-size:13px">提取后的文件会放到 /srv/opstk/pxe-web/ubuntu/22.04/ 目录，前端可在 PXE 服务器面板的 HTTP 文件列表中看到。</p>
 
               <p style="font-weight:600;margin-top:12px">第 3 步：创建装机模板</p>
               <p>点「新建模板」，填写以下信息（字段详解见下方「模板字段说明」）：</p>
@@ -469,7 +469,7 @@ Boot Order → 将 Network 排在第一位
 # BIOS 机器 (老款服务器)
 Advanced → PXE Option ROMs → Enabled
 Boot → 选择 PXE 网卡启动</pre>
-              <p style="margin-top:8px;color:#999;font-size:13px">部分服务器可按 F12 临时选择网络启动，无需改 BIOS。</p>
+              <p style="margin-top:8px;color:var(--ot-text-3);font-size:13px">部分服务器可按 F12 临时选择网络启动，无需改 BIOS。</p>
 
               <p style="font-weight:600;margin-top:12px">第 6 步：验证装机</p>
               <p>裸机重启后应自动开始安装，可通过以下方式确认：</p>
@@ -625,11 +625,11 @@ IP:       192.168.100.10  (可选，不填则用模板默认)</pre>
                 <el-table-column prop="req" label="要求" />
                 <el-table-column prop="note" label="说明" width="200" />
               </el-table>
-              <p style="margin-top:8px;color:#999;font-size:13px">注: Windows/macOS 可运行 Web 界面和生成配置、下载 ZIP，但无法直接运行 PXE 服务（DHCP/TFTP 需 Linux 内核）。</p>
+              <p style="margin-top:8px;color:var(--ot-text-3);font-size:13px">注: Windows/macOS 可运行 Web 界面和生成配置、下载 ZIP，但无法直接运行 PXE 服务（DHCP/TFTP 需 Linux 内核）。</p>
             </el-collapse-item>
 
             <el-collapse-item title="方式一：直接部署在 Linux 服务器（推荐）" name="d1">
-              <p style="font-weight:600;color:#409eff;margin-bottom:8px">适用于 Rocky/RHEL/CentOS 9+ 或 Ubuntu 22.04+</p>
+              <p style="font-weight:600;color:var(--ot-primary);margin-bottom:8px">适用于 Rocky/RHEL/CentOS 9+ 或 Ubuntu 22.04+</p>
               <p style="font-weight:600">第 1 步：安装依赖包</p>
               <pre class="code-block"># RHEL / Rocky / CentOS 9
 dnf install -y dnsmasq ipxe util-linux python3 python3-pip
@@ -639,7 +639,7 @@ apt update && apt install -y dnsmasq ipxe util-linux python3 python3-pip</pre>
               <p style="font-weight:600;margin-top:12px">第 2 步：创建 Python 虚拟环境</p>
               <pre class="code-block">python3 -m venv /opt/opstk/venv
 /opt/opstk/venv/bin/pip install -r requirements.txt</pre>
-              <p style="margin-top:4px;color:#999;font-size:13px">或手动安装: pip install fastapi uvicorn sqlalchemy pydantic pydantic-settings python-jose passlib cryptography netmiko textfsm jinja2 aiosqlite bcrypt paramiko eval_type_backport</p>
+              <p style="margin-top:4px;color:var(--ot-text-3);font-size:13px">或手动安装: pip install fastapi uvicorn sqlalchemy pydantic pydantic-settings python-jose passlib cryptography netmiko textfsm jinja2 aiosqlite bcrypt paramiko eval_type_backport</p>
               <p style="font-weight:600;margin-top:12px">第 3 步：上传代码</p>
               <pre class="code-block">将项目的 backend/ 和 frontend/dist/ 上传到 /opt/opstk/
 
@@ -667,7 +667,7 @@ restorecon -R /srv/tftp /srv/opstk/pxe-web</pre>
               <p style="font-weight:600;margin-top:12px">第 6 步：启动服务</p>
               <pre class="code-block">cd /opt/opstk/backend
 PYTHONPATH=/opt/opstk/backend /opt/opstk/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000</pre>
-              <p style="margin-top:4px;color:#999;font-size:13px">推荐配置 systemd 实现开机自启，见下方「开机自启配置」。</p>
+              <p style="margin-top:4px;color:var(--ot-text-3);font-size:13px">推荐配置 systemd 实现开机自启，见下方「开机自启配置」。</p>
               <p style="font-weight:600;margin-top:12px">开机自启配置（可选）</p>
               <pre class="code-block">cat > /tmp/opstk.service << 'EOF'
 [Unit]
@@ -690,7 +690,7 @@ sudo systemctl enable --now opstk</pre>
             </el-collapse-item>
 
             <el-collapse-item title="方式二：Docker 容器部署（方便迁移）" name="d2">
-              <p style="font-weight:600;color:#409eff;margin-bottom:8px">一条命令构建镜像，包含 OpsToolkit + dnsmasq + iPXE + Python 全套环境</p>
+              <p style="font-weight:600;color:var(--ot-primary);margin-bottom:8px">一条命令构建镜像，包含 OpsToolkit + dnsmasq + iPXE + Python 全套环境</p>
               <p style="font-weight:600">构建并启动</p>
               <pre class="code-block">cd /opt/opstk
 docker compose up -d --build</pre>
@@ -765,7 +765,7 @@ systemctl status dnsmasq -l  # 看报错详情</pre>
 <!-- ===== 网络配置生成器使用指南 ===== -->
         <el-tab-pane label="网络配置生成" name="netconfig">
           <h3>网络配置生成器使用指南</h3>
-          <p style="color:#666">生成 Ubuntu netplan 或 RHEL nmcli 配置脚本，支持网卡、Bond、VLAN、Bridge。</p>
+          <p style="color:var(--ot-text-2)">生成 Ubuntu netplan 或 RHEL nmcli 配置脚本，支持网卡、Bond、VLAN、Bridge。</p>
 
           <el-collapse v-model="netconfigActive" style="margin-top:12px">
 
@@ -786,7 +786,7 @@ systemctl status dnsmasq -l  # 看报错详情</pre>
             </el-collapse-item>
 
             <el-collapse-item title="下载后怎么用" name="nc3">
-              <p style="font-weight:600;color:#409eff">Ubuntu 22.04+ (netplan)</p>
+              <p style="font-weight:600;color:var(--ot-primary)">Ubuntu 22.04+ (netplan)</p>
               <pre class="code-block"># 1. 复制配置文件
 sudo cp 99-opstk.yaml /etc/netplan/
 # 2. 应用配置
@@ -794,7 +794,7 @@ sudo netplan apply
 # 3. 验证
 ip addr show</pre>
 
-              <p style="font-weight:600;color:#67c23a;margin-top:12px">RHEL 8+ (nmcli)</p>
+              <p style="font-weight:600;color:var(--ot-success);margin-top:12px">RHEL 8+ (nmcli)</p>
               <pre class="code-block"># 1. 加可执行权限
 chmod +x apply-network.sh
 # 2. 执行配置脚本
@@ -965,13 +965,13 @@ const ztpOptions = [
 
 <style scoped>
 .help-page h3 { margin: 0 0 16px; }
-.help-page p { line-height: 1.8; color: #555; }
+.help-page p { line-height: 1.8; color: var(--ot-text-2); }
 .help-page ol { line-height: 2; padding-left: 20px; }
 .help-page li { margin-bottom: 4px; }
 
 .help-page pre.code-block {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--ot-bg-code);
+  color: var(--ot-code-fg);
   padding: 12px 16px;
   border-radius: 6px;
   font-size: 13px;

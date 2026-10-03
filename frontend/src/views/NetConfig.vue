@@ -75,7 +75,7 @@
           </el-table-column>
           <el-table-column label="接口名" width="120">
             <template #default="{ row }">
-              <span v-if="row._type==='vlan'" style="font-size:12px;color:#409eff">{{ row.parent }}.{{ row.vlanId }}</span>
+              <span v-if="row._type==='vlan'" style="font-size:12px;color:var(--ot-primary)">{{ row.parent }}.{{ row.vlanId }}</span>
               <el-input v-else v-model="row.name" size="small" placeholder="eth0 / bond0 / br0" @input="preview" />
             </template>
           </el-table-column>
@@ -86,8 +86,8 @@
                 <el-option v-if="row._type === 'bridge'" label="自动" value="" />
                 <el-option label="static" value="static" /><el-option label="dhcp" value="dhcp" />
               </el-select>
-              <span v-else-if="row._type === 'vlan'" style="color:#999;font-size:11px">static</span>
-              <span v-else style="color:#999;font-size:11px">static</span>
+              <span v-else-if="row._type === 'vlan'" style="color:var(--ot-text-3);font-size:11px">static</span>
+              <span v-else style="color:var(--ot-text-3);font-size:11px">static</span>
             </template>
           </el-table-column>
           <el-table-column label="IP/掩码" width="140">
@@ -114,7 +114,7 @@
               <el-select v-else-if="row._type==='vlan'" v-model="row.parent" size="small" @change="onVlanParentChange(row)" style="width:120px">
                 <el-option v-for="iface in availableParents" :key="iface" :label="iface" :value="iface" />
               </el-select>
-              <span v-else style="color:#999;font-size:11px">-</span>
+              <span v-else style="color:var(--ot-text-3);font-size:11px">-</span>
             </template>
           </el-table-column>
           <el-table-column label="Bond/VLAN参数" width="190">
@@ -124,18 +124,18 @@
                   <el-select v-model="row.bondMode" size="small" style="width:70px" @change="onBondModeChange(row)">
                     <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.name" :value="m.id" />
                   </el-select>
-                  <span style="font-size:10px;color:#999">miimon</span>
+                  <span style="font-size:10px;color:var(--ot-text-3)">miimon</span>
                   <el-input v-model="row.miimon" size="small" style="width:42px" placeholder="100" @input="preview" />
                   <!-- mode 4 (802.3ad): lacp_rate -->
                   <template v-if="row.bondMode==4">
-                    <span style="font-size:10px;color:#999">lacp</span>
+                    <span style="font-size:10px;color:var(--ot-text-3)">lacp</span>
                     <el-select v-model="row.lacpRate" size="small" style="width:55px" @change="preview">
                       <el-option label="slow" value="slow" /><el-option label="fast" value="fast" />
                     </el-select>
                   </template>
                   <!-- mode 2/4: xmit_hash_policy -->
                   <template v-if="row.bondMode==2||row.bondMode==4">
-                    <span style="font-size:10px;color:#999">hash</span>
+                    <span style="font-size:10px;color:var(--ot-text-3)">hash</span>
                     <el-select v-model="row.xmitHash" size="small" style="width:70px" @change="preview">
                       <el-option label="layer2" value="layer2" />
                       <el-option label="layer2+3" value="layer2+3" />
@@ -144,15 +144,15 @@
                   </template>
                 </div>
                 <div v-if="row.bondMode==1||row.bondMode==5||row.bondMode==6" style="display:flex;gap:2px;align-items:center;margin-top:1px">
-                  <span style="font-size:10px;color:#999">primary</span>
+                  <span style="font-size:10px;color:var(--ot-text-3)">primary</span>
                   <el-input v-model="row.primary" size="small" style="width:110px" placeholder="主口" @input="preview" />
                 </div>
               </template>
               <template v-else-if="row._type==='vlan'">
-                <span style="font-size:11px;color:#909399;margin-right:2px">ID</span>
+                <span style="font-size:11px;color:var(--ot-text-3);margin-right:2px">ID</span>
                 <el-input-number v-model="row.vlanId" size="small" :min="1" :max="4094" style="width:75px" @change="onVlanIdChange(row)" controls-position="right" />
               </template>
-              <span v-else style="color:#999;font-size:11px">-</span>
+              <span v-else style="color:var(--ot-text-3);font-size:11px">-</span>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="80" fixed="right">
@@ -175,7 +175,7 @@
           <el-tag v-else-if="previewScript" size="small" type="warning" style="margin-left:8px">预览已失效（参数已修改）</el-tag>
         </template>
         <pre class="preview-block" v-if="previewScript">{{ previewScript }}</pre>
-        <div v-else style="color:#ccc;text-align:center;padding:40px">
+        <div v-else style="color:var(--ot-text-4);text-align:center;padding:40px">
           {{ localErrors.length || serverError ? '当前参数未通过校验，暂无预览' : '添加接口后自动预览' }}
         </div>
       </el-card>
@@ -504,8 +504,8 @@ onMounted(async () => {
 
 <style scoped>
 .preview-block {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--ot-bg-code);
+  color: var(--ot-code-fg);
   padding: 12px 16px;
   border-radius: 6px;
   font-size: 12px;
@@ -518,5 +518,5 @@ onMounted(async () => {
 }
 .err-list { margin: 4px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
 .err-mono { margin: 4px 0 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-.input-invalid :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px #f56c6c inset; }
+.input-invalid :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px var(--ot-danger) inset; }
 </style>

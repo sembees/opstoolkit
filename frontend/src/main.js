@@ -6,6 +6,10 @@ import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
 import router from './router'
+// ★ 样式引入顺序有意义：组件库样式 → 设计 token → 组件库变量桥 → 我们的全局样式。
+//   element-bridge.css 必须排在 dist/index.css 之后，否则 :root 覆盖会被库盖回去。
+import './styles/tokens.css'
+import './styles/element-bridge.css'
 import './styles/main.css'
 
 const app = createApp(App)

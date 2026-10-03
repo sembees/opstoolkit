@@ -2,8 +2,8 @@
   <div class="login-bg">
     <el-card class="login-card" shadow="always">
       <div style="text-align: center; margin-bottom: 28px">
-        <h1 style="font-size: 24px; color: #1890ff; margin-bottom: 6px">OpsToolkit</h1>
-        <p style="color: #999; font-size: 14px">运维工具合集</p>
+        <h1 style="font-size: 24px; color: var(--ot-primary); margin-bottom: 6px">OpsToolkit</h1>
+        <p style="color: var(--ot-text-3); font-size: 14px">运维工具合集</p>
       </div>
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="handleLogin">
         <el-form-item label="用户名" prop="username">
@@ -14,7 +14,7 @@
         </el-form-item>
         <el-button type="primary" size="large" style="width: 100%" :loading="loading" @click="handleLogin">登 录</el-button>
       </el-form>
-      <p style="text-align: center; color: #bbb; font-size: 12px; margin-top: 16px">管理员账号 admin（初始口令见服务日志）</p>
+      <p style="text-align: center; color: var(--ot-text-4); font-size: 12px; margin-top: 16px">管理员账号 admin（初始口令见服务日志）</p>
     </el-card>
   </div>
 </template>
@@ -60,7 +60,7 @@ async function handleLogin() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #1a2a6c 0%, #2d4373 50%, #1a2a6c 100%);
+  background: linear-gradient(135deg, var(--ot-login-from) 0%, var(--ot-login-to) 50%, var(--ot-login-from) 100%);
 }
 .login-card {
   width: 400px;

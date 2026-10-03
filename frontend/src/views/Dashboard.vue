@@ -65,11 +65,11 @@
       <el-alert v-if="!replayLog.length" title="无回放日志" type="info" :closable="false" />
       <div class="terminal-output" style="max-height: 500px" v-else>
         <div v-for="(ev, i) in replayLog" :key="i" style="margin-bottom: 2px; font-size: 12px">
-          <span v-if="ev.type === 'start'" style="color: #409eff">── ── {{ ev.asset_name }} ──</span>
-          <span v-else-if="ev.type === 'cmd'" style="color: #e6a23c">> {{ ev.cmd }}</span>
-          <span v-else-if="ev.type === 'output'" style="color: #909399">{{ ev.output }}</span>
-          <span v-else-if="ev.type === 'error'" style="color: #f56c6c">[ERROR] {{ ev.error }}</span>
-          <span v-else-if="ev.type === 'done'" style="color: #67c23a">[OK] {{ ev.asset_name }}</span>
+          <span v-if="ev.type === 'start'" style="color: var(--ot-primary)">── ── {{ ev.asset_name }} ──</span>
+          <span v-else-if="ev.type === 'cmd'" style="color: var(--ot-warning)">> {{ ev.cmd }}</span>
+          <span v-else-if="ev.type === 'output'" style="color: var(--ot-text-3)">{{ ev.output }}</span>
+          <span v-else-if="ev.type === 'error'" style="color: var(--ot-danger)">[ERROR] {{ ev.error }}</span>
+          <span v-else-if="ev.type === 'done'" style="color: var(--ot-success)">[OK] {{ ev.asset_name }}</span>
           <span v-else>{{ ev.type }}</span>
         </div>
       </div>
@@ -102,10 +102,10 @@ async function replayTask(row) {
 
 
 const statCards = ref([
-  { label: "CT 设备", value: 0, icon: "Monitor", color: "#1890ff" },
-  { label: "IT 服务器", value: 0, icon: "Platform", color: "#52c41a" },
-  { label: "巡检模板", value: 0, icon: "DataAnalysis", color: "#faad14" },
-  { label: "巡检任务", value: 0, icon: "List", color: "#722ed1" },
+  { label: "CT 设备", value: 0, icon: "Monitor", color: "var(--ot-accent-1)" },
+  { label: "IT 服务器", value: 0, icon: "Platform", color: "var(--ot-accent-2)" },
+  { label: "巡检模板", value: 0, icon: "DataAnalysis", color: "var(--ot-accent-3)" },
+  { label: "巡检任务", value: 0, icon: "List", color: "var(--ot-accent-4)" },
 ])
 
 const statusTag = (s) => ({ done: "success", running: "warning", failed: "danger", pending: "info" }[s] || "info")
@@ -144,6 +144,6 @@ onMounted(async () => {
 }
 .metric-label {
   font-size: 13px;
-  color: #999;
+  color: var(--ot-text-3);
 }
 </style>

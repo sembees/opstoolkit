@@ -184,7 +184,7 @@
           <el-col :span="6"><el-form-item label="管理VLAN"><el-input-number v-model="form.mgmt_vlan" :min="1" :max="4094" style="width:100%" /></el-form-item></el-col>
           <el-col :span="9"><el-form-item label="管理SVI">
             <el-input v-model="form.mgmt_interface" placeholder="Vlan-interface10 / Vlanif10" />
-            <div style="font-size:12px;line-height:1.5;color:#909399;margin-top:4px">
+            <div style="font-size:12px;line-height:1.5;color:var(--ot-text-3);margin-top:4px">
               也可以填<b>物理口</b>（例：<code>GE1/0/24</code> / <code>WGE1/0/4</code>）——
               生成时会在它上面配管理 IP，并按平台先切三层（Comware <code>port link-mode route</code>、
               VRP8 <code>undo portswitch</code>、IOS <code>no switchport</code>）。
@@ -237,12 +237,12 @@
           <el-col :span="8"><el-form-item label="服务器IP"><el-input v-model="form.server_ip" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="DHCP网卡">
             <el-input v-model="form.dhcp_iface" placeholder="必填，例：ens19（宿主机上真实存在、且不承载默认路由的网卡）" />
-            <div style="font-size:12px;line-height:1.5;color:#909399;margin-top:4px">
+            <div style="font-size:12px;line-height:1.5;color:var(--ot-text-3);margin-top:4px">
               留空或填 <b>eth0</b>/<b>eth1</b>/<b>ens0</b> 会被当成「没填网卡」——
               能保存、能生成 ZIP，但 <b>部署时会被红线检查拒绝</b>。
               真实网卡名在宿主机上执行 <b>ip -br link</b> 查看。
             </div>
-            <div v-if="ifacePlaceholder" style="font-size:12px;line-height:1.5;color:#e6a23c;margin-top:2px">
+            <div v-if="ifacePlaceholder" style="font-size:12px;line-height:1.5;color:var(--ot-warning);margin-top:2px">
               ⚠ 当前值「{{ form.dhcp_iface || "（空）" }}」是占位值：请改成宿主机上真实存在的网卡名（例：ens19）
             </div>
           </el-form-item></el-col>
@@ -383,7 +383,7 @@
         </el-form-item>
         <el-form-item label="清空再导入">
           <el-switch v-model="importForm.replace" />
-          <span style="margin-left:8px;font-size:12px;color:#909399">开启 = 先删除该模板已有全部落位（不可恢复）</span>
+          <span style="margin-left:8px;font-size:12px;color:var(--ot-text-3)">开启 = 先删除该模板已有全部落位（不可恢复）</span>
         </el-form-item>
         <el-form-item label="CSV 内容">
           <el-input v-model="importForm.csv" type="textarea" :rows="8" placeholder="A01-03-U12,10.0.0.12,sw12,SN12,,备注" />
@@ -392,7 +392,7 @@
       <el-alert v-if="importResult" :type="importResult.errors && importResult.errors.length ? 'warning' : 'success'" :closable="false">
         <div style="font-size:12px;line-height:1.6">
           新增 {{ importResult.created }} 条，更新 {{ importResult.updated }} 条，跳过 {{ importResult.skipped }} 条
-          <div v-for="(e, i) in importResult.errors" :key="i" style="color:#b8860b">{{ e }}</div>
+          <div v-for="(e, i) in importResult.errors" :key="i" style="color:var(--ot-warning)">{{ e }}</div>
         </div>
       </el-alert>
       <template #footer>

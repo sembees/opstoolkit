@@ -1,7 +1,7 @@
 <template>
   <el-card shadow="never">
     <div style="display: flex; justify-content: space-between; margin-bottom: 16px">
-      <span style="font-size: 14px; color: #999">设备登录凭据（密码加密存储）</span>
+      <span style="font-size: 14px; color: var(--ot-text-3)">设备登录凭据（密码加密存储）</span>
       <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon> 新增凭据</el-button>
     </div>
     <el-table :data="creds" stripe>

@@ -66,9 +66,9 @@
 
     <!-- 巡检进度 -->
     <el-card shadow="never" v-if="running && progressTotal > 0" style="margin-bottom: 16px">
-      <div style="margin-bottom: 6px; font-size: 13px; color: #606266">
+      <div style="margin-bottom: 6px; font-size: 13px; color: var(--ot-text-2)">
         巡检进度: {{ progressDone }} / {{ progressTotal }} 台已完成
-        <span v-if="progressFailed" style="color: #f56c6c; margin-left: 8px">{{ progressFailed }} 台失败</span>
+        <span v-if="progressFailed" style="color: var(--ot-danger); margin-left: 8px">{{ progressFailed }} 台失败</span>
       </div>
       <el-progress
         :percentage="Math.round((progressDone + progressFailed) * 100 / progressTotal)"
@@ -90,7 +90,7 @@
           <el-row :gutter="12" v-if="r.status === 'success'">
             <el-col :span="4" v-for="(m, key) in r.metrics" :key="key" style="margin-bottom: 8px">
               <el-card shadow="hover" body-style="padding: 12px; text-align: center">
-                <div style="font-size: 11px; color: #909399">{{ m.label }}</div>
+                <div style="font-size: 11px; color: var(--ot-text-3)">{{ m.label }}</div>
                 <div style="font-size: 13px; font-weight: 600; margin-top: 4px" :style="{ color: statusColor(m.status) }">{{ m.summary }}</div>
               </el-card>
             </el-col>
@@ -183,7 +183,7 @@
           </el-col>
           <el-col :span="6"><el-form-item label="备注"><el-input v-model="tplForm.description" /></el-form-item></el-col>
         </el-row>
-        <div style="margin-bottom: 8px; font-size: 13px; color: #606266; font-weight: 600">巡检指标项（可增删改命令）</div>
+        <div style="margin-bottom: 8px; font-size: 13px; color: var(--ot-text-2); font-weight: 600">巡检指标项（可增删改命令）</div>
         <el-table :data="tplForm.items" size="small" stripe border>
           <el-table-column type="index" width="38" />
           <el-table-column label="指标标识" width="120"><template #default="{ row }"><el-input v-model="row.key" size="small" /></template></el-table-column>
@@ -223,20 +223,20 @@
           </el-table-column>
           <el-table-column label="趋势" width="80">
             <template #default="{ row }">
-              <el-icon v-if="row.trend === 'up'" color="#f56c6c"><Top /></el-icon>
-              <el-icon v-else-if="row.trend === 'down'" color="#67c23a"><Bottom /></el-icon>
+              <el-icon v-if="row.trend === 'up'" color="var(--ot-danger)"><Top /></el-icon>
+              <el-icon v-else-if="row.trend === 'down'" color="var(--ot-success)"><Bottom /></el-icon>
               <span v-else>-</span>
             </template>
           </el-table-column>
           <el-table-column label="时间" min-width="160">
             <template #default="{ row }">
-              <div style="font-size: 12px; color: #999">{{ row.prev_time }}</div>
-              <div style="font-size: 12px; color: #333">{{ row.latest_time }}</div>
+              <div style="font-size: 12px; color: var(--ot-text-3)">{{ row.prev_time }}</div>
+              <div style="font-size: 12px; color: var(--ot-text-1)">{{ row.latest_time }}</div>
             </template>
           </el-table-column>
         </el-table>
       </div>
-      <div v-else-if="compareCalled" style="color: #999; text-align: center; padding: 40px">暂无对比数据</div>
+      <div v-else-if="compareCalled" style="color: var(--ot-text-3); text-align: center; padding: 40px">暂无对比数据</div>
     </el-dialog>
 
   </div>
@@ -291,7 +291,7 @@ function vendorLabel(v) {
 }
 
 function statusColor(s) {
-  return { ok: '#52c41a', warning: '#faad14', critical: '#ff4d4f', unknown: '#909399' }[s] || '#909399'
+  return { ok: 'var(--ot-success)', warning: 'var(--ot-warning)', critical: 'var(--ot-danger)', unknown: 'var(--ot-text-3)' }[s] || 'var(--ot-text-3)'
 }
 
 function pushLine(text, type) {

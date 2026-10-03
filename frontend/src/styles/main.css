@@ -1,15 +1,61 @@
+/* OpsToolkit 全局样式
+   规则：这里只放 reset、字体与**可复用的工具类**；所有色值/间距都取 tokens.css 的语义名。
+   页面里不允许再出现 #hex / rgb()（由 scripts/ui-check.mjs 机械校验）。 */
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body, #app { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-.terminal-output {
-  background: #1a1a2e; color: #e0e0e0; font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 13px; line-height: 1.6; padding: 16px; border-radius: 6px;
-  overflow-y: auto; max-height: 480px; white-space: pre-wrap; word-break: break-all;
+
+html, body, #app {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: var(--ot-font);
+  color: var(--ot-text-1);
 }
-.terminal-line-cmd { color: #4fc3f7; }
-.terminal-line-ok { color: #81c784; }
-.terminal-line-warn { color: #ffb74d; }
-.terminal-line-err { color: #ef5350; }
-.terminal-line-info { color: #90a4ae; }
-.metric-card { text-align: center; }
-.metric-value { font-size: 28px; font-weight: 700; }
-.metric-label { font-size: 13px; color: #909399; margin-top: 4px; }
+
+/* ── 终端输出（Dashboard / Inspection / Pxe / Ztp 共用） ────────────── */
+.terminal-output {
+  background: var(--ot-term-bg);
+  color: var(--ot-term-fg);
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: var(--ot-font-sm);
+  line-height: 1.6;
+  padding: var(--ot-space-4);
+  border-radius: var(--ot-radius);
+  overflow-y: auto;
+  max-height: 480px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.terminal-line-cmd { color: var(--ot-term-cmd); }
+.terminal-line-ok { color: var(--ot-term-ok); }
+.terminal-line-warn { color: var(--ot-term-warn); }
+.terminal-line-err { color: var(--ot-term-err); }
+.terminal-line-info { color: var(--ot-term-info); }
+
+/* ── 指标卡（仪表盘统计卡） ─────────────────────────────────────────── */
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ot-space-2);
+  padding: var(--ot-space-2) 0;
+}
+.metric-value {
+  font-size: var(--ot-font-display);
+  font-weight: 700;
+}
+.metric-label {
+  font-size: var(--ot-font-sm);
+  color: var(--ot-text-3);
+}
+
+/* ── 通用工具类（P2 会逐步取代页面里的内联样式） ──────────────────── */
+.section-title { font-weight: 600; }                    /* 现状 63 处 font-weight:600 */
+.stack-2 { margin-bottom: var(--ot-space-2); }
+.stack-3 { margin-bottom: var(--ot-space-3); }
+.stack-4 { margin-bottom: var(--ot-space-4); }
+.row-between {                                          /* 现状 16 处 space-between 工具栏 */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.text-muted { color: var(--ot-text-3); }
