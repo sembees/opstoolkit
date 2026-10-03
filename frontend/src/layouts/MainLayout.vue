@@ -1,21 +1,52 @@
 <template>
   <el-container style="height: 100vh">
-    <el-aside width="220px" style="background: var(--ot-sider-bg)">
-      <div style="height: 56px; display: flex; align-items: center; justify-content: center; color: var(--ot-text-inverse); font-size: 16px; font-weight: 700; letter-spacing: 1px;">
-        OpsToolkit
+    <el-aside :width="collapsed ? '64px' : '220px'" class="ot-sider">
+      <div class="ot-brand">
+        <span v-if="!collapsed">OpsToolkit</span>
+        <span v-else>OT</span>
       </div>
-      <el-menu class="ot-sider-menu" :default-active="route.path" router style="border: none">
-        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
-          <el-icon><component :is="item.icon" /></el-icon>
-          <span>{{ item.title }}</span>
-        </el-menu-item>
+      <el-menu
+        class="ot-sider-menu"
+        :default-active="route.path"
+        :collapse="collapsed"
+        :collapse-transition="false"
+        router
+      >
+        <el-menu-item-group v-for="group in menuGroups" :key="group.name" :title="group.name">
+          <el-menu-item v-for="item in group.items" :key="item.path" :index="item.path">
+            <el-icon><component :is="item.icon" /></el-icon>
+            <template #title><span>{{ item.title }}</span></template>
+          </el-menu-item>
+        </el-menu-item-group>
       </el-menu>
     </el-aside>
     <el-container>
-      <el-header style="background: var(--ot-bg-container); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ot-border-light);">
-        <span style="font-size: 16px; font-weight: 600; color: var(--ot-text-1)">{{ currentTitle }}</span>
+      <el-header class="ot-header">
+        <el-button
+          text
+          class="ot-collapse-btn"
+          :title="collapsed ? '展开菜单' : '折叠菜单'"
+          :aria-label="collapsed ? '展开菜单' : '折叠菜单'"
+          @click="collapsed = !collapsed"
+        >
+          <el-icon :size="18"><component :is="collapsed ? 'Expand' : 'Fold'" /></el-icon>
+        </el-button>
+        <el-breadcrumb separator="/" class="ot-crumb">
+          <el-breadcrumb-item>OpsToolkit</el-breadcrumb-item>
+          <el-breadcrumb-item>{{ currentGroup }}</el-breadcrumb-item>
+          <el-breadcrumb-item>{{ currentTitle }}</el-breadcrumb-item>
+        </el-breadcrumb>
+        <div class="ot-header-spacer"></div>
+        <el-tag
+          size="small"
+          :type="isLocalHost ? 'info' : 'warning'"
+          effect="plain"
+          :title="`当前访问地址 ${envHost}`"
+        >
+          {{ isLocalHost ? '本地' : '生产' }} · {{ envHost }}
+        </el-tag>
         <el-dropdown @command="handleCommand">
-          <span style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+          <span class="ot-user">
             <el-icon><User /></el-icon>
             {{ auth.user?.display_name || 'admin' }}
             <el-icon><ArrowDown /></el-icon>
@@ -35,24 +66,30 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+// 菜单数据改由路由配置显式导出（见 router/index.js 的 menuGroups），
+// 不再按 routes[1].children 下标取 —— 路由数组以后怎么调整都不会静默错位。
+import { menuGroups } from '../router'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-const menuItems = router.options.routes[1].children.map((c) => ({
-  path: '/' + c.path,
-  title: c.meta.title,
-  icon: c.meta.icon,
-}))
+// 侧栏折叠状态（组件私有；刷新回到展开态，行为可预期）
+const collapsed = ref(false)
 
-const currentTitle = computed(() => {
-  const match = menuItems.find((m) => m.path === route.path)
-  return match ? match.title : ''
-})
+// 环境标识：只读当前访问地址（window.location.host），**不发任何后端请求**。
+// host 含 127.0.0.1 或 localhost 视为本地，其余按生产提示。
+const envHost = window.location.host
+const isLocalHost = envHost.includes('127.0.0.1') || envHost.includes('localhost')
+
+// 面包屑：二级 = 所属分组，三级 = 页面标题；路由匹配不到 meta 时兜底，绝不留空串。
+const currentGroup = computed(() => route.meta.group || '其他')
+const currentTitle = computed(
+  () => route.meta.title || (typeof route.name === 'string' && route.name) || '未命名'
+)
 
 function handleCommand(cmd) {
   if (cmd === 'logout') {
@@ -76,5 +113,66 @@ function handleCommand(cmd) {
   --el-menu-hover-text-color: var(--ot-sider-text);
   --el-menu-hover-bg-color: var(--ot-sider-bg-hover);
   --el-menu-active-color: var(--ot-sider-active);
+}
+
+.ot-sider {
+  background: var(--ot-sider-bg);
+  transition: width 0.2s ease;
+  overflow: hidden; /* 折叠动画期间避免文字挤出侧栏 */
+}
+
+.ot-brand {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ot-text-inverse);
+  font-size: var(--ot-font-lg);
+  font-weight: 700;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+.ot-header {
+  background: var(--ot-bg-container);
+  display: flex;
+  align-items: center;
+  gap: var(--ot-space-3);
+  border-bottom: 1px solid var(--ot-border-light);
+}
+
+.ot-collapse-btn {
+  color: var(--ot-text-2);
+  font-size: var(--ot-font-lg);
+}
+
+.ot-header-spacer {
+  flex: 1;
+}
+
+.ot-user {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--ot-space-2);
+  color: var(--ot-text-1);
+}
+
+/* ── 折叠态兜底（EP 2.14.3 实测行为，别按文档想当然） ──────────────────────
+   .el-menu--collapse 的官方隐藏规则只命中「根菜单直接子级」
+   （.el-menu--collapse>.el-menu-item>span 等，见 dist/index.css）；
+   本项目菜单项包在 el-menu-item-group>ul 里，选择器不命中，
+   且 .el-menu-item-group__title 在 collapse 下**没有任何**隐藏规则。
+   不补这两条的话，64px 折叠栏会挤出「总览」「仪表盘」等文字直接破版。
+   按 EP 同款方式（visibility + 零尺寸）处理，展开态完全不受影响。 */
+.ot-sider-menu.el-menu--collapse :deep(.el-menu-item-group__title) {
+  display: none;
+}
+.ot-sider-menu.el-menu--collapse :deep(.el-menu-item > span) {
+  visibility: hidden;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  display: inline-block;
 }
 </style>
