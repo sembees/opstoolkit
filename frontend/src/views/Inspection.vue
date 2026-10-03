@@ -218,7 +218,7 @@
           <el-table-column prop="latest" label="本次" width="140" />
           <el-table-column label="变化" width="100">
             <template #default="{ row }">
-              <el-tag :type="row.trend === 'up' ? 'danger' : row.trend === 'down' ? 'success' : 'info'" size="small">{{ row.change }}</el-tag>
+              <el-tag :type="row.trend === 'up' ? 'danger' : row.trend === 'down' ? 'success' : 'info'" size="small">{{ changeText(row) }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="趋势" width="80">
@@ -292,6 +292,16 @@ function vendorLabel(v) {
 
 function statusColor(s) {
   return { ok: 'var(--ot-success)', warning: 'var(--ot-warning)', critical: 'var(--ot-danger)', unknown: 'var(--ot-text-3)' }[s] || 'var(--ot-text-3)'
+}
+
+// 「变化」列：后端 compare.py 在没有数值差时给的是英文枚举（same / changed），
+// 直接渲染会在界面上露出英文原值（与仪表盘那次是同一类问题，故一并中文化）。
+// 有数值差时后端给的是 "+1.2" / "-3" 这类字符串，原样显示。
+function changeText(row) {
+  const v = row && row.change
+  const map = { same: '无变化', changed: '有变化' }
+  if (v === undefined || v === null || v === '') return map[row && row.trend] || '-'
+  return map[v] || String(v)
 }
 
 function pushLine(text, type) {
