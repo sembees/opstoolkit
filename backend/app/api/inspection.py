@@ -228,8 +228,6 @@ async def import_template(body: dict, db: AsyncSession = Depends(get_db), _user=
 
 
 
-@router.delete('/templates/{tid}')
-
 @router.get("/tasks/{task_id}/replay")
 async def replay_task(task_id: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """回放任务的实时输出日志。"""
@@ -247,6 +245,13 @@ async def replay_task(task_id: str, db: AsyncSession = Depends(get_db), _user=De
 
 
 
+# ★ 缺陷修复（Help 审计发现，见 mimo/out/help-claims.md）：这个装饰器原先被错接在
+#   `replay_task` 上面（两行装饰器叠在同一个函数上），导致
+#     · 不存在的 `delete_template`（下面那个函数）**没有任何路由**、永远不可达；
+#     · 而 `DELETE /templates/{tid}` 实际会去调 `replay_task(tid)` —— 拿模板 id 当任务 id 查，
+#       于是"删除用户模板"在界面上永远失败（或返回错东西）。
+#   这也是"Help 说用户模板可增删改"与实现矛盾的根因。此处归位，并由用例钉住路由归属。
+@router.delete('/templates/{tid}')
 async def delete_template(tid: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     t = await db.get(models.InspectionTemplate, tid)
     if not t:
