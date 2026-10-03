@@ -3,7 +3,7 @@
     <PageHeader title="ZTP 开局" desc="管理 ZTP 服务器、开局模板与设备落位认领，生成并部署 DHCP/TFTP 开局配置" />
 
     <!-- ZTP 服务器状态 -->
-    <CardSection title="ZTP 服务器（本机）">
+    <CardSection title="ZTP 服务器（本机）" icon="Cpu">
       <template #extra>
         <div class="card-actions">
           <el-tag v-if="serverStatus.dnsmasq" :type="serverStatus.dnsmasq.active ? 'success' : 'danger'" size="small">
@@ -26,7 +26,7 @@
     </CardSection>
 
     <!-- 模板列表 -->
-    <CardSection title="ZTP 开局模板">
+    <CardSection title="ZTP 开局模板" icon="Connection">
       <template #extra>
         <el-button type="primary" @click="openTemplateDialog()"><el-icon><Plus /></el-icon> 新建开局模板</el-button>
       </template>
@@ -56,7 +56,7 @@
     </CardSection>
 
     <!-- 设备清单 -->
-    <CardSection title="ZTP 设备清单（可选）">
+    <CardSection title="ZTP 设备清单（可选）" icon="Monitor">
       <template #extra>
         <el-button type="primary" size="small" @click="deviceDialog = true"><el-icon><Plus /></el-icon> 添加设备</el-button>
       </template>
@@ -88,7 +88,7 @@
 
     <!-- 落位登记（落位 + 认领）：设备到货时只有落位/规划IP/主机名，没有 MAC ——
          MAC 由系统从 dnsmasq 租约里自动学到，运维只做一步「认领」，全程不手抄 MAC -->
-    <CardSection title="ZTP 落位登记（落位 + 认领）">
+    <CardSection title="ZTP 落位登记（落位 + 认领）" icon="Location">
       <template #extra>
         <div class="card-actions">
           <el-select v-model="posTemplateId" filterable placeholder="选择模板" size="small" class="pos-template-select" @change="loadPositionData">

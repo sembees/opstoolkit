@@ -3,7 +3,7 @@
     <PageHeader title="PXE 装机" desc="维护 ISO 引导介质与装机模板，生成 PXE 部署文件并跟踪裸机装机进度" />
 
     <!-- PXE 服务器本机状态 -->
-    <CardSection title="PXE 服务器（本机）">
+    <CardSection title="PXE 服务器（本机）" icon="Cpu">
       <template #extra>
         <div class="head-actions">
           <el-tag v-if="serverStatus.dnsmasq" :type="serverStatus.dnsmasq.active ? 'success' : 'danger'" size="small">
@@ -39,7 +39,7 @@
       <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" class="mt-2">本机部署需 Linux 环境（当前：{{ serverStatus.platform }}），可用「下载 ZIP」手动部署</el-alert>
     </CardSection>
     <!-- ISO 管理 -->
-    <CardSection title="ISO 镜像管理">
+    <CardSection title="ISO 镜像管理" icon="Files">
       <template #extra>
         <el-button size="small" @click="loadIsos"><el-icon><Refresh /></el-icon> 刷新</el-button>
       </template>
@@ -67,7 +67,7 @@
       </div>
     </CardSection>
     <!-- 模板列表 -->
-    <CardSection title="PXE 装机模板">
+    <CardSection title="PXE 装机模板" icon="Cpu">
       <template #extra>
         <el-button type="primary" @click="openProfileDialog()"><el-icon><Plus /></el-icon> 新建装机模板</el-button>
       </template>
@@ -96,7 +96,7 @@
     </CardSection>
 
     <!-- 装机记录 -->
-    <CardSection title="装机记录">
+    <CardSection title="装机记录" icon="Monitor">
       <el-table :data="installs" stripe size="small" empty-text="暂无装机记录">
         <el-table-column prop="hostname" label="主机名" min-width="120" />
         <el-table-column prop="mac" label="MAC 地址" width="160" />

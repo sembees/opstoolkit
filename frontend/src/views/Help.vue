@@ -1,7 +1,7 @@
 <template>
   <div class="page help-page">
     <PageHeader title="使用帮助" desc="按主题分类的在线手册，覆盖零基础入门、巡检、网络配置、PXE 装机、ZTP 开局与部署排错。" />
-    <CardSection>
+    <CardSection icon="Reading">
       <el-tabs v-model="activeTab" tab-position="left" class="help-tabs">
                 <!-- ===== 小白手册 ===== -->
         <el-tab-pane label="小白手册" name="beginner">

@@ -3,7 +3,7 @@
     <PageHeader title="告警管理" desc="配置指标告警规则，并查看历史触发记录" />
 
     <!-- 告警规则管理 -->
-    <CardSection title="告警规则">
+    <CardSection title="告警规则" icon="Bell">
       <template #extra>
         <el-button type="primary" size="small" @click="openRuleDialog()"><el-icon><Plus /></el-icon> 新建规则</el-button>
       </template>
@@ -30,7 +30,7 @@
     </CardSection>
 
     <!-- 告警记录 -->
-    <CardSection title="告警记录">
+    <CardSection title="告警记录" icon="Warning">
       <template #extra>
         <el-button size="small" @click="loadHistory"><el-icon><Refresh /></el-icon> 刷新</el-button>
       </template>
