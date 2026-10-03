@@ -1,36 +1,39 @@
 <template>
-  <el-card shadow="never">
-    <div style="display: flex; justify-content: space-between; margin-bottom: 16px">
-      <span style="font-size: 14px; color: var(--ot-text-3)">设备登录凭据（密码加密存储）</span>
-      <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon> 新增凭据</el-button>
-    </div>
-    <el-table :data="creds" stripe>
-      <el-table-column prop="name" label="名称" min-width="140" />
-      <el-table-column prop="username" label="用户名" width="120" />
-      <el-table-column prop="device_type" label="默认 Device Type" width="150" />
-      <el-table-column prop="port" label="端口" width="70" />
-      <el-table-column label="密码" width="70">
-        <template #default="{ row }">
-          <el-tag :type="row.has_password ? 'success' : 'info'" size="small">{{ row.has_password ? '已设' : '无' }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="私钥" width="70">
-        <template #default="{ row }">
-          <el-tag :type="row.has_ssh_key ? 'success' : 'info'" size="small">{{ row.has_ssh_key ? '已设' : '无' }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip />
-      <el-table-column label="操作" width="150" fixed="right">
-        <template #default="{ row }">
-          <el-button type="primary" link size="small" @click="openDialog(row)">编辑</el-button>
-          <el-popconfirm title="确定删除?" @confirm="del(row.id)">
-            <template #reference><el-button type="danger" link size="small">删除</el-button></template>
-          </el-popconfirm>
-        </template>
-      </el-table-column>
-    </el-table>
+  <div class="page">
+    <PageHeader title="凭据管理" desc="统一管理设备登录用户名、密码与 SSH 私钥，密码加密存储" />
+    <CardSection>
+      <div class="row-between stack-4">
+        <span class="text-muted">设备登录凭据（密码加密存储）</span>
+        <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon> 新增凭据</el-button>
+      </div>
+      <el-table :data="creds" stripe size="small">
+        <el-table-column prop="name" label="名称" min-width="140" />
+        <el-table-column prop="username" label="用户名" width="120" />
+        <el-table-column prop="device_type" label="默认 Device Type" width="150" />
+        <el-table-column prop="port" label="端口" width="70" />
+        <el-table-column label="密码" width="70">
+          <template #default="{ row }">
+            <el-tag :type="row.has_password ? 'success' : 'info'" size="small">{{ row.has_password ? '已设' : '无' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="私钥" width="70">
+          <template #default="{ row }">
+            <el-tag :type="row.has_ssh_key ? 'success' : 'info'" size="small">{{ row.has_ssh_key ? '已设' : '无' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip />
+        <el-table-column label="操作" width="150" fixed="right">
+          <template #default="{ row }">
+            <el-button type="primary" link size="small" @click="openDialog(row)">编辑</el-button>
+            <el-popconfirm title="确定删除?" @confirm="del(row.id)">
+              <template #reference><el-button type="danger" link size="small">删除</el-button></template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+    </CardSection>
     <el-dialog v-model="dialogVisible" :title="editing ? '编辑凭据' : '新增凭据'" width="540px">
-      <el-form ref="formRef" :model="form" :rules="rules" label-width="110px">
+      <el-form ref="formRef" :model="form" :rules="rules" label-width="110px" size="small">
         <el-form-item label="名称" prop="name"><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="用户名" prop="username"><el-input v-model="form.username" /></el-form-item>
         <el-form-item label="密码"><el-input v-model="form.password" type="password" show-password placeholder="留空则不修改" /></el-form-item>
@@ -44,13 +47,15 @@
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
-  </el-card>
+  </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import http from '../api'
 import { ElMessage } from 'element-plus'
+import PageHeader from '../components/PageHeader.vue'
+import CardSection from '../components/CardSection.vue'
 
 const creds = ref([])
 const dialogVisible = ref(false)

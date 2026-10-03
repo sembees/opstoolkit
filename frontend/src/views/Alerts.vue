@@ -1,11 +1,12 @@
 <template>
-  <div>
+  <div class="page">
+    <PageHeader title="告警管理" desc="配置指标告警规则，并查看历史触发记录" />
+
     <!-- 告警规则管理 -->
-    <el-card shadow="never" style="margin-bottom: 16px">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 12px">
-        <span style="font-weight: 600"><el-icon><Bell /></el-icon> 告警规则</span>
+    <CardSection title="告警规则">
+      <template #extra>
         <el-button type="primary" size="small" @click="openRuleDialog()"><el-icon><Plus /></el-icon> 新建规则</el-button>
-      </div>
+      </template>
       <el-table :data="rules" stripe size="small">
         <el-table-column prop="name" label="规则名称" min-width="140" />
         <el-table-column prop="metric_key" label="指标" width="120" />
@@ -26,15 +27,12 @@
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
     <!-- 告警记录 -->
-    <el-card shadow="never">
-      <template #header>
-        <div style="display: flex; justify-content: space-between">
-          <span style="font-weight: 600"><el-icon><Warning /></el-icon> 告警记录</span>
-          <el-button size="small" @click="loadHistory"><el-icon><Refresh /></el-icon> 刷新</el-button>
-        </div>
+    <CardSection title="告警记录">
+      <template #extra>
+        <el-button size="small" @click="loadHistory"><el-icon><Refresh /></el-icon> 刷新</el-button>
       </template>
       <el-table :data="history" stripe size="small" empty-text="暂无告警记录">
         <el-table-column prop="asset_name" label="设备" min-width="120" />
@@ -43,7 +41,7 @@
           <template #default="{ row }">{{ row.created_at ? new Date(row.created_at).toLocaleString("zh-CN") : "-" }}</template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
     <!-- 规则编辑对话框 -->
     <el-dialog v-model="ruleDialogVisible" :title="editingRule ? '编辑规则' : '新建规则'" width="480px">
@@ -54,11 +52,11 @@
           <el-option label="temperature" value="temperature" />
         </el-select></el-form-item>
         <el-form-item label="条件">
-          <el-select v-model="ruleForm.operator" style="width: 100px">
+          <el-select v-model="ruleForm.operator" class="cond-select">
             <el-option label=">" value="gt" /><el-option label="<" value="lt" />
             <el-option label=">=" value="gte" /><el-option label="<=" value="lte" />
           </el-select>
-          <el-input-number v-model="ruleForm.threshold" :precision="1" style="margin-left: 8px; width: 140px" />
+          <el-input-number v-model="ruleForm.threshold" :precision="1" class="cond-num" />
         </el-form-item>
         <el-form-item label="启用"><el-switch v-model="ruleForm.enabled" /></el-form-item>
       </el-form>
@@ -74,6 +72,8 @@
 import { ref, onMounted } from "vue"
 import { ElMessage } from "element-plus"
 import http from "../api"
+import PageHeader from "../components/PageHeader.vue"
+import CardSection from "../components/CardSection.vue"
 
 const rules = ref([])
 const history = ref([])
@@ -140,3 +140,9 @@ async function loadHistory() {
 
 onMounted(() => { loadRules(); loadHistory() })
 </script>
+
+<style scoped>
+/* 弹窗"条件"行：原内联 width / margin-left 收进 scoped 类 */
+.cond-select { width: 100px; }
+.cond-num { margin-left: var(--ot-space-2); width: 140px; }
+</style>

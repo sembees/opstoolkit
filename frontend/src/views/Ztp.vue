@@ -1,37 +1,35 @@
 <template>
-  <div>
+  <div class="page">
+    <PageHeader title="ZTP 开局" desc="管理 ZTP 服务器、开局模板与设备落位认领，生成并部署 DHCP/TFTP 开局配置" />
+
     <!-- ZTP 服务器状态 -->
-    <el-card shadow="never" style="margin-bottom: 16px">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
-        <span style="font-weight: 600">
-          <el-icon><Cpu /></el-icon> ZTP 服务器（本机）
-          <el-tag v-if="serverStatus.dnsmasq" :type="serverStatus.dnsmasq.active ? 'success' : 'danger'" size="small" style="margin-left: 8px">
+    <CardSection title="ZTP 服务器（本机）">
+      <template #extra>
+        <div class="card-actions">
+          <el-tag v-if="serverStatus.dnsmasq" :type="serverStatus.dnsmasq.active ? 'success' : 'danger'" size="small">
             dnsmasq {{ serverStatus.dnsmasq.active ? '运行中' : '未运行' }}
           </el-tag>
-        </span>
-        <div>
           <el-button size="small" @click="controlService('start')" :disabled="serverStatus.supported === false">启动</el-button>
           <el-button size="small" @click="controlService('stop')" :disabled="serverStatus.supported === false">停止</el-button>
           <el-button size="small" @click="controlService('restart')" :disabled="serverStatus.supported === false">重启 dnsmasq</el-button>
           <el-button size="small" @click="loadServerStatus"><el-icon><Refresh /></el-icon> 刷新</el-button>
         </div>
-      </div>
+      </template>
       <el-descriptions v-if="serverStatus.supported" :column="3" size="small" border>
         <el-descriptions-item label="sudo 免密">{{ serverStatus.sudo_ok ? '是' : '否' }}</el-descriptions-item>
         <el-descriptions-item label="TFTP">{{ serverStatus.dirs && serverStatus.dirs.tftp ? '已创建' : '未创建' }}</el-descriptions-item>
         <el-descriptions-item label="HTTP">{{ serverStatus.dirs && serverStatus.dirs.web ? '已创建' : '未创建' }}</el-descriptions-item>
       </el-descriptions>
-      <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" style="margin-top: 8px">
+      <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" class="mt-2">
         本机部署需 Linux 环境，当前：{{ serverStatus.platform }}
       </el-alert>
-    </el-card>
+    </CardSection>
 
     <!-- 模板列表 -->
-    <el-card shadow="never" style="margin-bottom: 16px">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 12px">
-        <span style="font-weight: 600"><el-icon><Connection /></el-icon> ZTP 开局模板</span>
+    <CardSection title="ZTP 开局模板">
+      <template #extra>
         <el-button type="primary" @click="openTemplateDialog()"><el-icon><Plus /></el-icon> 新建开局模板</el-button>
-      </div>
+      </template>
       <el-table :data="templates" stripe size="small">
         <el-table-column prop="name" label="模板名称" min-width="130" />
         <el-table-column label="厂商" width="90">
@@ -55,20 +53,17 @@
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
     <!-- 设备清单 -->
-    <el-card shadow="never">
-      <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center">
-          <span style="font-weight: 600"><el-icon><Monitor /></el-icon> ZTP 设备清单（可选）</span>
-          <el-button type="primary" size="small" @click="deviceDialog = true"><el-icon><Plus /></el-icon> 添加设备</el-button>
-        </div>
+    <CardSection title="ZTP 设备清单（可选）">
+      <template #extra>
+        <el-button type="primary" size="small" @click="deviceDialog = true"><el-icon><Plus /></el-icon> 添加设备</el-button>
       </template>
       <!-- R4/§5.54：登记设备是**可选**的，必须写清楚 —— 否则会被当成"必须先登记 MAC 才能开局" -->
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px">
+      <el-alert type="info" :closable="false" show-icon class="mb-3">
         <template #title>不添加设备也能开局</template>
-        <div style="font-size:12px;line-height:1.6">
+        <div class="alert-body">
           没登记的设备统一拿 <code>ztp/default.cfg</code>（管理口用 DHCP 取址，不会写死 IP，
           否则多台设备会撞同一个地址）；开局后到 DHCP 服务器上按 MAC 认领它们各自的地址。
           <br />
@@ -89,34 +84,31 @@
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
     <!-- 落位登记（落位 + 认领）：设备到货时只有落位/规划IP/主机名，没有 MAC ——
          MAC 由系统从 dnsmasq 租约里自动学到，运维只做一步「认领」，全程不手抄 MAC -->
-    <el-card shadow="never" style="margin-top: 16px">
-      <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center">
-          <span style="font-weight: 600"><el-icon><Location /></el-icon> ZTP 落位登记（落位 + 认领）</span>
-          <div>
-            <el-select v-model="posTemplateId" filterable placeholder="选择模板" size="small" style="width: 210px; margin-right: 8px" @change="loadPositionData">
-              <el-option v-for="t in templates" :key="t.id" :label="t.name + ' (' + vendorLabel(t.vendor) + ')'" :value="t.id" />
-            </el-select>
-            <el-button type="primary" size="small" @click="openPosDialog()"><el-icon><Plus /></el-icon> 新增落位</el-button>
-            <el-button size="small" @click="openImportDialog"><el-icon><Upload /></el-icon> 批量导入</el-button>
-            <el-button size="small" @click="loadPositionData"><el-icon><Refresh /></el-icon> 刷新</el-button>
-          </div>
+    <CardSection title="ZTP 落位登记（落位 + 认领）">
+      <template #extra>
+        <div class="card-actions">
+          <el-select v-model="posTemplateId" filterable placeholder="选择模板" size="small" class="pos-template-select" @change="loadPositionData">
+            <el-option v-for="t in templates" :key="t.id" :label="t.name + ' (' + vendorLabel(t.vendor) + ')'" :value="t.id" />
+          </el-select>
+          <el-button type="primary" size="small" @click="openPosDialog()"><el-icon><Plus /></el-icon> 新增落位</el-button>
+          <el-button size="small" @click="openImportDialog"><el-icon><Upload /></el-icon> 批量导入</el-button>
+          <el-button size="small" @click="loadPositionData"><el-icon><Refresh /></el-icon> 刷新</el-button>
         </div>
       </template>
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px">
+      <el-alert type="info" :closable="false" show-icon class="mb-3">
         <template #title>不需要手抄 MAC</template>
-        <div style="font-size:12px;line-height:1.6">
+        <div class="alert-body">
           设备到货时只有落位（机架/机柜/U位）和规划好的管理 IP/主机名 —— 先按落位登记（MAC 留空）；
           设备第一次上电向 DHCP 请求地址时，dnsmasq 的租约里就记录了它的 MAC，
           在下方「待认领设备」里点「认领到落位」即可。认领后<b>重新生成并部署</b>，
           设备就会拿到自己落位规划的主机名/管理 IP；未认领的落位只会拿到 <code>ztp/default.cfg</code>。
         </div>
       </el-alert>
-      <el-alert v-if="obsNote" :type="obsOk ? 'info' : 'warning'" :closable="false" show-icon style="margin-bottom: 10px" :title="obsNote" />
+      <el-alert v-if="obsNote" :type="obsOk ? 'info' : 'warning'" :closable="false" show-icon class="mb-3" :title="obsNote" />
       <el-divider content-position="left">待认领设备（来自 dnsmasq 租约）</el-divider>
       <el-table :data="observations" stripe size="small" :empty-text="obsOk
         ? '租约里暂时没有设备；设备上电接入开局网络后会出现在这里'
@@ -158,7 +150,7 @@
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
     <!-- 模板编辑弹窗 -->
     <el-dialog v-model="templateDialog" :title="editingId ? '编辑开局模板' : '新建开局模板'" width="820px" :close-on-click-modal="false">
@@ -181,10 +173,10 @@
 
         <el-divider content-position="left">管理网络</el-divider>
         <el-row :gutter="12">
-          <el-col :span="6"><el-form-item label="管理VLAN"><el-input-number v-model="form.mgmt_vlan" :min="1" :max="4094" style="width:100%" /></el-form-item></el-col>
+          <el-col :span="6"><el-form-item label="管理VLAN"><el-input-number v-model="form.mgmt_vlan" :min="1" :max="4094" class="w-full" /></el-form-item></el-col>
           <el-col :span="9"><el-form-item label="管理SVI">
             <el-input v-model="form.mgmt_interface" placeholder="Vlan-interface10 / Vlanif10" />
-            <div style="font-size:12px;line-height:1.5;color:var(--ot-text-3);margin-top:4px">
+            <div class="form-hint">
               也可以填<b>物理口</b>（例：<code>GE1/0/24</code> / <code>WGE1/0/4</code>）——
               生成时会在它上面配管理 IP，并按平台先切三层（Comware <code>port link-mode route</code>、
               VRP8 <code>undo portswitch</code>、IOS <code>no switchport</code>）。
@@ -237,12 +229,12 @@
           <el-col :span="8"><el-form-item label="ZTP服务IP"><el-input v-model="form.server_ip" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="DHCP网卡">
             <el-input v-model="form.dhcp_iface" placeholder="必填，例：ens19（宿主机上真实存在、且不承载默认路由的网卡）" />
-            <div style="font-size:12px;line-height:1.5;color:var(--ot-text-3);margin-top:4px">
+            <div class="form-hint">
               留空或填 <b>eth0</b>/<b>eth1</b>/<b>ens0</b> 会被当成「没填网卡」——
               能保存、能生成 ZIP，但 <b>部署时会被红线检查拒绝</b>。
               真实网卡名在宿主机上执行 <b>ip -br link</b> 查看。
             </div>
-            <div v-if="ifacePlaceholder" style="font-size:12px;line-height:1.5;color:var(--ot-warning);margin-top:2px">
+            <div v-if="ifacePlaceholder" class="form-hint form-hint-warn">
               ⚠ 当前值「{{ form.dhcp_iface || "（空）" }}」是占位值：请改成宿主机上真实存在的网卡名（例：ens19）
             </div>
           </el-form-item></el-col>
@@ -263,7 +255,7 @@
     <el-dialog v-model="deviceDialog" title="添加 ZTP 设备" width="560px">
       <el-form :model="devForm" label-width="80px" size="default">
         <el-form-item label="关联模板">
-          <el-select v-model="devForm.template_id" filterable placeholder="选择模板" style="width:100%">
+          <el-select v-model="devForm.template_id" filterable placeholder="选择模板" class="w-full">
             <el-option v-for="t in templates" :key="t.id" :label="t.name + ' (' + vendorLabel(t.vendor) + ')'" :value="t.id" />
           </el-select>
         </el-form-item>
@@ -280,11 +272,11 @@
 
     <!-- 生成弹窗 -->
     <el-dialog v-model="genDialog" title="ZTP 部署文件生成" width="900px" top="5vh">
-      <el-form label-width="90px" size="small" style="margin-bottom: 12px">
+      <el-form label-width="90px" size="small" class="stack-3">
         <el-row :gutter="8">
           <el-col :span="8">
             <el-form-item label="部署模式">
-              <el-select v-model="genForm.deploy_mode" style="width:100%">
+              <el-select v-model="genForm.deploy_mode" class="w-full">
                 <el-option label="独立DHCP (专用开局网络)" value="standalone" />
                 <el-option label="ProxyDHCP (与现有DHCP并存)" value="proxy" />
                 <el-option label="中继模式 (仅TFTP)" value="relay" />
@@ -292,17 +284,17 @@
             </el-form-item>
           </el-col>
           <el-col :span="8"><el-form-item label="ZTP服务IP"><el-input v-model="genForm.server_ip" /></el-form-item></el-col>
-          <el-col :span="8" style="text-align:right">
+          <el-col :span="8" class="text-right">
             <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
           <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
           <el-button type="warning" size="small" @click="doDeploy" :loading="deploying" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Promotion /></el-icon> 部署到本机</el-button>
           </el-col>
         </el-row>
         <!-- 参数改过而没重新生成：预览是旧的、下载/部署却按新参数走 ⇒ 必须显式挡住 -->
-        <el-alert v-if="genStale" type="warning" :closable="false" show-icon style="margin-bottom:8px"
+        <el-alert v-if="genStale" type="warning" :closable="false" show-icon class="stack-2"
                   title="参数已修改，下面的预览是**上一次**生成的内容 —— 下载/部署已禁用，请先点「重新生成」" />
         <el-form-item label="临时设备" v-if="genForm.devices.length">
-          <el-tag v-for="(d, i) in genForm.devices" :key="i" closable @close="genForm.devices.splice(i,1)" size="small" style="margin-right:6px">
+          <el-tag v-for="(d, i) in genForm.devices" :key="i" closable @close="genForm.devices.splice(i,1)" size="small" class="tag-gap">
             {{ d.hostname }} / {{ d.mac || '无MAC' }}
           </el-tag>
         </el-form-item>
@@ -310,25 +302,25 @@
       <!-- R4：DHCP 网卡没填时，生成的配置里是占位 eth0 —— 后端会**拒绝部署**
            （占位值 / 不存在的网卡 / 承载默认路由的骨干网卡都会被拦）。
            在界面上先说清楚，比让运维撞一个 422 友好。 -->
-      <el-alert v-if="genIfacePlaceholder" type="warning" :closable="false" show-icon style="margin-bottom: 8px">
+      <el-alert v-if="genIfacePlaceholder" type="warning" :closable="false" show-icon class="stack-2">
         <template #title>该模板没有指定「DHCP网卡」，生成的配置是占位 interface=eth0</template>
-        <div style="font-size:12px;line-height:1.6">
+        <div class="alert-body">
           这份配置可以下载，但<strong>不能部署</strong>：dnsmasq 配了 bind-interfaces，网卡不存在会直接起不来
           （而它同时服务着 PXE）；填错成承载默认路由的网卡，则会在骨干网段上开 DHCP 池、抢答企业 DHCP。
           请点「编辑」把 DHCP网卡 填成宿主机上真实存在、且不承载默认路由的那张卡
           （本项目里是 <code>ens19</code>）。
         </div>
       </el-alert>
-      <div style="margin-bottom: 8px">
+      <div class="stack-2">
         <el-button size="small" @click="addInlineDevice"><el-icon><Plus /></el-icon> 添加临时设备</el-button>
       </div>
       <el-tabs v-model="activeFile" v-if="Object.keys(genFiles).length">
         <el-tab-pane v-for="(_, name) in genFiles" :key="name" :label="name" :name="name">
-          <div class="terminal-output" style="white-space: pre; max-height: 440px">{{ genFiles[name] }}</div>
+          <div class="terminal-output gen-output">{{ genFiles[name] }}</div>
         </el-tab-pane>
       </el-tabs>
-      <el-alert v-if="deployResult.length" :type="deployOk ? 'success' : 'error'" :closable="false" style="margin-top: 12px">
-        <div v-for="(ln, i) in deployResult" :key="i" style="font-family: monospace; font-size: 12px; white-space: pre-wrap">{{ ln }}</div>
+      <el-alert v-if="deployResult.length" :type="deployOk ? 'success' : 'error'" :closable="false" class="mt-3">
+        <div v-for="(ln, i) in deployResult" :key="i" class="deploy-log-line">{{ ln }}</div>
       </el-alert>
     </el-dialog>
 
@@ -350,7 +342,7 @@
     <el-dialog v-model="posDialog" :title="editingPosId ? '编辑落位' : '新增落位'" width="520px">
       <el-form :model="posForm" label-width="100px" size="default">
         <el-form-item label="所属模板">
-          <el-select v-model="posForm.template_id" filterable placeholder="选择模板" style="width:100%">
+          <el-select v-model="posForm.template_id" filterable placeholder="选择模板" class="w-full">
             <el-option v-for="t in templates" :key="t.id" :label="t.name + ' (' + vendorLabel(t.vendor) + ')'" :value="t.id" />
           </el-select>
         </el-form-item>
@@ -369,30 +361,30 @@
 
     <!-- 落位批量导入弹窗 -->
     <el-dialog v-model="importDialog" title="批量导入落位" width="640px">
-      <el-alert type="info" :closable="false" style="margin-bottom: 8px">
-        <div style="font-size:12px;line-height:1.6">
+      <el-alert type="info" :closable="false" class="stack-2">
+        <div class="alert-body">
           每行一条，逗号分隔：<code>落位,管理IP,主机名,序列号,MAC,备注</code>；
           带表头也可以（自动跳过）；MAC 留空 = 待认领。
         </div>
       </el-alert>
       <el-form label-width="100px" size="default">
         <el-form-item label="所属模板">
-          <el-select v-model="importForm.template_id" filterable placeholder="选择模板" style="width:100%">
+          <el-select v-model="importForm.template_id" filterable placeholder="选择模板" class="w-full">
             <el-option v-for="t in templates" :key="t.id" :label="t.name + ' (' + vendorLabel(t.vendor) + ')'" :value="t.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="清空再导入">
           <el-switch v-model="importForm.replace" />
-          <span style="margin-left:8px;font-size:12px;color:var(--ot-text-3)">开启 = 先删除该模板已有全部落位（不可恢复）</span>
+          <span class="switch-note">开启 = 先删除该模板已有全部落位（不可恢复）</span>
         </el-form-item>
         <el-form-item label="CSV 内容">
           <el-input v-model="importForm.csv" type="textarea" :rows="8" placeholder="A01-03-U12,10.0.0.12,sw12,SN12,,备注" />
         </el-form-item>
       </el-form>
       <el-alert v-if="importResult" :type="importResult.errors && importResult.errors.length ? 'warning' : 'success'" :closable="false">
-        <div style="font-size:12px;line-height:1.6">
+        <div class="alert-body">
           新增 {{ importResult.created }} 条，更新 {{ importResult.updated }} 条，跳过 {{ importResult.skipped }} 条
-          <div v-for="(e, i) in importResult.errors" :key="i" style="color:var(--ot-warning)">{{ e }}</div>
+          <div v-for="(e, i) in importResult.errors" :key="i" class="import-error">{{ e }}</div>
         </div>
       </el-alert>
       <template #footer>
@@ -403,13 +395,13 @@
 
     <!-- 认领到落位弹窗 -->
     <el-dialog v-model="claimDialog" title="认领到落位" width="520px" append-to-body>
-      <div v-if="claimTarget" style="margin-bottom: 12px; font-size: 13px">
+      <div v-if="claimTarget" class="claim-target">
         设备 MAC：<b>{{ claimTarget.mac }}</b>
         <span v-if="claimTarget.ip">（拿到 IP {{ claimTarget.ip }}）</span>
       </div>
       <el-form label-width="100px" size="default">
         <el-form-item label="选择落位">
-          <el-select v-model="claimPosId" filterable placeholder="选择一条待认领落位" style="width:100%">
+          <el-select v-model="claimPosId" filterable placeholder="选择一条待认领落位" class="w-full">
             <el-option v-for="p in claimablePositions" :key="p.id"
                        :label="p.position + ' / ' + p.mgmt_ip + (p.hostname ? ' / ' + p.hostname : '')"
                        :value="p.id" />
@@ -430,6 +422,8 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from "vue"
 import http, { downloadZip, flattenDetail } from "../api"
 import { ElMessage } from "element-plus"
+import PageHeader from "../components/PageHeader.vue"
+import CardSection from "../components/CardSection.vue"
 
 const serverStatus = ref({})
 const templates = ref([])
@@ -854,3 +848,40 @@ onMounted(async () => {
   loadPositionData()
 })
 </script>
+
+<style scoped>
+/* ── 卡头右侧动作区（状态 tag + 按钮组收进同一 flex，间距统一走 token；
+      EP 相邻按钮自带的 12px margin 改由 gap 接管，同 Inspection.vue 的 inspect-form 做法） ── */
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ot-space-2);
+}
+.card-actions :deep(.el-button + .el-button) { margin-left: 0; }
+
+/* 落位登记卡头的模板选择框（原内联 210px 定宽原样收编） */
+.pos-template-select { width: 210px; }
+
+/* 12px 小字说明（alert 正文 / 表单项下的提示），颜色一律 var(--ot-*) */
+.alert-body { font-size: var(--ot-font-xs); line-height: 1.6; }
+.form-hint { margin-top: var(--ot-space-1); font-size: var(--ot-font-xs); line-height: 1.5; color: var(--ot-text-3); }
+.form-hint-warn { margin-top: var(--ot-space-1); color: var(--ot-warning); }
+.switch-note { margin-left: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+
+/* 生成弹窗：终端预览覆盖全局 .terminal-output 的 pre-wrap 与 480px（原内联值原样收编）、
+   部署日志逐行（monospace + 12px + pre-wrap） */
+.gen-output { white-space: pre; max-height: 440px; }
+.deploy-log-line { font-family: monospace; font-size: var(--ot-font-xs); white-space: pre-wrap; }
+.text-right { text-align: right; }
+.tag-gap { margin-right: var(--ot-space-2); }
+.import-error { color: var(--ot-warning); }
+
+/* 认领弹窗：目标 MAC 行 */
+.claim-target { margin-bottom: var(--ot-space-3); font-size: var(--ot-font-sm); }
+
+/* 本页小间距工具类（收编原内联 margin，取值全部来自 token 刻度） */
+.mt-2 { margin-top: var(--ot-space-2); }
+.mt-3 { margin-top: var(--ot-space-3); }
+.mb-3 { margin-bottom: var(--ot-space-3); }
+.w-full { width: 100%; }
+</style>

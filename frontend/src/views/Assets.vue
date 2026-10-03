@@ -1,37 +1,40 @@
 <template>
-  <el-card shadow="never">
-    <div style="display: flex; justify-content: space-between; margin-bottom: 16px">
-      <el-radio-group v-model="filterCategory" @change="loadAssets">
-        <el-radio-button label="">全部</el-radio-button>
-        <el-radio-button label="ct">CT 设备</el-radio-button>
-        <el-radio-button label="it">IT 服务器</el-radio-button>
-      </el-radio-group>
-      <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon> 新增资产</el-button>
-    </div>
-    <el-table :data="assets" stripe>
-      <el-table-column prop="name" label="名称" min-width="130" />
-      <el-table-column label="类型" width="70">
-        <template #default="{ row }">
-          <el-tag :type="row.category === 'ct' ? 'primary' : 'success'" size="small">{{ row.category === 'ct' ? 'CT' : 'IT' }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="vendor" label="厂商" width="80" />
-      <el-table-column prop="device_role" label="角色" width="90" />
-      <el-table-column prop="host" label="IP / 主机" width="130" />
-      <el-table-column prop="port" label="端口" width="60" />
-      <el-table-column prop="device_type" label="Device Type" width="130" />
-      <el-table-column prop="location" label="位置" width="90" />
-      <el-table-column label="操作" width="150" fixed="right">
-        <template #default="{ row }">
-          <el-button type="primary" link size="small" @click="openDialog(row)">编辑</el-button>
-          <el-popconfirm title="确定删除?" @confirm="del(row.id)">
-            <template #reference><el-button type="danger" link size="small">删除</el-button></template>
-          </el-popconfirm>
-        </template>
-      </el-table-column>
-    </el-table>
+  <div class="page">
+    <PageHeader title="资产管理" desc="维护 CT / IT 资产台账，管理设备连接信息与关联凭据" />
+    <CardSection>
+      <div class="row-between stack-4">
+        <el-radio-group v-model="filterCategory" @change="loadAssets">
+          <el-radio-button label="">全部</el-radio-button>
+          <el-radio-button label="ct">CT 设备</el-radio-button>
+          <el-radio-button label="it">IT 服务器</el-radio-button>
+        </el-radio-group>
+        <el-button type="primary" @click="openDialog()"><el-icon><Plus /></el-icon> 新增资产</el-button>
+      </div>
+      <el-table :data="assets" stripe size="small">
+        <el-table-column prop="name" label="名称" min-width="130" />
+        <el-table-column label="类型" width="70">
+          <template #default="{ row }">
+            <el-tag :type="row.category === 'ct' ? 'primary' : 'success'" size="small">{{ row.category === 'ct' ? 'CT' : 'IT' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="vendor" label="厂商" width="80" />
+        <el-table-column prop="device_role" label="角色" width="90" />
+        <el-table-column prop="host" label="IP / 主机" width="130" />
+        <el-table-column prop="port" label="端口" width="60" />
+        <el-table-column prop="device_type" label="Device Type" width="130" />
+        <el-table-column prop="location" label="位置" width="90" />
+        <el-table-column label="操作" width="150" fixed="right">
+          <template #default="{ row }">
+            <el-button type="primary" link size="small" @click="openDialog(row)">编辑</el-button>
+            <el-popconfirm title="确定删除?" @confirm="del(row.id)">
+              <template #reference><el-button type="danger" link size="small">删除</el-button></template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+    </CardSection>
     <el-dialog v-model="dialogVisible" :title="editing ? '编辑资产' : '新增资产'" width="580px">
-      <el-form ref="formRef" :model="form" :rules="rules" label-width="100px">
+      <el-form ref="formRef" :model="form" :rules="rules" label-width="100px" size="small">
         <el-form-item label="名称" prop="name"><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="类型" prop="category">
           <el-select v-model="form.category"><el-option label="CT 网络设备" value="ct" /><el-option label="IT 服务器" value="it" /></el-select>
@@ -59,13 +62,15 @@
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
-  </el-card>
+  </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import http from '../api'
 import { ElMessage } from 'element-plus'
+import PageHeader from '../components/PageHeader.vue'
+import CardSection from '../components/CardSection.vue'
 
 const assets = ref([])
 const credentials = ref([])

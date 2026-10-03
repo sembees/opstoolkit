@@ -1,80 +1,77 @@
 <template>
-  <div>
+  <div class="page">
+    <PageHeader title="PXE 装机" desc="维护 ISO 引导介质与装机模板，生成 PXE 部署文件并跟踪裸机装机进度" />
+
     <!-- PXE 服务器本机状态 -->
-    <el-card shadow="never" style="margin-bottom: 16px">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
-        <span style="font-weight: 600">
-          <el-icon><Cpu /></el-icon> PXE 服务器（本机）
-          <el-tag v-if="serverStatus.dnsmasq" :type="serverStatus.dnsmasq.active ? 'success' : 'danger'" size="small" style="margin-left: 8px">
+    <CardSection title="PXE 服务器（本机）">
+      <template #extra>
+        <div class="head-actions">
+          <el-tag v-if="serverStatus.dnsmasq" :type="serverStatus.dnsmasq.active ? 'success' : 'danger'" size="small">
             dnsmasq {{ serverStatus.dnsmasq.active ? '运行中' : '未运行' }}
           </el-tag>
-        </span>
-        <div>
           <el-button size="small" @click="controlService('start')" :disabled="serverStatus.supported === false">启动</el-button>
           <el-button size="small" @click="controlService('stop')" :disabled="serverStatus.supported === false">停止</el-button>
           <el-button size="small" @click="controlService('restart')" :disabled="serverStatus.supported === false">重启 dnsmasq</el-button>
           <el-button size="small" @click="loadServerStatus"><el-icon><Refresh /></el-icon> 刷新</el-button>
         </div>
-      </div>
+      </template>
       <el-descriptions v-if="serverStatus.supported" :column="3" size="small" border>
         <el-descriptions-item label="sudo 免密">{{ serverStatus.sudo_ok ? '是' : '否' }}</el-descriptions-item>
         <el-descriptions-item label="开机自启">{{ serverStatus.dnsmasq && serverStatus.dnsmasq.enabled ? '是' : '否' }}</el-descriptions-item>
         <el-descriptions-item label="TFTP">{{ serverStatus.tftp_root }}</el-descriptions-item>
       </el-descriptions>
-      <el-row :gutter="16" style="margin-top: 8px" v-if="serverStatus.supported">
+      <el-row :gutter="16" class="mt-2" v-if="serverStatus.supported">
         <el-col :span="12">
-          <div style="font-size: 12px; color: var(--ot-text-3); margin-bottom: 4px">TFTP 文件</div>
-          <el-tag v-for="f in serverStatus.tftp_files" :key="f" size="small" style="margin: 2px">{{ f }}</el-tag>
-          <span v-if="!serverStatus.tftp_files || !serverStatus.tftp_files.length" style="color: var(--ot-text-4); font-size: 12px">空</span>
+          <div class="group-label">TFTP 文件</div>
+          <el-tag v-for="f in serverStatus.tftp_files" :key="f" size="small" class="file-tag">{{ f }}</el-tag>
+          <span v-if="!serverStatus.tftp_files || !serverStatus.tftp_files.length" class="list-empty">暂无文件</span>
         </el-col>
         <el-col :span="12">
-          <div style="font-size: 12px; color: var(--ot-text-3); margin-bottom: 4px">HTTP 文件</div>
-          <el-tag v-for="f in serverStatus.web_files" :key="f" size="small" style="margin: 2px">{{ f }}</el-tag>
-          <span v-if="!serverStatus.web_files || !serverStatus.web_files.length" style="color: var(--ot-text-4); font-size: 12px">空</span>
+          <div class="group-label">HTTP 文件</div>
+          <el-tag v-for="f in serverStatus.web_files" :key="f" size="small" class="file-tag">{{ f }}</el-tag>
+          <span v-if="!serverStatus.web_files || !serverStatus.web_files.length" class="list-empty">暂无文件</span>
         </el-col>
       </el-row>
-      <div v-if="deployLog.length" style="margin-top: 8px">
-        <div style="font-size: 12px; color: var(--ot-text-3); margin-bottom: 4px">部署日志</div>
-        <div class="terminal-output" style="white-space: pre; max-height: 200px">{{ deployLog.join("\n") }}</div>
+      <div v-if="deployLog.length" class="mt-2">
+        <div class="group-label">部署日志</div>
+        <div class="terminal-output log-pre log-200">{{ deployLog.join("\n") }}</div>
       </div>
-      <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" style="margin-top: 8px">本机部署需 Linux 环境（当前：{{ serverStatus.platform }}），可用「下载 ZIP」手动部署</el-alert>
-    </el-card>
-        <!-- ISO 管理 -->
-        <el-card shadow="never" style="margin-bottom: 16px">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
-            <span style="font-weight: 600"><el-icon><Files /></el-icon> ISO 镜像管理</span>
-            <el-button size="small" @click="loadIsos"><el-icon><Refresh /></el-icon> 刷新</el-button>
-          </div>
-          <el-alert v-if="isoList.supported === false" type="warning" :closable="false" style="margin-bottom: 8px">需 Linux 环境</el-alert>
-          <el-table v-else :data="isoList.isos || []" size="small" empty-text="尚无 ISO 文件，请将 ISO 上传到服务器 /srv/opstk/iso/ 目录">
-            <el-table-column prop="name" label="ISO 文件" min-width="280" />
-            <el-table-column prop="size_mb" label="大小 (MB)" width="110" />
-            <el-table-column label="操作" width="280" fixed="right">
-              <template #default="{ row }">
-                <el-select v-model="row._osType" size="small" style="width: 90px; margin-right: 6px">
-                  <el-option label="Ubuntu" value="ubuntu" />
-                  <el-option label="RHEL" value="rhel" />
-                </el-select>
-                <el-input v-model="row._osVer" size="small" style="width: 80px; margin-right: 6px" placeholder="22.04" />
-                <el-button type="success" link size="small" @click="askExtract(row)" :loading="row._extracting">提取</el-button>
-                <el-popconfirm title="确定删除?" @confirm="delIso(row.name)">
-                  <template #reference><el-button type="danger" link size="small">删除</el-button></template>
-                </el-popconfirm>
-              </template>
-            </el-table-column>
-          </el-table>
-          <div v-if="extractLog.length" style="margin-top: 8px">
-            <div style="font-size: 12px; color: var(--ot-text-3); margin-bottom: 4px">提取日志</div>
-            <div class="terminal-output" style="white-space: pre; max-height: 200px">{{ extractLog.join('\n') }}</div>
-          </div>
-        </el-card>
-        <!-- 模板列表 -->
-    <el-card shadow="never" style="margin-bottom: 16px">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 12px">
-        <span style="font-weight: 600"><el-icon><Cpu /></el-icon> PXE 装机模板</span>
+      <el-alert v-if="serverStatus.supported === false" type="warning" :closable="false" class="mt-2">本机部署需 Linux 环境（当前：{{ serverStatus.platform }}），可用「下载 ZIP」手动部署</el-alert>
+    </CardSection>
+    <!-- ISO 管理 -->
+    <CardSection title="ISO 镜像管理">
+      <template #extra>
+        <el-button size="small" @click="loadIsos"><el-icon><Refresh /></el-icon> 刷新</el-button>
+      </template>
+      <el-alert v-if="isoList.supported === false" type="warning" :closable="false" class="mb-2">需 Linux 环境</el-alert>
+      <el-table v-else :data="isoList.isos || []" size="small" empty-text="尚无 ISO 文件，请将 ISO 上传到服务器 /srv/opstk/iso/ 目录">
+        <el-table-column prop="name" label="ISO 文件" min-width="280" />
+        <el-table-column prop="size_mb" label="大小 (MB)" width="110" />
+        <el-table-column label="操作" width="280" fixed="right">
+          <template #default="{ row }">
+            <el-select v-model="row._osType" size="small" class="os-type-select">
+              <el-option label="Ubuntu" value="ubuntu" />
+              <el-option label="RHEL" value="rhel" />
+            </el-select>
+            <el-input v-model="row._osVer" size="small" class="os-ver-input" placeholder="22.04" />
+            <el-button type="success" link size="small" @click="askExtract(row)" :loading="row._extracting">提取</el-button>
+            <el-popconfirm title="确定删除?" @confirm="delIso(row.name)">
+              <template #reference><el-button type="danger" link size="small">删除</el-button></template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div v-if="extractLog.length" class="mt-2">
+        <div class="group-label">提取日志</div>
+        <div class="terminal-output log-pre log-200">{{ extractLog.join('\n') }}</div>
+      </div>
+    </CardSection>
+    <!-- 模板列表 -->
+    <CardSection title="PXE 装机模板">
+      <template #extra>
         <el-button type="primary" @click="openProfileDialog()"><el-icon><Plus /></el-icon> 新建装机模板</el-button>
-      </div>
-      <el-table :data="profiles" stripe size="small">
+      </template>
+      <el-table :data="profiles" stripe size="small" empty-text="暂无装机模板">
         <el-table-column prop="name" label="模板名称" min-width="130" />
         <el-table-column label="系统" width="120">
           <template #default="{ row }">
@@ -96,12 +93,11 @@
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
     <!-- 装机记录 -->
-    <el-card shadow="never">
-      <template #header><span style="font-weight: 600"><el-icon><Monitor /></el-icon> 装机记录</span></template>
-      <el-table :data="installs" stripe size="small">
+    <CardSection title="装机记录">
+      <el-table :data="installs" stripe size="small" empty-text="暂无装机记录">
         <el-table-column prop="hostname" label="主机名" min-width="120" />
         <el-table-column prop="mac" label="MAC 地址" width="160" />
         <el-table-column prop="ip" label="分配 IP" width="120" />
@@ -121,7 +117,7 @@
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
     <!-- 模板编辑弹窗 -->
     <el-dialog v-model="profileDialog" :title="editingId ? '编辑装机模板' : '新建装机模板'" width="760px" :close-on-click-modal="false">
@@ -139,11 +135,11 @@
           <el-col :span="8">
             <el-form-item label="版本">
               <el-select v-model="form.os_version" filterable allow-create default-first-option
-                         style="width: 100%" placeholder="选一个已提取介质的版本">
+                         class="w-full" placeholder="选一个已提取介质的版本">
                 <el-option v-for="v in versionOptions" :key="v.value" :label="v.label" :value="v.value" />
               </el-select>
               <div v-if="form.os_version && !mediaReady"
-                   style="margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--el-color-warning)">
+                   class="form-hint">
                 没有 {{ form.os_type }}/{{ form.os_version }}/ 的引导介质，装机时 iPXE 会报 "Could not boot image"
               </div>
             </el-form-item>
@@ -163,7 +159,7 @@
               <el-input v-model="form.admin_password" type="password" show-password
                         :placeholder="editingId ? '留空不修改' : '新建必填'" />
               <div v-if="!editingId && !form.admin_password"
-                   style="margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--el-color-warning)">
+                   class="form-hint">
                 新建时必填：这是裸机 root 密码，后端不允许留空，也不会代填任何默认值
               </div>
             </el-form-item>
@@ -213,38 +209,38 @@
           <el-col :span="8">
             <el-form-item label="忽略小于(GB)">
               <el-input-number v-model="form.disk_min_size_gb" :min="0" :max="100000"
-                               controls-position="right" style="width: 100%" />
+                               controls-position="right" class="w-full" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
             <el-form-item label="清空目标盘">
               <el-switch v-model="form.disk_wipe" />
-              <span style="margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary)">
+              <span class="switch-note">
                 只清空"目标磁盘"，其它盘一律不碰
               </span>
             </el-form-item>
           </el-col>
         </el-row>
         <el-alert v-if="form.disk_target_mode === 'auto'" type="info" :closable="false"
-                  style="margin-bottom: 12px"
+                  class="mb-3"
                   title="自动选盘：换硬件不用改模板" />
-        <div v-if="form.disk_target_mode === 'auto'" style="margin: -8px 0 12px; font-size: 12px; line-height: 1.6; color: var(--el-text-color-secondary)">
+        <div v-if="form.disk_target_mode === 'auto'" class="disk-auto-note">
           RHEL 系（anaconda 没有现成的自动选盘原语）在 <code>%pre</code> 里按
           "非可移动、非光驱、容量达标、按盘名排序取第一块"选出目标盘，
           再 <code>%include</code> 生成出来的分区片段。盘名不再写死，NVMe(<code>nvme0n1</code>) /
           virtio-blk(<code>vda</code>) 都能装。<br />
-          <b style="color: var(--el-color-warning)">Ubuntu 的 layout=custom 不支持自动选盘</b>：
+          <b class="warn-text">Ubuntu 的 layout=custom 不支持自动选盘</b>：
           subiquity 没有"自动挑最大盘"的写法，必须显式指定目标盘（否则生成时直接 422 拒绝）。
         </div>
 
         <el-alert
           v-if="form.os_type === 'ubuntu' && form.disk_scheme === 'custom'"
-          type="warning" :closable="false" style="margin-bottom: 12px"
+          type="warning" :closable="false" class="mb-3"
           title="Ubuntu 自定义分区：请用「按盘名」指定目标盘"
         >
-          <div style="font-size: 12px; line-height: 1.6">
+          <div class="alert-detail">
             subiquity 认目标盘的方式与 RHEL 不同（真机实测，见 RUNBOOK-STATE §5.47）：
-            <ul style="margin: 4px 0 0 16px; padding: 0">
+            <ul class="alert-list">
               <li>
                 <code>serial</code>：subiquity 取的是 sysfs 的
                 <code>/sys/block/sdX/device/serial</code>，而虚拟化（QEMU/virtio-scsi）下该属性为空
@@ -267,11 +263,11 @@
 
         <template v-if="form.disk_scheme === 'custom'">
           <el-divider content-position="left">自定义分区表</el-divider>
-          <div style="margin-bottom: 6px; font-size: 12px; color: var(--el-text-color-secondary)">
+          <div class="help-text">
             大小为 <code>512M</code>/<code>20G</code>/<code>rest</code>（<code>rest</code> 只能放在最后一行，表示用掉剩余空间）；
             挂载点留空 = 只建分区不挂载；填了 VG 与 LV 才是 LVM 逻辑卷。
           </div>
-          <el-table :data="form.partitions" size="small" style="margin-bottom: 6px">
+          <el-table :data="form.partitions" size="small" class="table-gap">
             <el-table-column label="挂载点" width="140">
               <template #default="{ row }"><el-input v-model="row.mount" placeholder="/ 或 swap" /></template>
             </el-table-column>
@@ -293,25 +289,25 @@
             </el-table-column>
             <el-table-column label="操作" width="70">
               <template #default="scope">
-                <el-button link type="danger" @click="form.partitions.splice(scope.$index, 1)">删除</el-button>
+                <el-button link type="danger" size="small" @click="form.partitions.splice(scope.$index, 1)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
-          <div style="margin-bottom: 12px">
+          <div class="mb-3">
             <el-button size="small" @click="addPartition()">+ 加一个分区</el-button>
             <el-button size="small" @click="applyPreset()">套用：EFI + boot + swap + LVM(/)</el-button>
           </div>
 
           <el-divider content-position="left">其它数据盘（默认<b>不格式化</b>）</el-divider>
-          <div style="margin-bottom: 6px; font-size: 12px; color: var(--el-text-color-secondary)">
+          <div class="help-text">
             这里只做"挂载"。要格式化别的盘必须显式打开下面的开关 —— 生产上默认不动数据盘。<br />
-            <b style="color: var(--el-color-warning)">识别方式必须填「容量」/「序列号」/「WWID」之一</b>：
+            <b class="warn-text">识别方式必须填「容量」/「序列号」/「WWID」之一</b>：
             盘名（sda/sdb）由内核探测顺序决定，<b>同一台机器两次启动都可能互换</b>，
             拿它当"别碰这块盘"的判据会把系统盘排除掉、让安装落到数据盘上并抹掉它（真机实测过）。
             盘名只作备注。容量写法如 <code>30G</code>（G/M/T 按二进制，GB/MB/TB 按十进制）。<br />
             <!-- 后端契约：不格式化时不会建分区，挂载点会被丢弃 ⇒ 直接 422（fail-closed），
                  别让运维填完挂载点才撞一个 422。 -->
-            <b style="color: var(--el-color-warning)">要给数据盘填「挂载点」必须二选一</b>：
+            <b class="warn-text">要给数据盘填「挂载点」必须二选一</b>：
             ① 打开「格式化」（建新分区再挂）；② 在「挂已有文件系统」里填该分区文件系统的
             <b>UUID</b> 或<b>卷标</b>（保留数据、不格式化）。<br />
             「挂已有文件系统」只在 <b>RHEL 系</b>（kickstart 的
@@ -323,7 +319,7 @@
             「文件系统」列可留空：<code>--fstype</code> 在该组合下是否必需官方文档没说，
             填了就原样写进产物。
           </div>
-          <el-table :data="form.data_disks" size="small" style="margin-bottom: 6px">
+          <el-table :data="form.data_disks" size="small" class="table-gap">
             <el-table-column label="容量（识别用）" width="130">
               <template #default="{ row }">
                 <el-input v-model="row.size" placeholder="30G" />
@@ -351,7 +347,7 @@
                   v-model="row.existing_kind"
                   clearable
                   placeholder="不用"
-                  style="width: 84px"
+                  class="existing-kind"
                   @change="onExistingKindChange(row)"
                 >
                   <el-option label="UUID" value="uuid" />
@@ -361,7 +357,7 @@
                   v-if="row.existing_kind"
                   v-model="row.existing_value"
                   placeholder="文件系统 UUID / 卷标"
-                  style="width: 146px; margin-left: 4px"
+                  class="existing-value"
                 />
               </template>
             </el-table-column>
@@ -379,11 +375,11 @@
             </el-table-column>
             <el-table-column label="操作" width="70">
               <template #default="scope">
-                <el-button link type="danger" @click="form.data_disks.splice(scope.$index, 1)">删除</el-button>
+                <el-button link type="danger" size="small" @click="form.data_disks.splice(scope.$index, 1)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
-          <div style="margin-bottom: 12px">
+          <div class="mb-3">
             <el-button
               size="small"
               @click="form.data_disks.push({ size: '', serial: '', wwid: '', name: '', mount: '', fstype: 'xfs', wipe: false, existing_kind: '', existing_value: '' })"
@@ -393,7 +389,7 @@
           </div>
 
           <el-divider content-position="left">RAID（可选）</el-divider>
-          <el-table :data="form.raid" size="small" style="margin-bottom: 6px">
+          <el-table :data="form.raid" size="small" class="table-gap">
             <el-table-column label="名称" width="110">
               <template #default="{ row }"><el-input v-model="row.name" placeholder="md0" /></template>
             </el-table-column>
@@ -419,11 +415,11 @@
             </el-table-column>
             <el-table-column label="操作" width="70">
               <template #default="scope">
-                <el-button link type="danger" @click="form.raid.splice(scope.$index, 1)">删除</el-button>
+                <el-button link type="danger" size="small" @click="form.raid.splice(scope.$index, 1)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
-          <div style="margin-bottom: 12px">
+          <div class="mb-3">
             <el-button size="small" @click="form.raid.push({ name: 'md0', level: 1, devices: '', mount: '', fstype: 'xfs' })">
               + 加一个 RAID
             </el-button>
@@ -461,11 +457,11 @@
 
     <!-- 配置生成弹窗 -->
     <el-dialog v-model="genDialog" title="PXE 部署文件生成" width="860px" top="5vh">
-      <el-form label-width="90px" size="small" style="margin-bottom: 12px">
+      <el-form label-width="90px" size="small" class="mb-3">
         <el-row :gutter="8">
           <el-col :span="8">
             <el-form-item label="部署模式">
-              <el-select v-model="genForm.deploy_mode" style="width:100%">
+              <el-select v-model="genForm.deploy_mode" class="w-full">
                 <el-option label="独立DHCP (专用装机网络)" value="standalone" />
                 <el-option label="ProxyDHCP (与现有DHCP并存)" value="proxy" />
                 <el-option label="中继模式 (仅TFTP, 依赖交换机)" value="relay" />
@@ -478,18 +474,18 @@
           <el-col :span="6"><el-form-item label="initrd"><el-input v-model="genForm.initrd_path" placeholder="留空由后端按模板版本推导" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="HTTP根地址"><el-input v-model="genForm.http_root" placeholder="留空由后端生成，格式 http://<IP>:8000/pxe/serve" /></el-form-item></el-col>
         </el-row>
-        <el-alert v-if="genMediaNote" type="warning" :closable="false" show-icon style="margin-bottom:8px">
+        <el-alert v-if="genMediaNote" type="warning" :closable="false" show-icon class="mb-2">
           {{ genMediaNote }}
         </el-alert>
         <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
           <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
           <!-- U5-F7：预览与下载必须是同一份内容 -->
-          <el-tag v-if="genStale" size="small" type="warning" style="margin-left:8px">预览已失效（参数或装机记录已变化，请重新生成）</el-tag>
-          <el-tag v-else-if="Object.keys(genFiles).length" size="small" type="success" style="margin-left:8px">下载内容 = 预览内容</el-tag>
+          <el-tag v-if="genStale" size="small" type="warning" class="tag-gap">预览已失效（参数或装机记录已变化，请重新生成）</el-tag>
+          <el-tag v-else-if="Object.keys(genFiles).length" size="small" type="success" class="tag-gap">下载内容 = 预览内容</el-tag>
       </el-form>
       <el-tabs v-model="activeFile" v-if="Object.keys(genFiles).length">
         <el-tab-pane v-for="(_, name) in genFiles" :key="name" :label="name" :name="name">
-          <div class="terminal-output" style="white-space: pre; max-height: 420px">{{ genFiles[name] }}</div>
+          <div class="terminal-output log-pre log-420">{{ genFiles[name] }}</div>
         </el-tab-pane>
       </el-tabs>
     </el-dialog>
@@ -501,7 +497,7 @@
           <span>{{ deployRow ? (deployRow.name || ('#' + deployRow.id)) : '-' }}</span>
         </el-form-item>
         <el-form-item label="部署模式">
-          <el-select v-model="deployForm.deploy_mode" style="width: 100%">
+          <el-select v-model="deployForm.deploy_mode" class="w-full">
             <el-option label="ProxyDHCP (与现有DHCP并存, 推荐)" value="proxy" />
             <el-option label="独立DHCP (专用装机网络)" value="standalone" />
             <el-option label="中继模式 (仅TFTP, 依赖交换机)" value="relay" />
@@ -522,7 +518,7 @@
            推导）、http_root 由后端强制为 http://<server_ip>:8000/pxe/serve（不吃前端传值）、
            installs 传空时自动回落到该模板在库里的装机记录。这里把将写入的东西说清楚，
            部署后再显示实际写盘的文件清单。 -->
-      <el-descriptions :column="1" size="small" border style="margin-top:10px">
+      <el-descriptions :column="1" size="small" border class="mt-10">
         <el-descriptions-item label="将按模板生成">
           {{ deployRow ? (deployRow.os_type + '/' + deployRow.os_version) : '-' }}
           —— 内核/initrd 路径按模板版本推导（要覆盖请用「生成配置」弹窗里的路径再部署）
@@ -534,7 +530,7 @@
           由后端强制为本机 http://&lt;PXE服务IP&gt;:8000/pxe/serve
         </el-descriptions-item>
       </el-descriptions>
-      <div v-if="deployWritten.length" style="margin-top:8px; font-size:12px; color:var(--el-text-color-secondary)">
+      <div v-if="deployWritten.length" class="written-note">
         上次实际写入 {{ deployWritten.length }} 个文件：{{ deployWritten.join('、') }}
       </div>
       <template #footer>
@@ -545,11 +541,11 @@
 
     <!-- ISO 提取确认（U5-F10）：把目标目录写出来，避免 RHEL 镜像被提到 ubuntu/22.04 -->
     <el-dialog v-model="extractConfirm.visible" title="确认提取引导介质" width="520px">
-      <div style="line-height:1.7">
+      <div class="dialog-body">
         将把 <b>{{ extractConfirm.row ? extractConfirm.row.name : '' }}</b> 里的引导文件提取到：<br />
-        <code style="font-size:13px">/srv/opstk/pxe-web/{{ (extractConfirm.row && extractConfirm.row._osType || '').trim()
+        <code class="path-code">/srv/opstk/pxe-web/{{ (extractConfirm.row && extractConfirm.row._osType || '').trim()
           }}/{{ (extractConfirm.row && extractConfirm.row._osVer || '').trim() }}/</code>
-        <div style="margin-top:10px; color: var(--el-color-warning); font-size:12px">
+        <div class="warn-note">
           目录名必须与模板里的「系统 + 版本」完全一致，否则生成出来的内核 URL 是 404
           （机器端只报 "Could not boot image"）。提取是长任务，请确认系统和版本没选错。
         </div>
@@ -567,6 +563,8 @@
 import { ref, reactive, onMounted, onBeforeUnmount, computed } from "vue"
 import http, { downloadZip } from "../api"
 import { ElMessage } from "element-plus"
+import PageHeader from "../components/PageHeader.vue"
+import CardSection from "../components/CardSection.vue"
 
 const profiles = ref([])
 const installs = ref([])
@@ -1076,3 +1074,46 @@ let serverPollTimer = null
 onBeforeUnmount(() => { clearTimeout(installTimer); clearTimeout(serverPollTimer) })
 onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); loadMedia(); startInstallPolling() })
 </script>
+
+<style scoped>
+/* 卡头右侧动作区：dnsmasq 状态 tag 在前（沿用 EP 相邻按钮间距），与标题同行等高 */
+.head-actions { display: flex; align-items: center; }
+.head-actions .el-tag { margin-right: var(--ot-space-2); }
+
+/* 区块间距（等值搬自原内联 margin，能对上 token 的用 token） */
+.mt-2 { margin-top: var(--ot-space-2); }
+.mb-2 { margin-bottom: var(--ot-space-2); }
+.mb-3 { margin-bottom: var(--ot-space-3); }
+.mt-10 { margin-top: 10px; }
+
+/* 卡片内小节标题 / 文件标签 / 空态文案 */
+.group-label { margin-bottom: var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.file-tag { margin: 2px; }
+.list-empty { color: var(--ot-text-4); font-size: var(--ot-font-xs); }
+
+/* 终端日志：在全局 .terminal-output（pre-wrap / 480px）基础上收窄，用联合选择器保证覆盖 */
+.terminal-output.log-pre { white-space: pre; }
+.terminal-output.log-200 { max-height: 200px; }
+.terminal-output.log-420 { max-height: 420px; }
+
+/* 表格行内控件宽度（保留原像素，不做刻度改写） */
+.os-type-select { width: 90px; margin-right: 6px; }
+.os-ver-input { width: 80px; margin-right: 6px; }
+.w-full { width: 100%; }
+.existing-kind { width: 84px; }
+.existing-value { width: 146px; margin-left: var(--ot-space-1); }
+.table-gap { margin-bottom: 6px; }
+
+/* 提示与帮助文案（--ot-warning / --ot-text-3 与原 --el-* 变量同值，见 tokens.css） */
+.form-hint { margin-top: var(--ot-space-1); font-size: var(--ot-font-xs); line-height: 1.4; color: var(--ot-warning); }
+.warn-text { color: var(--ot-warning); }
+.warn-note { margin-top: 10px; font-size: var(--ot-font-xs); color: var(--ot-warning); }
+.switch-note { margin-left: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.help-text { margin-bottom: 6px; font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.alert-detail { font-size: var(--ot-font-xs); line-height: 1.6; }
+.alert-list { margin: var(--ot-space-1) 0 0 var(--ot-space-4); padding: 0; }
+.disk-auto-note { margin: -8px 0 12px; font-size: var(--ot-font-xs); line-height: 1.6; color: var(--ot-text-3); }
+.written-note { margin-top: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.dialog-body { line-height: 1.7; }
+.path-code { font-size: var(--ot-font-sm); }
+</style>
