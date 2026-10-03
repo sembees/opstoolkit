@@ -37,7 +37,7 @@
         </div>
       </template>
       <el-table :data="history" stripe size="small" empty-text="暂无告警记录">
-        <el-table-column prop="asset_name" label="资产" min-width="120" />
+        <el-table-column prop="asset_name" label="设备" min-width="120" />
         <el-table-column prop="error" label="告警信息" min-width="300" show-overflow-tooltip />
         <el-table-column label="时间" width="160">
           <template #default="{ row }">{{ row.created_at ? new Date(row.created_at).toLocaleString("zh-CN") : "-" }}</template>

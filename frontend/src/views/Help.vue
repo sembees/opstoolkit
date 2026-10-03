@@ -40,12 +40,12 @@
                 <el-table-column prop="name" label="名称" width="130" />
                 <el-table-column prop="path" label="位置" />
               </el-table>
-              <p style="margin-top:8px;color:var(--ot-text-3);font-size:13px">远程服务器 IP: <b>10.128.118.113</b>，用户: <b>yang</b>，密码: <b>yang</b>。用 SSH 连接后可管理服务。</p>
+              <p style="margin-top:8px;color:var(--ot-text-3);font-size:13px">远程服务器 IP: <b>10.128.118.113</b>，用户: <b>yang</b>，密码: <b><口令></b>。用 SSH 连接后可管理服务。</p>
             </el-collapse-item>
 
             <el-collapse-item title="我要巡检设备，从头怎么操作？" name="b2">
               <el-steps direction="vertical" :active="5">
-                <el-step title="第 1 步：登录" description="浏览器打开 http://10.128.118.113:8000，用管理员账号 admin 登录（初始口令见服务日志）" />
+                <el-step title="第 1 步：登录" description="浏览器打开 http://10.128.118.113:8000，用管理员账号 admin 登录（初始密码见服务日志）" />
                 <el-step title="第 2 步：录入设备" description="点「资产管理」→ 添加设备，填写 IP 地址、选择厂商（H3C/华为/思科）、设备类型（交换机/路由器/防火墙）" />
                 <el-step title="第 3 步：录入密码" description="点「凭据管理」→ 添加密码，填写 SSH 账号和密码（自动加密）。回到「资产管理」把这个凭据关联到设备上" />
                 <el-step title="第 4 步：开始巡检" description="点「CT 巡检」→ 勾选设备 → 选择巡检模板（系统默认或自定义）→ 点「开始巡检」" />
@@ -58,7 +58,7 @@
               <el-steps direction="vertical" :active="6">
                 <el-step title="第 1 步：准备 ISO" description="下载 Ubuntu Server ISO（必须是 live-server 版本），上传到服务器 /srv/opstk/iso/ 目录。可用 scp: scp ubuntu.iso yang@10.128.118.113:/srv/opstk/iso/" />
                 <el-step title="第 2 步：提取内核" description="打开 OpsToolkit Web 界面 → 「PXE 装机」 → ISO 面板中点「提取」。系统自动挂载 ISO 并提取 vmlinuz 和 initrd" />
-                <el-step title="第 3 步：建装机模板" description="在「PXE 装机」点「新建模板」，填写系统类型、账号密码、磁盘分区等。这些就是装好后的系统配置" />
+                <el-step title="第 3 步：建装机模板" description="在「PXE 装机」点「新建装机模板」，填写系统类型、账号密码、磁盘分区等。这些就是装好后的系统配置" />
                 <el-step title="第 4 步：一键部署" description="点模板旁的「部署」按钮。系统自动检测网卡、生成配置、启动 dnsmasq。下方会显示部署日志，全部打✓就成功了" />
                 <el-step title="第 5 步：设置裸机" description="裸机接网线，开机进 BIOS/UEFI，把 Network Boot 设为 Enabled，启动顺序调到第一位。部分服务器可按 F12 直接选网络启动" />
                 <el-step title="第 6 步：等待安装完成" description="裸机重启后自动开始安装，屏幕上会看到进度。安装完成后自动重启，用模板中的账号密码登录即可" />
@@ -67,7 +67,7 @@
 
             <el-collapse-item title="代码改了之后怎么更新到服务器？" name="b4">
               <pre class="code-block"># ===== 场景 1: 只改了后端 Python 代码 =====
-# 在本地 D:-cc-project 改好代码后:
+# 在本地 D:\07-cc\01-project 改好代码后:
 
 # 1. 打包上传 (Codex 帮你做, 或手动):
 scp -r backend/app/ yang@10.128.118.113:/opt/opstk/backend/
@@ -98,13 +98,13 @@ docker compose up -d --build</pre>
                   <p>检查服务是否在运行：SSH 进服务器，运行 <code>systemctl status opstk</code>。如果 inactive，运行 <code>sudo systemctl restart opstk</code>。</p>
                 </el-collapse-item>
                 <el-collapse-item title="“巡检报错连接超时”" name="faq2">
-                  <p>确认设备 IP 可达、SSH 端口 (22) 未被阻止、凭据密码正确。可在资产管理中修改超时时间。</p>
+                  <p>确认设备 IP 可达、SSH 端口 (22) 未被阻止、凭据密码正确。巡检超时为全局配置（默认 60 秒），不能在资产管理中按资产修改。</p>
                 </el-collapse-item>
                 <el-collapse-item title="“PXE 部署后裸机不引导”" name="faq3">
                   <p>检查：1) dnsmasq 是否运行 (systemctl status dnsmasq)；2) 裸机和服务器是否同一网段；3) 网段内是否有其他 DHCP 服务。</p>
                 </el-collapse-item>
                 <el-collapse-item title="“忘记密码”" name="faq4">
-                  <p>管理员口令在首次初始化时随机生成并打印在服务日志里（docker logs opstoolkit）。若忘记了：删除 /opt/opstk/backend/data/ops.db 后重启服务会重新生成并打印新的初始口令（但已录入的资产/凭据会丢失）。</p>
+                  <p>管理员密码在首次初始化时随机生成并打印在服务日志里（docker logs opstoolkit）。若忘记了：删除 /opt/opstk/backend/data/ops.db 后重启服务会重新生成并打印新的初始密码（但已录入的资产/凭据会丢失）。</p>
                 </el-collapse-item>
               </el-collapse>
             </el-collapse-item>
@@ -144,7 +144,7 @@ docker compose up -d --build</pre>
 │   │   │   ├── inspection/     #   巡检解析 + TextFSM
 │   │   │   └── ztp/            #   ZTP 配置生成器
 │   │   └── it/                 # IT 模块 (服务器)
-│   │       ├── netconfig/      #   nmcli/netplan 配置生成
+│   │       ├── netconfig/      #   netplan/nmcli/ifcfg 配置生成
 │   │       └── pxe/            #   PXE 配置生成 + 本机服务管控
 │   ├── requirements.txt        # Python 依赖
 │   ├── Dockerfile             # 容器构建
@@ -163,16 +163,16 @@ docker compose up -d --build</pre>
               <pre class="code-block"># 1. 安装依赖
 cd backend
 pip install -r requirements.txt
-# 额外补装: pip install pydantic-settings eval_type_backport
+# 额外补装: pip install eval_type_backport（pydantic-settings 已含在 requirements.txt）
 
 # 2. 设置环境变量
- = "backend"
+$env:PYTHONPATH = "backend"
 
 # 3. 启动
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 
 # 访问: http://localhost:8000
-# 管理员: admin（初始口令见服务日志）</pre>
+# 管理员: admin（初始密码见服务日志）</pre>
               <p style="font-weight:600;margin-top:12px">前端开发服务</p>
               <pre class="code-block">cd frontend
 npm install
@@ -205,7 +205,7 @@ python3 -m venv /opt/opstk/venv
 # ===== 第 4 步: 安装 Python 依赖 =====
 cd /opt/opstk/backend
 /opt/opstk/venv/bin/pip install -r requirements.txt
-/opt/opstk/venv/bin/pip install pydantic-settings eval_type_backport
+/opt/opstk/venv/bin/pip install eval_type_backport
 
 # ===== 第 5 步: 配置 sudo 免密 =====
 echo 'yang ALL=(root) NOPASSWD: /usr/bin/systemctl * dnsmasq, /usr/sbin/systemctl * dnsmasq, /usr/bin/tee /etc/dnsmasq.d/*, /usr/bin/chown, /usr/bin/mount, /usr/bin/umount, /usr/sbin/restorecon, /usr/sbin/semanage' | sudo tee /etc/sudoers.d/opstk
@@ -213,7 +213,7 @@ sudo chmod 440 /etc/sudoers.d/opstk
 
 # ===== 第 6 步: 创建目录 + SELinux =====
 mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/iso /srv/opstk/mnt
-sudo chown -R yang\codexsandboxoffline /srv/tftp /srv/opstk
+sudo chown -R yang /srv/tftp /srv/opstk
 sudo semanage fcontext -a -t tftpdir_t '/srv/tftp(/.*)?'
 sudo restorecon -R /srv/tftp
 
@@ -233,7 +233,7 @@ Description=OpsToolkit
 After=network.target
 [Service]
 Type=simple
-User=yang\codexsandboxoffline
+User=yang
 WorkingDirectory=/opt/opstk/backend
 Environment=PYTHONPATH=/opt/opstk/backend
 ExecStart=/opt/opstk/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -311,12 +311,12 @@ cp /opt/opstk/backend/data/ops.db /backup/</pre>
           </el-alert>
           <ol>
             <li>在「资产管理」添加网络设备（category = ct），填写 IP、厂商、device_type。</li>
-            <li>在「凭据管理」录入设备的 SSH/Telnet 账号密码，并在资产里关联。</li>
+            <li>在「凭据管理」录入设备的 SSH 账号密码，并在资产里关联。</li>
             <li>进入「CT 巡检」，选择设备 + 巡检模板（或填写自定义命令）。</li>
             <li>点击开始巡检，WebSocket 实时输出命令结果，关键指标自动解析为结构化数据。</li>
             <li>巡检模板均可查看内容；系统默认模板只读，可「克隆」成自定义后编辑。</li>
           </ol>
-          <el-alert type="warning" :closable="false" title="连接要求" description="设备需开启 SSH 或 Telnet，本工具服务器能达设备管理 IP。device_type 推荐：h3c → hp_comware，华为 → huawei，思科 → cisco_ios。" style="margin-top:12px" />
+          <el-alert type="warning" :closable="false" title="连接要求" description="设备需开启 SSH，本工具服务器能达设备管理 IP。device_type 推荐：h3c → hp_comware，华为 → huawei，思科 → cisco_ios。" style="margin-top:12px" />
         </el-tab-pane>
 
         <!-- ===== 网络配置 ===== -->
@@ -438,11 +438,11 @@ scp ubuntu-22.04.iso yang@服务器IP:/srv/opstk/iso/</pre>
               <p style="margin-top:4px;color:var(--ot-text-3);font-size:13px">提取后的文件会放到 /srv/opstk/pxe-web/ubuntu/22.04/ 目录，前端可在 PXE 服务器面板的 HTTP 文件列表中看到。</p>
 
               <p style="font-weight:600;margin-top:12px">第 3 步：创建装机模板</p>
-              <p>点「新建模板」，填写以下信息（字段详解见下方「模板字段说明」）：</p>
+              <p>点「新建装机模板」，填写以下信息（字段详解见下方「模板字段说明」）：</p>
               <pre class="code-block">名称:     ubuntu-web-prod    (自定义，方便区分)
 系统:     Ubuntu 22.04
-管理账号: ops
-管理密码: Ops@2024
+管理员: ops
+管理员密码: <口令>
 时区:     Asia/Shanghai
 磁盘:     lvm (推荐) / direct
 网络:     dhcp / static
@@ -504,7 +504,7 @@ Boot → 选择 PXE 网卡启动</pre>
         <!-- ===== ZTP ===== -->
         <el-tab-pane label="ZTP 开局" name="ztp">
           <h3>ZTP 配置开局手册</h3>
-          <p>网络/安全设备（H3C、华为、思科）首次上电时空配置启动，会自动通过 DHCP 获取 TFTP 地址并下载配置文件。OpsToolkit 可生成全套开局配置并通过 dnsmasq 投递。</p>
+          <p>网络/安全设备（H3C、华为、思科）首次上电时空配置启动，会自动通过 DHCP 获取 TFTP 地址并下载配置文件。OpsToolkit 可生成全套开局配置并通过 dnsmasq 下发。</p>
 
           <el-collapse v-model="ztpActive" style="margin-top:12px">
 
@@ -543,19 +543,21 @@ Boot → 选择 PXE 网卡启动</pre>
 
             <el-collapse-item title="操作步骤：从创建到设备开局" name="z3">
               <p style="font-weight:600">第 1 步：创建 ZTP 模板</p>
-              <p>进入「ZTP 开局」页面，点「新建模板」，填写：</p>
+              <p>进入「ZTP 开局」页面，点「新建开局模板」，填写：</p>
               <pre class="code-block">名称:     h3c-core-sw      (自定义)
 厂商:     H3C / 华为 / 思科
 管理 VLAN: 100               (设备管理网段)
-管理 IP:  192.168.100.1/24   (设备管理地址)
+掩码:     255.255.255.0
 网关:     192.168.100.254
-管理账号: admin
-管理密码: <开局时填写>
-SNMP 社区: public
-SSH 版本: 2</pre>
+DNS:      114.114.114.114
+NTP:      留空 = 不下发 NTP
+管理员:   admin
+管理员密码: <开局时填写>
+SNMP 团体: public
+上联口/接入口/VLAN 规划: 可选，按需填写</pre>
 
               <p style="font-weight:600;margin-top:12px">第 2 步：添加设备清单</p>
-              <p>每台设备需要登记其 MAC 地址，系统会按 MAC 生成单独的配置文件：</p>
+              <p>设备清单为可选：不添加设备也能开局（未登记设备统一使用 ztp/default.cfg 基础配置）。添加设备并填写 MAC 地址后，系统才会按 MAC 生成单独的配置文件：</p>
               <pre class="code-block"># 获取 MAC 方式:
 # 1. 设备贴纸上的 MAC 标签
 # 2. 打开设备控制台: display device manuinfo (H3C/华为)
@@ -564,10 +566,10 @@ SSH 版本: 2</pre>
 # 在设备清单中填写:
 MAC:      3c8c-4012-abcd  (H3C/华为 格式) 或 aabb.ccdd.eeff (思科)
 主机名: core-sw-floor3
-IP:       192.168.100.10  (可选，不填则用模板默认)</pre>
+IP:       192.168.100.10  (可选，不填则该设备管理口走 DHCP 取址)</pre>
 
               <p style="font-weight:600;margin-top:12px">第 3 步：生成配置 + 部署</p>
-              <p>点「生成配置」，选择投递模式（同样支持 standalone/proxy/relay）。然后：</p>
+              <p>点「生成配置」，选择部署模式（同样支持 standalone/proxy/relay）。然后：</p>
               <ol style="margin:4px 0 4px 20px">
                 <li>点「下载 ZIP」获取全套文件</li>
                 <li>将 .cfg 配置文件放入 TFTP 的 ztp/ 目录</li>
@@ -584,13 +586,13 @@ IP:       192.168.100.10  (可选，不填则用模板默认)</pre>
               </ol>
             </el-collapse-item>
 
-            <el-collapse-item title="三种投递模式" name="z4">
+            <el-collapse-item title="三种部署模式" name="z4">
               <el-table :data="pxeModes" border size="small" style="margin:8px 0">
                 <el-table-column prop="mode" label="模式" width="130" />
                 <el-table-column prop="dhcp" label="DHCP 行为" width="220" />
                 <el-table-column prop="scene" label="适用场景" />
               </el-table>
-              <p style="margin-top:8px">ZTP 的三种模与 PXE 完全一致，区别在于投递的是设备配置文件而非 OS 内核。</p>
+              <p style="margin-top:8px">ZTP 的三种模式与 PXE 完全一致，区别在于下发的是设备配置文件而非 OS 内核。</p>
               <p style="font-weight:600;margin-top:8px">standalone</p>
               <p>OpsToolkit 自己作为 DHCP + TFTP 服务器。适合专用的设备初始化网络，如维护 VLAN。</p>
               <p style="font-weight:600;margin-top:8px">proxy</p>
@@ -658,7 +660,7 @@ chmod 440 /etc/sudoers.d/opstk
 visudo -cf /etc/sudoers.d/opstk  # 验证语法</pre>
               <p style="font-weight:600;margin-top:12px">第 5 步：创建目录 + 修复 SELinux</p>
               <pre class="code-block">mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/iso /srv/opstk/mnt
-chown -R yang\codexsandboxoffline /srv/tftp /srv/opstk
+chown -R yang /srv/tftp /srv/opstk
 
 # RHEL/Rocky 需要修复 SELinux (Ubuntu 跳过此步)
 semanage fcontext -a -t tftpdir_t '/srv/tftp(/.*)?'
@@ -711,9 +713,9 @@ docker compose up -d
 
 \# 或者直接带源码重建:
 docker compose up -d --build</pre>
-              <p style="font-weight:600;margin-top:12px">数据卷说明</p>
+              <p style="font-weight:600;margin-top:12px">数据挂载说明（下表均为宿主机目录的绑定挂载，非具名卷）</p>
               <el-table :data="volumeConfig" border size="small">
-                <el-table-column prop="vol" label="卷名称" width="130" />
+                <el-table-column prop="vol" label="宿主机路径" width="130" />
                 <el-table-column prop="path" label="容器内路径" width="200" />
                 <el-table-column prop="desc" label="内容" />
               </el-table>
@@ -721,7 +723,7 @@ docker compose up -d --build</pre>
 
             <el-collapse-item title="首次使用流程：从部署到裸机装机" name="d3">
               <ol>
-                <li><b>登录</b> — 浏览器打开 http://服务器IP:8000，管理员账号 admin（初始口令见服务日志）</li>
+                <li><b>登录</b> — 浏览器打开 http://服务器IP:8000，管理员账号 admin（初始密码见服务日志）</li>
                 <li><b>上传 ISO</b> — 将 OS 安装镜像 (.iso) 放到服务器 /srv/opstk/iso/ 目录</li>
                 <li><b>提取内核</b> — PXE 页面 ISO 面板，选择 OS 类型和版本，点「提取」，自动挂载 ISO 并提取 vmlinuz/initrd/squashfs</li>
                 <li><b>创建模板</b> — 填写系统类型、磁盘分区、管理账号、密码、网络等</li>
@@ -749,7 +751,7 @@ systemctl status dnsmasq -l  # 看报错详情</pre>
                   <pre class="code-block">sudo -n true  # 测试免密是否生效</pre>
                 </el-collapse-item>
                 <el-collapse-item title="裸机 PXE 引导卡住，无法下载内核" name="t4">
-                  <p>检查内核文件是否存在：在 PXE 页面查看 HTTP 文件列表是否包含 ubuntu/22.04/ 目录。如果没有，说明未提取 ISO。</p>
+                  <p>检查内核文件是否存在：在 PXE 页面查看 HTTP 文件列表是否包含 ubuntu 顶层目录（该列表仅显示顶层条目，不展开子目录，因此不会显示 ubuntu/22.04/ 这类子路径）。如果没有，说明未提取 ISO。</p>
                 </el-collapse-item>
                 <el-collapse-item title="容器部署: port 67 already in use" name="t5">
                   <p>宿主机上有其他 DHCP 服务。停掉宿主机的 DHCP，或者在 OpsToolkit 中改用 proxy 模式。</p>
@@ -763,7 +765,7 @@ systemctl status dnsmasq -l  # 看报错详情</pre>
 
         
 <!-- ===== 网络配置生成器使用指南 ===== -->
-        <el-tab-pane label="网络配置生成" name="netconfig">
+        <el-tab-pane label="网络配置生成" name="netconfig-usage">
           <h3>网络配置生成器使用指南</h3>
           <p style="color:var(--ot-text-2)">生成 Ubuntu netplan 或 RHEL nmcli 配置脚本，支持网卡、Bond、VLAN、Bridge。</p>
 
@@ -823,7 +825,7 @@ nmcli device status</pre>
               <p>mode 1 (active-backup) 主备，最常用、无需交换机配置；mode 4 (802.3ad/LACP) 需交换机两端同步配置，提供真正负载均衡。</p>
             </el-collapse-item>
             <el-collapse-item title="凭据加密" name="c5">
-              <p>所有设备密码以 Fernet 对称加密存储于数据库，密钥首次启动时自动生成于 backend/.env。注意：删除数据库后密钥会重生，旧凭据将无法解密。</p>
+              <p>所有设备密码以 Fernet 对称加密存储于数据库，密钥首次启动时自动生成并持久保存在 backend/.env，与数据库无关：删除数据库不会使密钥重生；若 .env 丢失（密钥随之丢失），旧凭据将无法解密。</p>
             </el-collapse-item>
           </el-collapse>
         </el-tab-pane>
@@ -853,7 +855,7 @@ const localPaths = [
 ]
 const remotePaths = [
   { name: "IP 地址", path: "10.128.118.113" },
-  { name: "登录账号", path: "yang / yang (sudo 免密)" },
+  { name: "登录账号", path: "yang / <口令> (sudo 免密)" },
   { name: "项目目录", path: "/opt/opstk/" },
   { name: "后端代码", path: "/opt/opstk/backend/app/" },
   { name: "前端文件", path: "/opt/opstk/frontend/dist/" },
@@ -869,15 +871,15 @@ const remotePaths = [
 
 const quickActive = ref("q4")
 const dailyOps = [
-  { page: "登录", func: "JWT 认证", how: "admin（初始口令见服务日志），首次登录后请修改密码" },
+  { page: "登录", func: "JWT 认证", how: "admin（初始密码见服务日志）" },
   { page: "仪表盘", func: "总览", how: "查看资产数/巡检记录/快捷入口" },
-  { page: "资产管理", func: "设备清单", how: "添加设备 IP/厂商/类型, 可批大批量导入" },
-  { page: "凭据管理", func: "加密密码", how: "录入 SSH/Telnet 密码, Fernet 加密存储, 与资产关联" },
+  { page: "资产管理", func: "设备清单", how: "添加设备 IP/厂商/类型, 关联凭据" },
+  { page: "凭据管理", func: "加密密码", how: "录入 SSH 密码, Fernet 加密存储, 与资产关联" },
   { page: "CT 巡检", func: "设备巡检", how: "选择设备 + 模板, WebSocket 实时看命令输出和解析结果" },
   { page: "CT 巡检", func: "模板管理", how: "系统默认模板可查看/克隆; 用户模板可增删改" },
-  { page: "IT 网络配置", func: "生成脚本", how: "选 OS 类型, 配置网卡/Bond/VLAN/Bridge, 下载脚本" },
+  { page: "网络配置生成", func: "生成脚本", how: "选 OS 类型, 配置网卡/Bond/VLAN/Bridge, 下载脚本" },
   { page: "PXE 装机", func: "一键装机", how: "上传 ISO → 提取内核 → 创建模板 → 点部署 → 裸机接线" },
-  { page: "ZTP 开局", func: "设备初始化", how: "建模板 → 添设设备 MAC → 生成配置 → 部署 → 设备上电" },
+  { page: "ZTP 开局", func: "设备初始化", how: "建模板 → 生成配置 → 部署 → 设备上电（设备清单可选）" },
   { page: "使用帮助", func: "在线手册", how: "查看每个功能的详细说明和操作步骤" },
 ]
 const dataPaths = [
@@ -896,8 +898,8 @@ const pxeFields = [
   { field: "名称", required: "是", desc: "自定义模板名，方便区分", example: "ubuntu-web-prod" },
   { field: "系统类型", required: "是", desc: "ubuntu 生成 autoinstall，rhel 生成 Kickstart", example: "ubuntu / rhel" },
   { field: "系统版本", required: "是", desc: "需与 ISO 版本一致，决定内核文件路径", example: "22.04 / 9.3" },
-  { field: "管理账号", required: "是", desc: "安装后的管理用户名，已加入 sudo", example: "ops" },
-  { field: "管理密码", required: "是", desc: "加密存储，生成 shadow 哈希", example: "Ops@2024" },
+  { field: "管理员", required: "是", desc: "安装后的管理用户名，已加入 sudo", example: "ops" },
+  { field: "管理员密码", required: "是", desc: "加密存储，生成 shadow 哈希", example: "<口令>" },
   { field: "时区", required: "否", desc: "默认 Asia/Shanghai", example: "Asia/Shanghai" },
   { field: "磁盘分区", required: "否", desc: "lvm (推荐) 或 direct", example: "lvm" },
   { field: "网络模式", required: "否", desc: "dhcp 自动获取 / static 静态", example: "dhcp" },
@@ -916,9 +918,9 @@ const pxeFiles = [
   { file: "squashfs", role: "文件系统", desc: "从 ISO 提取，压缩的完整根文件系统" },
 ]
 const ztpFiles = [
-  { file: "device.cfg", vendor: "H3C", desc: "按 MAC 生成的配置文件，含 VLAN/IP/账号" },
-  { file: "device.cfg", vendor: "华为", desc: "同上，华为语法格式" },
-  { file: "ztp_script.py", vendor: "思科", desc: "Python 脚本，负责拉取并应用配置" },
+  { file: "ztp/<序列号或主机名>.cfg", vendor: "H3C", desc: "按 MAC 匹配下发的配置文件，含 VLAN/IP/账号" },
+  { file: "ztp/<序列号或主机名>.cfg", vendor: "华为", desc: "同上，华为语法格式" },
+  { file: "ztp_bootstrap.py", vendor: "思科", desc: "Python 脚本，负责拉取并应用配置" },
   { file: "中间文件", vendor: "华为", desc: "描述需下载的文件列表" },
   { file: "dnsmasq.conf", vendor: "通用", desc: "含 Option 66/67 (H3C/华为) 或 150 (思科)" },
 ]
@@ -932,15 +934,15 @@ const deployReqs = [
   { item: "端口", req: "8000 (Web) + 67 (DHCP) + 69 (TFTP)", note: "确保未被占用" },
 ]
 const composeConfig = [
-  { key: "network_mode: host", why: "PXE 需要广播 DHCP 数据包，必须用宿主机网络，不肽用 bridge" },
+  { key: "network_mode: host", why: "PXE 需要广播 DHCP 数据包，必须用宿主机网络，不得用 bridge" },
   { key: "privileged: true", why: "挂载 ISO 需要访问 /dev/loop 设备" },
   { key: "restart: unless-stopped", why: "服务崩溃或重启后自动恢复" },
 ]
 const volumeConfig = [
-  { vol: "data", path: "/app/backend/data", desc: "SQLite 数据库 (资产/凭据/模板)" },
-  { vol: "tftp-root", path: "/srv/tftp", desc: "iPXE 固件 (ipxe.efi/undionly.kpxe)" },
-  { vol: "pxe-web", path: "/srv/opstk/pxe-web", desc: "应答文件 + 内核 (vmlinuz/initrd)" },
-  { vol: "iso-store", path: "/srv/opstk/iso", desc: "ISO 镜像文件" },
+  { vol: "./data", path: "/app/backend/data", desc: "SQLite 数据库 (资产/凭据/模板)" },
+  { vol: "/srv/tftp", path: "/srv/tftp", desc: "iPXE 固件 (ipxe.efi/undionly.kpxe)" },
+  { vol: "/srv/opstk/pxe-web", path: "/srv/opstk/pxe-web", desc: "应答文件 + 内核 (vmlinuz/initrd)" },
+  { vol: "/srv/opstk/iso", path: "/srv/opstk/iso", desc: "ISO 镜像文件" },
 ]
 
 const netconfigRows = [

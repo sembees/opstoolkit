@@ -128,7 +128,7 @@
       <el-form :model="form" label-width="90px" size="default">
         <el-divider content-position="left">基本信息</el-divider>
         <el-row :gutter="12">
-          <el-col :span="8"><el-form-item label="模板名"><el-input v-model="form.name" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="模板名称"><el-input v-model="form.name" /></el-form-item></el-col>
           <el-col :span="8">
             <el-form-item label="系统">
               <el-select v-model="form.os_type" @change="onOsChange">
@@ -164,7 +164,7 @@
                         :placeholder="editingId ? '留空不修改' : '新建必填'" />
               <div v-if="!editingId && !form.admin_password"
                    style="margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--el-color-warning)">
-                新建时必填：这是裸机 root 口令，后端不允许留空，也不会代填任何默认值
+                新建时必填：这是裸机 root 密码，后端不允许留空，也不会代填任何默认值
               </div>
             </el-form-item>
           </el-col>
@@ -530,7 +530,7 @@
         <el-descriptions-item label="将带上装机记录">
           {{ deployInstalls.length }} 条（模板里已登记的 MAC → 各自菜单/应答文件）
         </el-descriptions-item>
-        <el-descriptions-item label="媒体根地址">
+        <el-descriptions-item label="HTTP根地址">
           由后端强制为本机 http://&lt;PXE服务IP&gt;:8000/pxe/serve
         </el-descriptions-item>
       </el-descriptions>
@@ -919,13 +919,13 @@ function openProfileDialog(row) {
 }
 
 async function saveProfile() {
-  if (!form.name) { ElMessage.warning("请输入模板名"); return }
+  if (!form.name) { ElMessage.warning("请输入模板名称"); return }
   // 新建时管理员密码必填 —— 后端 POST 走 _require_admin_password（422：不允许留空，
   // 也不代填默认口令）。以前这里一律发 null，于是**新建模板永远失败**，
   // 而后端只在响应体里说明原因，界面上只看到"失败了"。
   // 编辑（PUT）时留空 = 不修改，是允许的，所以只在新建时拦。
   if (!editingId.value && !form.admin_password) {
-    ElMessage.warning("新建模板必须填写管理员密码（裸机 root 口令，不允许留空）")
+    ElMessage.warning("新建模板必须填写管理员密码（裸机 root 密码，不允许留空）")
     return
   }
   saving.value = true

@@ -17,7 +17,7 @@
         </div>
       </div>
       <el-descriptions v-if="serverStatus.supported" :column="3" size="small" border>
-        <el-descriptions-item label="小工具目录">{{ serverStatus.sudo_ok ? '是' : '否' }}</el-descriptions-item>
+        <el-descriptions-item label="sudo 免密">{{ serverStatus.sudo_ok ? '是' : '否' }}</el-descriptions-item>
         <el-descriptions-item label="TFTP">{{ serverStatus.dirs && serverStatus.dirs.tftp ? '已创建' : '未创建' }}</el-descriptions-item>
         <el-descriptions-item label="HTTP">{{ serverStatus.dirs && serverStatus.dirs.web ? '已创建' : '未创建' }}</el-descriptions-item>
       </el-descriptions>
@@ -41,8 +41,8 @@
         </el-table-column>
         <el-table-column prop="mgmt_vlan" label="管理VLAN" width="90" />
         <el-table-column prop="mgmt_gateway" label="网关" width="120" />
-        <el-table-column prop="server_ip" label="ZTP服务器" width="120" />
-        <el-table-column label="投递模式" width="110">
+        <el-table-column prop="server_ip" label="ZTP服务IP" width="120" />
+        <el-table-column label="部署模式" width="110">
           <template #default="{ row }">{{ modeLabel(row.deploy_mode) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right">
@@ -67,12 +67,12 @@
       </template>
       <!-- R4/§5.54：登记设备是**可选**的，必须写清楚 —— 否则会被当成"必须先登记 MAC 才能开局" -->
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px">
-        <template #title>不登记设备也能开局</template>
+        <template #title>不添加设备也能开局</template>
         <div style="font-size:12px;line-height:1.6">
           没登记的设备统一拿 <code>ztp/default.cfg</code>（管理口用 DHCP 取址，不会写死 IP，
           否则多台设备会撞同一个地址）；开局后到 DHCP 服务器上按 MAC 认领它们各自的地址。
           <br />
-          想给**每台不同的**主机名 / 管理 IP，就在这里按 <b>MAC</b> 登记（DHCP 是按 MAC 匹配的；
+          想给**每台不同的**主机名 / 管理 IP，就在这里按 <b>MAC</b> 添加设备（DHCP 是按 MAC 匹配的；
           只填序列号不填 MAC 的设备仍会拿 default.cfg）。管理 IP 留空 = 该设备也用 DHCP 取址。
         </div>
       </el-alert>
@@ -165,7 +165,7 @@
       <el-form :model="form" label-width="100px" size="default">
         <el-divider content-position="left">基本信息</el-divider>
         <el-row :gutter="12">
-          <el-col :span="8"><el-form-item label="模板名"><el-input v-model="form.name" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="模板名称"><el-input v-model="form.name" /></el-form-item></el-col>
           <el-col :span="8">
             <el-form-item label="厂商">
               <el-select v-model="form.vendor" @change="onVendorChange">
@@ -209,8 +209,8 @@
         <el-divider content-position="left">账号与安全</el-divider>
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="管理员"><el-input v-model="form.admin_user" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="密码"><el-input v-model="form.admin_password" type="password" show-password placeholder="新建必填；编辑时留空=不修改" /></el-form-item></el-col>
-          <el-col :span="8" v-if="form.vendor === 'cisco'"><el-form-item label="Enable密钥"><el-input v-model="form.enable_secret" type="password" show-password /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="管理员密码"><el-input v-model="form.admin_password" type="password" show-password placeholder="新建必填；编辑时留空=不修改" /></el-form-item></el-col>
+          <el-col :span="8" v-if="form.vendor === 'cisco'"><el-form-item label="Enable 密码"><el-input v-model="form.enable_secret" type="password" show-password /></el-form-item></el-col>
         </el-row>
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="SNMP团体"><el-input v-model="form.snmp_community" /></el-form-item></el-col>
@@ -223,10 +223,10 @@
         </el-row>
         <el-form-item label="自定义配置"><el-input v-model="form.extra_config" type="textarea" :rows="3" placeholder="追加的厂商 CLI (可选)" /></el-form-item>
 
-        <el-divider content-position="left">ZTP 投递</el-divider>
+        <el-divider content-position="left">ZTP 部署</el-divider>
         <el-row :gutter="12">
           <el-col :span="8">
-            <el-form-item label="投递模式">
+            <el-form-item label="部署模式">
               <el-select v-model="form.deploy_mode">
                 <el-option label="独立DHCP" value="standalone" />
                 <el-option label="ProxyDHCP" value="proxy" />
@@ -234,7 +234,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8"><el-form-item label="服务器IP"><el-input v-model="form.server_ip" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="ZTP服务IP"><el-input v-model="form.server_ip" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="DHCP网卡">
             <el-input v-model="form.dhcp_iface" placeholder="必填，例：ens19（宿主机上真实存在、且不承载默认路由的网卡）" />
             <div style="font-size:12px;line-height:1.5;color:var(--ot-text-3);margin-top:4px">
@@ -250,7 +250,7 @@
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="DHCP起始"><el-input v-model="form.dhcp_start" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="DHCP结束"><el-input v-model="form.dhcp_end" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="HTTP根"><el-input v-model="form.http_root" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="HTTP根地址"><el-input v-model="form.http_root" /></el-form-item></el-col>
         </el-row>
       </el-form>
       <template #footer>
@@ -283,7 +283,7 @@
       <el-form label-width="90px" size="small" style="margin-bottom: 12px">
         <el-row :gutter="8">
           <el-col :span="8">
-            <el-form-item label="投递模式">
+            <el-form-item label="部署模式">
               <el-select v-model="genForm.deploy_mode" style="width:100%">
                 <el-option label="独立DHCP (专用开局网络)" value="standalone" />
                 <el-option label="ProxyDHCP (与现有DHCP并存)" value="proxy" />
@@ -291,7 +291,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8"><el-form-item label="服务器IP"><el-input v-model="genForm.server_ip" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="ZTP服务IP"><el-input v-model="genForm.server_ip" /></el-form-item></el-col>
           <el-col :span="8" style="text-align:right">
             <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
           <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
@@ -482,7 +482,7 @@ const inlineDev = reactive({ hostname: "", mac: "", serial: "", mgmt_ip: "" })
 const genForm = reactive({ deploy_mode: "standalone", server_ip: "10.0.0.250", devices: [] })
 // ★ 外部审查 U5-F1（高）：生成弹窗里的参数随时可改，而"下载/部署"用的是**当前**参数。
 //   没有这个指纹时，改完参数不重新生成就会出现"屏幕上看到的 ≠ 实际写进宿主机的"，
-//   特别是把投递模式 proxy→standalone 再部署，会在装机网段开出完整 DHCP 池。
+//   特别是把部署模式 proxy→standalone 再部署，会在装机网段开出完整 DHCP 池。
 const genKey = ref("")        // 上一次成功生成所用的参数指纹
 let genSeq = 0                // 生成请求序号（丢旧响应，避免后发先至）
 
@@ -567,7 +567,7 @@ function openTemplateDialog(row) {
 }
 
 async function saveTemplate() {
-  if (!form.name) { ElMessage.warning("请输入模板名"); return }
+  if (!form.name) { ElMessage.warning("请输入模板名称"); return }
   // R4：DHCP 网卡是必填的 —— 留空/占位 eth0 时生成的配置会被部署接口直接拒绝
   // （占位值、不存在的网卡、承载默认路由的骨干网卡都不允许）。与其让运维撞 422，
   // 不如在保存模板时就说清楚。
@@ -583,7 +583,7 @@ async function saveTemplate() {
   // 是公开仓库里的常量，等于给设备发一个全网都知道的口令），没有口令的模板一生成就 422。
   // 挡在这里比让运维撞 422 友好。编辑时留空仍表示"不修改"（后端 null 时不改原值）。
   if (!editingId.value && !form.admin_password) {
-    ElMessage.warning("请填写设备管理员口令（新建必填；编辑时留空表示不修改）")
+    ElMessage.warning("请填写设备管理员密码（新建必填；编辑时留空表示不修改）")
     return
   }
   saving.value = true
@@ -778,7 +778,7 @@ async function doGenerate() {
 
 async function doDownload() {
   // ★ 外部审查 U5-F1：参数改过就必须先重新生成 —— 否则预览是旧的、而 ZIP 按新参数生成
-  //   （把投递模式从 proxy 改成 standalone 再下载/部署，等于"审核的不是部署的"）。
+  //   （把部署模式从 proxy 改成 standalone 再下载/部署，等于"审核的不是部署的"）。
   if (genStale.value) { ElMessage.warning("参数已修改，请先点「重新生成」再下载"); return }
   const tid = sessionStorage.getItem("ztp_template_id")
   // 只有真拿到 ZIP 才提示"下载已开始"（外部审查 U5-F3：以前失败也提示成功）

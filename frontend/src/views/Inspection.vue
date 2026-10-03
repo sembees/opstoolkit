@@ -173,7 +173,7 @@
     <el-dialog v-model="tplEditVisible" :title="tplEditingId ? '编辑模板' : '新建模板'" width="820px" :close-on-click-modal="false">
       <el-form label-width="70px">
         <el-row :gutter="12">
-          <el-col :span="12"><el-form-item label="名称"><el-input v-model="tplForm.name" /></el-form-item></el-col>
+          <el-col :span="12"><el-form-item label="模板名称"><el-input v-model="tplForm.name" /></el-form-item></el-col>
           <el-col :span="6">
             <el-form-item label="厂商">
               <el-select v-model="tplForm.vendor" style="width: 100%">
@@ -203,8 +203,8 @@
     <!-- 巡检结果对比对话框 -->
     <el-dialog v-model="compareDialogVisible" title="巡检结果对比" width="700px">
       <el-form label-width="80px" size="small">
-        <el-form-item label="资产 ID">
-          <el-select v-model="compareAssetId" filterable placeholder="选择资产">
+        <el-form-item label="设备">
+          <el-select v-model="compareAssetId" filterable placeholder="选择 CT 设备">
             <el-option v-for="a in ctAssets" :key="a.id" :label="a.name" :value="a.id" />
           </el-select>
           <el-button type="primary" size="small" style="margin-left: 12px" @click="doCompare" :loading="compareLoading">查询对比</el-button>

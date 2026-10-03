@@ -14,7 +14,7 @@
 
     <el-card style="margin-top: 16px" shadow="never">
       <template #header><span style="font-weight: 600">近期巡检任务</span></template>
-      <el-table :data="recentTasks" stripe size="small" empty-text="暂无巡检记录">
+      <el-table :data="recentTasks" stripe size="small" empty-text="暂无巡检任务">
         <el-table-column prop="name" label="任务名称" min-width="160" />
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
@@ -42,7 +42,7 @@
         <el-table-column prop="mac" label="MAC" width="150" />
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
-            <el-tag :type="pxeStatusTag(row.status)" size="small">{{ row.status }}</el-tag>
+            <el-tag :type="pxeStatusTag(row.status)" size="small">{{ pxeStatusText(row.status) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="160">
@@ -81,6 +81,7 @@
 <script setup>
 import { ref, onMounted } from "vue"
 import http from "../api"
+import { ElMessage } from "element-plus"
 
 const recentTasks = ref([])
 const recentInstalls = ref([])
@@ -111,6 +112,7 @@ const statCards = ref([
 const statusTag = (s) => ({ done: "success", running: "warning", failed: "danger", pending: "info" }[s] || "info")
 const statusText = (s) => ({ done: "已完成", running: "执行中", failed: "失败", pending: "等待中" }[s] || s)
 const pxeStatusTag = (s) => ({ done: "success", installing: "warning", failed: "danger", pending: "info", booting: "warning" }[s] || "info")
+const pxeStatusText = (s) => ({ pending: "待装机", booting: "引导中", installing: "安装中", done: "完成", failed: "失败" }[s] || s)
 const fmtTime = (t) => t ? new Date(t).toLocaleString("zh-CN") : "-"
 
 onMounted(async () => {

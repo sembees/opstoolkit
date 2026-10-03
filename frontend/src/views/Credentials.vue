@@ -14,7 +14,7 @@
           <el-tag :type="row.has_password ? 'success' : 'info'" size="small">{{ row.has_password ? '已设' : '无' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="密钥" width="70">
+      <el-table-column label="私钥" width="70">
         <template #default="{ row }">
           <el-tag :type="row.has_ssh_key ? 'success' : 'info'" size="small">{{ row.has_ssh_key ? '已设' : '无' }}</el-tag>
         </template>
@@ -34,7 +34,7 @@
         <el-form-item label="名称" prop="name"><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="用户名" prop="username"><el-input v-model="form.username" /></el-form-item>
         <el-form-item label="密码"><el-input v-model="form.password" type="password" show-password placeholder="留空则不修改" /></el-form-item>
-        <el-form-item label="Enable 密钥"><el-input v-model="form.enable_secret" type="password" show-password placeholder="思科 enable / H3C super" /></el-form-item>
+        <el-form-item label="Enable 密码"><el-input v-model="form.enable_secret" type="password" show-password placeholder="思科 enable / H3C super" /></el-form-item>
         <el-form-item label="SSH 私钥"><el-input v-model="form.ssh_key" type="textarea" :rows="4" placeholder="PEM 格式私钥（可选）" /></el-form-item>
         <el-form-item label="默认端口"><el-input-number v-model="form.port" :min="1" :max="65535" /></el-form-item>
         <el-form-item label="备注"><el-input v-model="form.remark" /></el-form-item>
