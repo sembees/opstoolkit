@@ -7,7 +7,7 @@
       </div>
       <el-menu
         class="ot-sider-menu"
-        :default-active="route.path"
+        :default-active="activeMenu"
         :collapse="collapsed"
         :collapse-transition="false"
         router
@@ -90,6 +90,20 @@ const currentGroup = computed(() => route.meta.group || '其他')
 const currentTitle = computed(
   () => route.meta.title || (typeof route.name === 'string' && route.name) || '未命名'
 )
+
+// 侧栏高亮：**必须按"所属菜单项"匹配，不能拿 route.path 精确比**。
+// 为什么：页内 tab 提升为真路由后会出现子路由（/inspection/templates、/help/pxe），
+// 而菜单项的 index 是父路径（/inspection、/help）——精确比较会匹配不上，
+// 结果是"深链进去以后侧栏一个项都不高亮"，看着像坏了。
+const activeMenu = computed(() => {
+  const p = route.path
+  for (const g of menuGroups) {
+    for (const it of g.items) {
+      if (p === it.path || p.startsWith(it.path + '/')) return it.path
+    }
+  }
+  return p
+})
 
 function handleCommand(cmd) {
   if (cmd === 'logout') {
