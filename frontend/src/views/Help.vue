@@ -829,11 +829,22 @@ nmcli device status</pre>
 </template>
 
 <script setup>
-import { ref, reactive } from "vue"
+import { ref, reactive, computed } from "vue"
+import { useRoute, useRouter } from "vue-router"
+import { HELP_TOPICS } from "../router"
 import PageHeader from "../components/PageHeader.vue"
 import CardSection from "../components/CardSection.vue"
 
-const activeTab = ref("beginner")
+// 主题 tab 路由化（IA 收尾）：激活主题不再存本地 ref，由 /help/:topic 路由参数派生 ——
+// 刷新 / 浏览器前进后退 / 深链都停在同一个主题。
+// 点击 tab 走 set → router.push 改 URL，激活态随路由回到 get（模板里 v-model 原样保留）；
+// :topic 非法时兜底显示第一个主题，URL 纠偏由 router/index.js 全局守卫重定向完成。
+const route = useRoute()
+const router = useRouter()
+const activeTab = computed({
+  get: () => (HELP_TOPICS[route.params.topic] ? route.params.topic : "beginner"),
+  set: (name) => { if (HELP_TOPICS[name]) router.push("/help/" + name) },
+})
 const conceptActive = ref("c1")
 
 const deployActive = ref("d1")

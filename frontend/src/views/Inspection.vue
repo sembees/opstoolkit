@@ -32,7 +32,7 @@
               <el-option v-for="t in tpls" :key="t.id" :value="t.id" :label="t.name + (t.is_system ? ' (系统)' : ' (自定义)') + ' - ' + t.items.length + '项'" />
             </el-option-group>
           </el-select>
-          <el-button type="info" plain size="small" @click="loadTemplates(); templateDrawer = true">
+          <el-button type="info" plain size="small" @click="openTemplates">
             <el-icon><Setting /></el-icon> 模板管理
           </el-button>
           <el-tag v-if="currentTemplate" size="small" :type="currentTemplate.is_system ? 'info' : 'warning'">
@@ -126,8 +126,9 @@
       </div>
     </el-dialog>
 
-    <!-- 模板管理抽屉 -->
-    <el-drawer v-model="templateDrawer" title="巡检模板管理" size="640px">
+    <!-- 模板管理抽屉：开合由路由驱动（/inspection/templates），所以用单向 :model-value，
+         关闭动作（X/ESC/遮罩）经 @close 折返回 /inspection/run，前进后退/刷新均一致 -->
+    <el-drawer :model-value="templateDrawer" title="巡检模板管理" size="640px" @close="closeTemplates">
       <div class="row-between stack-3">
         <el-select v-model="tplFilterVendor" placeholder="全部厂商" clearable size="small" class="tpl-vendor-select" @change="loadTemplates">
           <el-option label="H3C" value="h3c" /><el-option label="华为" value="huawei" /><el-option label="思科" value="cisco" />
@@ -252,10 +253,15 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import http from '../api'
 import { ElMessage } from 'element-plus'
 import PageHeader from '../components/PageHeader.vue'
 import CardSection from '../components/CardSection.vue'
+
+// tab 路由化（IA 收尾）：激活状态由路由派生，点「tab」只改 URL（见下方 openTemplates/closeTemplates）
+const route = useRoute()
+const router = useRouter()
 
 const ctAssets = ref([])
 const selectedAssets = ref([])
@@ -275,7 +281,22 @@ const rawDialogVisible = ref(false)
 const rawDetail = ref(null)
 
 // 模板管理状态
-const templateDrawer = ref(false)
+// 「执行 / 模板」tab 路由化（IA 收尾）：/inspection/templates = 模板（模板管理抽屉），其余 = 执行。
+// 状态不再存本地 ref，直接由路由派生 —— 刷新 / 浏览器前进后退 / 深链都停在同一个 tab。
+const activeTab = computed(() => (route.path === '/inspection/templates' ? 'templates' : 'run'))
+const templateDrawer = computed(() => activeTab.value === 'templates')
+
+function openTemplates() {
+  loadTemplates()
+  if (route.path !== '/inspection/templates') router.push('/inspection/templates')
+}
+
+function closeTemplates() {
+  // 只接「用户主动关闭」（X / ESC / 点遮罩，EP 的 close 两种关闭来源都会触发）；
+  // 路由切换引起的关闭此时 activeTab 已不是 templates，这里不再反向导航
+  if (activeTab.value === 'templates') router.push('/inspection/run')
+}
+
 const templates = ref([])
 const tplFilterVendor = ref('')
 const tplViewVisible = ref(false)
