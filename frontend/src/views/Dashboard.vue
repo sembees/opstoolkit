@@ -1,5 +1,6 @@
 <template>
-  <div>
+  <div class="page">
+    <PageHeader title="仪表盘" desc="资产与装机概览" />
     <el-row :gutter="16">
       <el-col :span="6" v-for="card in statCards" :key="card.label">
         <el-card shadow="hover">
@@ -12,8 +13,7 @@
       </el-col>
     </el-row>
 
-    <el-card style="margin-top: 16px" shadow="never">
-      <template #header><span style="font-weight: 600">近期巡检任务</span></template>
+    <CardSection title="近期巡检任务">
       <el-table :data="recentTasks" stripe size="small" empty-text="暂无巡检任务">
         <el-table-column prop="name" label="任务名称" min-width="160" />
         <el-table-column label="状态" width="90">
@@ -33,10 +33,9 @@
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
-    <el-card style="margin-top: 16px" shadow="never">
-      <template #header><span style="font-weight: 600">最近 PXE 装机记录</span></template>
+    <CardSection title="最近 PXE 装机记录">
       <el-table :data="recentInstalls" stripe size="small" empty-text="暂无 PXE 装机记录">
         <el-table-column prop="hostname" label="主机名" min-width="120" />
         <el-table-column prop="mac" label="MAC" width="150" />
@@ -49,27 +48,26 @@
           <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </CardSection>
 
-    <el-card style="margin-top: 16px" shadow="never">
-      <template #header><span style="font-weight: 600">快捷入口</span></template>
+    <CardSection title="快捷入口">
       <el-space wrap>
         <el-button type="primary" plain @click="$router.push('/inspection')"><el-icon><Monitor /></el-icon> CT 巡检</el-button>
         <el-button type="success" plain @click="$router.push('/netconfig')"><el-icon><Connection /></el-icon> 网络配置生成</el-button>
         <el-button plain @click="$router.push('/assets')"><el-icon><Coin /></el-icon> 资产管理</el-button>
       </el-space>
-    </el-card>
+    </CardSection>
 
     <!-- 任务回放对话框 -->
     <el-dialog v-model="replayVisible" :title="'任务回放: ' + replayName" width="720px">
       <el-alert v-if="!replayLog.length" title="无回放日志" type="info" :closable="false" />
       <div class="terminal-output" style="max-height: 500px" v-else>
-        <div v-for="(ev, i) in replayLog" :key="i" style="margin-bottom: 2px; font-size: 12px">
-          <span v-if="ev.type === 'start'" style="color: var(--ot-primary)">── ── {{ ev.asset_name }} ──</span>
-          <span v-else-if="ev.type === 'cmd'" style="color: var(--ot-warning)">> {{ ev.cmd }}</span>
-          <span v-else-if="ev.type === 'output'" style="color: var(--ot-text-3)">{{ ev.output }}</span>
-          <span v-else-if="ev.type === 'error'" style="color: var(--ot-danger)">[ERROR] {{ ev.error }}</span>
-          <span v-else-if="ev.type === 'done'" style="color: var(--ot-success)">[OK] {{ ev.asset_name }}</span>
+        <div v-for="(ev, i) in replayLog" :key="i" class="replay-line">
+          <span v-if="ev.type === 'start'" class="replay-start">── ── {{ ev.asset_name }} ──</span>
+          <span v-else-if="ev.type === 'cmd'" class="replay-cmd">> {{ ev.cmd }}</span>
+          <span v-else-if="ev.type === 'output'" class="replay-out">{{ ev.output }}</span>
+          <span v-else-if="ev.type === 'error'" class="replay-err">[ERROR] {{ ev.error }}</span>
+          <span v-else-if="ev.type === 'done'" class="replay-ok">[OK] {{ ev.asset_name }}</span>
           <span v-else>{{ ev.type }}</span>
         </div>
       </div>
@@ -82,6 +80,8 @@
 import { ref, onMounted } from "vue"
 import http from "../api"
 import { ElMessage } from "element-plus"
+import PageHeader from "../components/PageHeader.vue"
+import CardSection from "../components/CardSection.vue"
 
 const recentTasks = ref([])
 const recentInstalls = ref([])
@@ -148,4 +148,14 @@ onMounted(async () => {
   font-size: 13px;
   color: var(--ot-text-3);
 }
+/* 任务回放对话框日志（原内联样式收编；颜色仍走 token） */
+.replay-line {
+  margin-bottom: 2px;
+  font-size: var(--ot-font-xs);
+}
+.replay-start { color: var(--ot-primary); }
+.replay-cmd { color: var(--ot-warning); }
+.replay-out { color: var(--ot-text-3); }
+.replay-err { color: var(--ot-danger); }
+.replay-ok { color: var(--ot-success); }
 </style>

@@ -59,3 +59,14 @@ html, body, #app {
   justify-content: space-between;
 }
 .text-muted { color: var(--ot-text-3); }
+
+/* ── 页面根容器：纵向排列，区块间距统一由 gap 给出 ─────────────────── */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ot-space-4);
+}
+/* ★ PageHeader 自带 margin-bottom 是为了**单独使用**时也有下间距；但放进 .page 容器后
+   flex 的 gap 与它的 margin 会叠加（页头下变成 32px，实测发现）。这里在 .page 内清零，
+   让"页头与内容之间"就等于容器 gap（16px）。 */
+.page > .page-header { margin-bottom: 0; }
