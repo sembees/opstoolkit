@@ -1,135 +1,143 @@
 <template>
-  <div>
+  <div class="page">
+    <PageHeader title="CT 巡检" desc="选择模板与设备执行巡检，实时输出、结果明细与历次对比" />
+
     <!-- 巡检控制区 -->
-    <el-card shadow="never" style="margin-bottom: 16px">
-      <el-form label-width="90px">
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="选择设备">
-              <el-select v-model="selectedAssets" multiple filterable placeholder="选择 CT 设备" style="width: 100%">
-                <el-option v-for="a in ctAssets" :key="a.id" :label="a.name + ' (' + a.host + ')'" :value="a.id" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="7">
-            <el-form-item label="巡检模式">
-              <el-radio-group v-model="mode">
-                <el-radio-button label="default">默认巡检</el-radio-button>
-                <el-radio-button label="custom">自定义命令</el-radio-button>
-              </el-radio-group>
-            </el-form-item>
-          </el-col>
-          <el-col :span="5">
-            <el-form-item label=" ">
-              <el-button type="primary" :loading="running" :disabled="!selectedAssets.length" @click="startInspection">
-                <el-icon><VideoPlay /></el-icon> 开始巡检
-              </el-button>
-              <el-button @click="clearOutput" :disabled="running"><el-icon><Delete /></el-icon> 清屏</el-button>
-            </el-form-item>
-          </el-col>
-        </el-row>
+    <CardSection title="巡检执行">
+      <el-form label-width="90px" class="inspect-form">
+        <div class="toolbar-row">
+          <el-form-item label="选择设备">
+            <el-select v-model="selectedAssets" multiple filterable placeholder="选择 CT 设备" class="ctrl-main">
+              <el-option v-for="a in ctAssets" :key="a.id" :label="a.name + ' (' + a.host + ')'" :value="a.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="巡检模式">
+            <el-radio-group v-model="mode">
+              <el-radio-button label="default">默认巡检</el-radio-button>
+              <el-radio-button label="custom">自定义命令</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label=" ">
+            <el-button type="primary" :loading="running" :disabled="!selectedAssets.length" @click="startInspection">
+              <el-icon><VideoPlay /></el-icon> 开始巡检
+            </el-button>
+            <el-button @click="clearOutput" :disabled="running"><el-icon><Delete /></el-icon> 清屏</el-button>
+          </el-form-item>
+        </div>
 
         <!-- 默认巡检：选模板 -->
         <el-form-item label="巡检模板" v-if="mode === 'default'">
-          <el-select v-model="selectedTemplateId" clearable placeholder="自动匹配厂商默认模板" style="width: 420px" @change="onTemplateChange">
+          <el-select v-model="selectedTemplateId" clearable placeholder="自动匹配厂商默认模板" class="ctrl-main" @change="onTemplateChange">
             <el-option-group v-for="(tpls, vendor) in groupedTemplates" :key="vendor" :label="vendorLabel(vendor)">
               <el-option v-for="t in tpls" :key="t.id" :value="t.id" :label="t.name + (t.is_system ? ' (系统)' : ' (自定义)') + ' - ' + t.items.length + '项'" />
             </el-option-group>
           </el-select>
-          <el-button type="info" plain size="small" style="margin-left: 12px" @click="loadTemplates(); templateDrawer = true">
+          <el-button type="info" plain size="small" @click="loadTemplates(); templateDrawer = true">
             <el-icon><Setting /></el-icon> 模板管理
           </el-button>
-          <el-tag v-if="currentTemplate" size="small" style="margin-left: 8px" :type="currentTemplate.is_system ? 'info' : 'warning'">
+          <el-tag v-if="currentTemplate" size="small" :type="currentTemplate.is_system ? 'info' : 'warning'">
             {{ currentTemplate.vendor }} | {{ currentTemplate.items.length }} 项指标
           </el-tag>
         </el-form-item>
 
         <el-form-item label="自定义命令" v-if="mode === 'custom'">
-          <el-input v-model="customCommands" type="textarea" :rows="4" placeholder="每行一条命令" />
+          <el-input v-model="customCommands" type="textarea" :rows="4" placeholder="每行一条命令" class="ctrl-full" />
         </el-form-item>
       </el-form>
-    </el-card>
+    </CardSection>
 
-    <!-- 实时输出 -->
-    <el-card shadow="never" v-show="outputLines.length" style="margin-bottom: 16px">
-      <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center">
-          <span style="font-weight: 600"><el-icon><Monitor /></el-icon> 实时输出</span>
-          <el-tag v-if="running" type="warning" size="small">执行中</el-tag>
-          <el-tag v-else-if="completed" type="success" size="small">已完成</el-tag>
-        </div>
+    <!-- 巡检结果：常驻区块。空闲时用空态引导占位（避免原来工具条下整片空白），
+         运行/完成时承载实时输出终端、进度与结果明细 -->
+    <CardSection title="巡检结果">
+      <template #extra>
+        <el-tag v-if="running" type="warning" size="small">执行中</el-tag>
+        <el-tag v-else-if="completed" type="success" size="small">已完成</el-tag>
       </template>
-      <div class="terminal-output" ref="terminalRef">
-        <div v-for="(line, i) in outputLines" :key="i" :class="'terminal-line-' + line.type">{{ line.text }}</div>
-      </div>
-    </el-card>
 
-    <!-- 巡检进度 -->
-    <el-card shadow="never" v-if="running && progressTotal > 0" style="margin-bottom: 16px">
-      <div style="margin-bottom: 6px; font-size: 13px; color: var(--ot-text-2)">
-        巡检进度: {{ progressDone }} / {{ progressTotal }} 台已完成
-        <span v-if="progressFailed" style="color: var(--ot-danger); margin-left: 8px">{{ progressFailed }} 台失败</span>
-      </div>
-      <el-progress
-        :percentage="Math.round((progressDone + progressFailed) * 100 / progressTotal)"
-        :status="progressFailed ? 'exception' : undefined"
-        :stroke-width="18"
-        :text-inside="true"
+      <!-- 空闲态：无输出、无结果、未在跑 → 空态引导 -->
+      <el-empty
+        v-if="!outputLines.length && !results.length && !running"
+        description="尚未运行巡检：选择模板与设备后点「开始巡检」"
       />
-    </el-card>
 
-    <!-- 巡检结果 -->
-    <el-card shadow="never" v-if="results.length">
-      <template #header><span style="font-weight: 600"><el-icon><DataAnalysis /></el-icon> 巡检结果</span></template>
-      <el-collapse v-model="activeResults">
-        <el-collapse-item v-for="r in results" :key="r.asset_id" :name="r.asset_id">
-          <template #title>
-            <span>{{ r.asset_name }}</span>
-            <el-tag :type="r.status === 'success' ? 'success' : 'danger'" size="small" style="margin-left: 12px">{{ r.status === 'success' ? '成功' : '失败' }}</el-tag>
-          </template>
-          <el-row :gutter="12" v-if="r.status === 'success'">
-            <el-col :span="4" v-for="(m, key) in r.metrics" :key="key" style="margin-bottom: 8px">
-              <el-card shadow="hover" body-style="padding: 12px; text-align: center">
-                <div style="font-size: 11px; color: var(--ot-text-3)">{{ m.label }}</div>
-                <div style="font-size: 13px; font-weight: 600; margin-top: 4px" :style="{ color: statusColor(m.status) }">{{ m.summary }}</div>
-              </el-card>
-            </el-col>
-          </el-row>
-          <el-alert v-if="r.status === 'failed'" type="error" :title="r.error" :closable="false" />
-          <el-table v-if="r.raw && r.raw.length" :data="r.raw" size="small" style="margin-top: 12px">
-            <el-table-column prop="label" label="指标" width="120" />
-            <el-table-column prop="cmd" label="命令" width="200" />
-            <el-table-column prop="summary" label="解析摘要" min-width="200" />
-            <el-table-column label="详情" width="70">
-              <template #default="{ row }">
-                <el-button link type="primary" size="small" @click="showRaw(row)">查看</el-button>
+      <div v-else class="result-stack">
+        <!-- 实时输出 -->
+        <div v-show="outputLines.length">
+          <div class="section-title stack-2"><el-icon><Monitor /></el-icon> 实时输出</div>
+          <div class="terminal-output" ref="terminalRef">
+            <div v-for="(line, i) in outputLines" :key="i" :class="'terminal-line-' + line.type">{{ line.text }}</div>
+          </div>
+        </div>
+
+        <!-- 巡检进度 -->
+        <div v-if="running && progressTotal > 0" class="progress-block">
+          <div class="progress-line">
+            巡检进度: {{ progressDone }} / {{ progressTotal }} 台已完成
+            <span v-if="progressFailed" class="progress-failed">{{ progressFailed }} 台失败</span>
+          </div>
+          <el-progress
+            :percentage="Math.round((progressDone + progressFailed) * 100 / progressTotal)"
+            :status="progressFailed ? 'exception' : undefined"
+            :stroke-width="18"
+            :text-inside="true"
+          />
+        </div>
+
+        <!-- 结果明细 -->
+        <template v-if="results.length">
+          <el-collapse v-model="activeResults">
+            <el-collapse-item v-for="r in results" :key="r.asset_id" :name="r.asset_id">
+              <template #title>
+                <span>{{ r.asset_name }}</span>
+                <el-tag :type="r.status === 'success' ? 'success' : 'danger'" size="small" class="ml-3">{{ r.status === 'success' ? '成功' : '失败' }}</el-tag>
               </template>
-            </el-table-column>
-          </el-table>
-        </el-collapse-item>
-      </el-collapse>
-      <div style="margin-top: 12px">
-        <el-button size="small" @click="openCompare">巡检结果对比</el-button>
+              <el-row :gutter="12" v-if="r.status === 'success'">
+                <el-col :span="4" v-for="(m, key) in r.metrics" :key="key" class="metric-col">
+                  <el-card shadow="hover" class="metric-mini">
+                    <div class="metric-key">{{ m.label }}</div>
+                    <div class="metric-val" :style="{ color: statusColor(m.status) }">{{ m.summary }}</div>
+                  </el-card>
+                </el-col>
+              </el-row>
+              <el-alert v-if="r.status === 'failed'" type="error" :title="r.error" :closable="false" />
+              <el-table v-if="r.raw && r.raw.length" :data="r.raw" size="small" class="mt-3">
+                <el-table-column prop="label" label="指标" width="120" />
+                <el-table-column prop="cmd" label="命令" width="200" />
+                <el-table-column prop="summary" label="解析摘要" min-width="200" />
+                <el-table-column label="详情" width="70">
+                  <template #default="{ row }">
+                    <el-button link type="primary" size="small" @click="showRaw(row)">查看</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </el-collapse-item>
+          </el-collapse>
+          <div class="mt-3">
+            <el-button size="small" @click="openCompare">巡检结果对比</el-button>
+          </div>
+        </template>
       </div>
-    </el-card>
+    </CardSection>
 
     <!-- 原文详情弹窗 -->
     <el-dialog v-model="rawDialogVisible" :title="rawDetail ? rawDetail.label : ''" width="720px">
-      <div class="terminal-output" style="max-height: 400px">
+      <div class="terminal-output raw-terminal">
         <div class="terminal-line-info">{{ rawDetail ? rawDetail.output : '' }}</div>
       </div>
     </el-dialog>
 
     <!-- 模板管理抽屉 -->
     <el-drawer v-model="templateDrawer" title="巡检模板管理" size="640px">
-      <div style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center">
-        <el-select v-model="tplFilterVendor" placeholder="全部厂商" clearable size="small" style="width: 140px" @change="loadTemplates">
+      <div class="row-between stack-3">
+        <el-select v-model="tplFilterVendor" placeholder="全部厂商" clearable size="small" class="tpl-vendor-select" @change="loadTemplates">
           <el-option label="H3C" value="h3c" /><el-option label="华为" value="huawei" /><el-option label="思科" value="cisco" />
         </el-select>
-        <el-button type="primary" size="small" @click="openTplEdit(null)"><el-icon><Plus /></el-icon> 新建模板</el-button>
-        <el-upload accept=".json" :show-file-list="false" :before-upload="importTemplate" style="display:inline-block;margin-left:6px">
-          <el-button size="small"><el-icon><Upload /></el-icon> 导入</el-button>
-        </el-upload>
+        <div class="inline-actions">
+          <el-button type="primary" size="small" @click="openTplEdit(null)"><el-icon><Plus /></el-icon> 新建模板</el-button>
+          <el-upload accept=".json" :show-file-list="false" :before-upload="importTemplate">
+            <el-button size="small"><el-icon><Upload /></el-icon> 导入</el-button>
+          </el-upload>
+        </div>
       </div>
       <el-table :data="templates" size="small" stripe>
         <el-table-column prop="name" label="模板名称" min-width="120" />
@@ -176,14 +184,14 @@
           <el-col :span="12"><el-form-item label="模板名称"><el-input v-model="tplForm.name" /></el-form-item></el-col>
           <el-col :span="6">
             <el-form-item label="厂商">
-              <el-select v-model="tplForm.vendor" style="width: 100%">
+              <el-select v-model="tplForm.vendor" class="ctrl-full">
                 <el-option label="H3C" value="h3c" /><el-option label="华为" value="huawei" /><el-option label="思科" value="cisco" /><el-option label="通用" value="generic" />
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="6"><el-form-item label="备注"><el-input v-model="tplForm.description" /></el-form-item></el-col>
         </el-row>
-        <div style="margin-bottom: 8px; font-size: 13px; color: var(--ot-text-2); font-weight: 600">巡检指标项（可增删改命令）</div>
+        <div class="tpl-items-title">巡检指标项（可增删改命令）</div>
         <el-table :data="tplForm.items" size="small" stripe border>
           <el-table-column type="index" width="38" />
           <el-table-column label="指标标识" width="120"><template #default="{ row }"><el-input v-model="row.key" size="small" /></template></el-table-column>
@@ -192,7 +200,7 @@
           <el-table-column label="TextFSM" width="150"><template #default="{ row }"><el-input v-model="row.textfsm" size="small" placeholder="可选" /></template></el-table-column>
           <el-table-column label="操作" width="50"><template #default="{ $index }"><el-button link type="danger" size="small" @click="tplForm.items.splice($index,1)"><el-icon><Delete /></el-icon></el-button></template></el-table-column>
         </el-table>
-        <el-button plain size="small" style="margin-top: 8px" @click="tplForm.items.push({ key: '', label: '', command: '', textfsm: '', unit: '' })"><el-icon><Plus /></el-icon> 添加指标</el-button>
+        <el-button plain size="small" class="mt-2" @click="tplForm.items.push({ key: '', label: '', command: '', textfsm: '', unit: '' })"><el-icon><Plus /></el-icon> 添加指标</el-button>
       </el-form>
       <template #footer>
         <el-button @click="tplEditVisible = false">取消</el-button>
@@ -207,11 +215,11 @@
           <el-select v-model="compareAssetId" filterable placeholder="选择 CT 设备">
             <el-option v-for="a in ctAssets" :key="a.id" :label="a.name" :value="a.id" />
           </el-select>
-          <el-button type="primary" size="small" style="margin-left: 12px" @click="doCompare" :loading="compareLoading">查询对比</el-button>
+          <el-button type="primary" size="small" class="ml-3" @click="doCompare" :loading="compareLoading">查询对比</el-button>
         </el-form-item>
       </el-form>
       <div v-if="compareData.delta && Object.keys(compareData.delta).length">
-        <el-alert v-if="compareData.note" :title="compareData.note" type="info" :closable="false" style="margin-bottom: 12px" />
+        <el-alert v-if="compareData.note" :title="compareData.note" type="info" :closable="false" class="stack-3" />
         <el-table :data="compareRows" size="small" border>
           <el-table-column prop="key" label="指标" width="100" />
           <el-table-column prop="prev" label="上次" width="140" />
@@ -230,13 +238,13 @@
           </el-table-column>
           <el-table-column label="时间" min-width="160">
             <template #default="{ row }">
-              <div style="font-size: 12px; color: var(--ot-text-3)">{{ row.prev_time }}</div>
-              <div style="font-size: 12px; color: var(--ot-text-1)">{{ row.latest_time }}</div>
+              <div class="cmp-time-old">{{ row.prev_time }}</div>
+              <div class="cmp-time-new">{{ row.latest_time }}</div>
             </template>
           </el-table-column>
         </el-table>
       </div>
-      <div v-else-if="compareCalled" style="color: var(--ot-text-3); text-align: center; padding: 40px">暂无对比数据</div>
+      <div v-else-if="compareCalled" class="cmp-empty">暂无对比数据</div>
     </el-dialog>
 
   </div>
@@ -246,6 +254,8 @@
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import http from '../api'
 import { ElMessage } from 'element-plus'
+import PageHeader from '../components/PageHeader.vue'
+import CardSection from '../components/CardSection.vue'
 
 const ctAssets = ref([])
 const selectedAssets = ref([])
@@ -491,3 +501,37 @@ onMounted(async () => {
   } catch (e) { /* handled */ }
 })
 </script>
+
+<style scoped>
+/* ── 巡检执行工具条：同一行控件间距统一 --ot-space-3(12px)，选择框统一 320px 同宽对齐 ── */
+.inspect-form :deep(.el-form-item) { margin-bottom: var(--ot-space-4); }
+.inspect-form :deep(.el-form-item__content) { gap: var(--ot-space-3); }
+/* EP 给相邻按钮自带 12px margin，改由上面的 gap 统一给出，避免 12+12 叠加 */
+.inspect-form :deep(.el-button + .el-button) { margin-left: 0; }
+.toolbar-row { display: flex; flex-wrap: wrap; column-gap: var(--ot-space-3); }
+.ctrl-main { width: 320px; }   /* 「选择设备」「巡检模板」两行同宽，左右缘对齐 */
+.ctrl-full { width: 100%; }
+
+/* ── 巡检结果（常驻区块）：终端 / 进度 / 结果明细的纵向节奏 ── */
+.result-stack { display: flex; flex-direction: column; gap: var(--ot-space-3); }
+.progress-line { margin-bottom: var(--ot-space-1); font-size: var(--ot-font-sm); color: var(--ot-text-2); }
+.progress-failed { color: var(--ot-danger); margin-left: var(--ot-space-2); }
+.metric-col { margin-bottom: var(--ot-space-2); }
+.metric-mini :deep(.el-card__body) { padding: var(--ot-space-3); text-align: center; }
+.metric-key { font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.metric-val { font-size: var(--ot-font-sm); font-weight: 600; margin-top: var(--ot-space-1); }
+
+/* ── 弹窗 / 抽屉 ── */
+.raw-terminal { max-height: 400px; }
+.tpl-vendor-select { width: 140px; }
+.inline-actions { display: flex; align-items: center; gap: var(--ot-space-2); }
+.tpl-items-title { margin-bottom: var(--ot-space-2); font-size: var(--ot-font-sm); color: var(--ot-text-2); font-weight: 600; }
+.cmp-time-old { font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.cmp-time-new { font-size: var(--ot-font-xs); color: var(--ot-text-1); }
+.cmp-empty { color: var(--ot-text-3); text-align: center; padding: 40px; }
+
+/* ── 本页小间距工具类（收编原内联 margin，取值全部来自 token） ── */
+.ml-3 { margin-left: var(--ot-space-3); }
+.mt-2 { margin-top: var(--ot-space-2); }
+.mt-3 { margin-top: var(--ot-space-3); }
+</style>

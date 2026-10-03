@@ -1,18 +1,22 @@
 <template>
-  <div style="display:flex;flex-direction:column;gap:12px;height:calc(100vh - 110px)">
+  <!-- 根容器 .page（全局工具类）：纵向 flex，区块间距统一由容器 gap=16px 给出；
+       高度自适应父容器（el-main 本身是有界 flex 项），不再写死"视口高度 − 顶栏高度"。
+       .netconfig-page（见底部 scoped）只补 height:100% 让预览区可以 flex 撑满并内部滚动。 -->
+  <div class="page netconfig-page">
+    <PageHeader title="网络配置生成" desc="编辑物理接口 / Bond / VLAN / 网桥，实时生成对应发行版的网络配置脚本" />
+
     <!-- 上半部: 网络组件编辑表 -->
-    <div style="flex:0 0 auto">
-      <el-card shadow="never" size="small">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px">
-          <div>
-            <el-select v-model="config.os" size="small" style="width:100px" @change="preview">
+    <CardSection title="网络组件">
+        <div class="row-between toolbar stack-3">
+          <div class="toolbar-fields">
+            <el-select v-model="config.os" size="small" class="ctrl-os" @change="preview">
               <el-option v-for="o in meta.os_options" :key="o.id" :label="o.name" :value="o.id" />
             </el-select>
-            <el-select v-model="config.format" size="small" style="width:100px;margin-left:6px" @change="preview">
+            <el-select v-model="config.format" size="small" class="ctrl-format" @change="preview">
               <el-option v-for="f in meta.formats" :key="f.id" :label="f.name" :value="f.id" />
             </el-select>
-            <el-input v-model="config.hostname" size="small" placeholder="主机名" style="width:120px;margin-left:6px" @input="preview" />
-            <el-select v-if="config.format==='netplan'" v-model="config.netplan_renderer" size="small" style="width:130px;margin-left:6px" @change="preview">
+            <el-input v-model="config.hostname" size="small" placeholder="主机名" class="ctrl-host" @input="preview" />
+            <el-select v-if="config.format==='netplan'" v-model="config.netplan_renderer" size="small" class="ctrl-renderer" @change="preview">
               <el-option v-for="r in meta.netplan_renderers" :key="r.id" :label="r.name" :value="r.id" />
             </el-select>
           </div>
@@ -31,19 +35,19 @@
         <!-- U5-F12：区分"还在加载"和"加载失败" —— 改前用加载中触发一次预览就会把
              "加载失败"写死，而加载成功后没人清它，红色横幅（写着"已禁止提交"）会一直挂着，
              与实际已经能生成的状态相反。 -->
-        <el-alert v-if="metaLoading" type="info" :closable="false" show-icon style="margin-bottom:8px"
+        <el-alert v-if="metaLoading" type="info" :closable="false" show-icon class="stack-2"
                   title="正在加载网络配置元数据（os / 格式 选项）…" />
-        <el-alert v-else-if="metaError" type="error" :closable="false" show-icon style="margin-bottom:8px"
+        <el-alert v-else-if="metaError" type="error" :closable="false" show-icon class="stack-2"
                   :title="metaError + '：已禁止提交，请刷新页面后重试'" />
 
         <!-- 高1：后端 422 的 detail 直接显示给运维（含 interfaces[0].gateway 这类字段路径） -->
-        <el-alert v-if="serverError" type="error" :closable="false" show-icon style="margin-bottom:8px">
+        <el-alert v-if="serverError" type="error" :closable="false" show-icon class="stack-2">
           <template #title>生成失败（后端校验未通过），旧预览已作废</template>
           <pre class="err-mono">{{ serverError }}</pre>
         </el-alert>
 
         <!-- 前置校验：非法输入当场提示，不发到后端（只是体验层，边界仍在后端） -->
-        <el-alert v-if="localErrors.length" type="error" :closable="false" show-icon style="margin-bottom:8px">
+        <el-alert v-if="localErrors.length" type="error" :closable="false" show-icon class="stack-2">
           <template #title>参数有误，共 {{ localErrors.length }} 项，未提交</template>
           <ul class="err-list">
             <li v-for="(e, i) in localErrors" :key="i">{{ e }}</li>
@@ -52,7 +56,7 @@
 
         <!-- 跨模块一致性提示：静态 IP 落在 PXE/ZTP 的 DHCP 池内（可能两台机器同 IP）。
              只提示不拦 —— 静态 IP 与 DHCP 池在不同网段/不同现场时是正常用法。 -->
-        <el-alert v-if="crossWarnings.length" type="warning" :closable="false" show-icon style="margin-bottom:8px">
+        <el-alert v-if="crossWarnings.length" type="warning" :closable="false" show-icon class="stack-2">
           <template #title>跨模块提示：静态地址与 DHCP 地址池重叠（{{ crossWarnings.length }} 项）</template>
           <ul class="err-list">
             <li v-for="(w, i) in crossWarnings" :key="i">{{ w }}</li>
@@ -65,7 +69,7 @@
           </el-table-column>
           <el-table-column label="类型" width="80">
             <template #default="{ row }">
-              <el-select v-model="row._type" size="small" @change="preview" style="width:68px">
+              <el-select v-model="row._type" size="small" @change="preview" class="ctrl-type">
                 <el-option label="物理" value="iface" />
                 <el-option label="Bond" value="bond" />
                 <el-option label="VLAN" value="vlan" />
@@ -75,7 +79,7 @@
           </el-table-column>
           <el-table-column label="接口名" width="120">
             <template #default="{ row }">
-              <span v-if="row._type==='vlan'" style="font-size:12px;color:var(--ot-primary)">{{ row.parent }}.{{ row.vlanId }}</span>
+              <span v-if="row._type==='vlan'" class="vlan-tag">{{ row.parent }}.{{ row.vlanId }}</span>
               <el-input v-else v-model="row.name" size="small" placeholder="eth0 / bond0 / br0" @input="preview" />
             </template>
           </el-table-column>
@@ -86,8 +90,8 @@
                 <el-option v-if="row._type === 'bridge'" label="自动" value="" />
                 <el-option label="static" value="static" /><el-option label="dhcp" value="dhcp" />
               </el-select>
-              <span v-else-if="row._type === 'vlan'" style="color:var(--ot-text-3);font-size:11px">static</span>
-              <span v-else style="color:var(--ot-text-3);font-size:11px">static</span>
+              <span v-else-if="row._type === 'vlan'" class="cell-static">static</span>
+              <span v-else class="cell-static">static</span>
             </template>
           </el-table-column>
           <el-table-column label="IP/掩码" width="140">
@@ -111,48 +115,50 @@
           <el-table-column label="从接口/父接口" min-width="130">
             <template #default="{ row }">
               <el-input v-if="row._type==='bond' || row._type==='bridge'" v-model="row.slavesStr" size="small" :placeholder="row._type==='bond'?'eth0,eth1':'网口名'" @input="onSlavesChange(row)" />
-              <el-select v-else-if="row._type==='vlan'" v-model="row.parent" size="small" @change="onVlanParentChange(row)" style="width:120px">
+              <el-select v-else-if="row._type==='vlan'" v-model="row.parent" size="small" @change="onVlanParentChange(row)" class="ctrl-parent">
                 <el-option v-for="iface in availableParents" :key="iface" :label="iface" :value="iface" />
               </el-select>
-              <span v-else style="color:var(--ot-text-3);font-size:11px">-</span>
+              <span v-else class="cell-static">-</span>
             </template>
           </el-table-column>
           <el-table-column label="Bond/VLAN参数" width="190">
             <template #default="{ row }">
               <template v-if="row._type==='bond'">
-                <div style="display:flex;flex-wrap:wrap;gap:2px;align-items:center;line-height:1.6">
-                  <el-select v-model="row.bondMode" size="small" style="width:70px" @change="onBondModeChange(row)">
+                <div class="inline-params">
+                  <el-select v-model="row.bondMode" size="small" class="ctrl-bond-mode" @change="onBondModeChange(row)">
                     <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.name" :value="m.id" />
                   </el-select>
-                  <span style="font-size:10px;color:var(--ot-text-3)">miimon</span>
-                  <el-input v-model="row.miimon" size="small" style="width:42px" placeholder="100" @input="preview" />
+                  <span class="param-label">miimon</span>
+                  <el-input v-model="row.miimon" size="small" class="ctrl-miimon" placeholder="100" @input="preview" />
                   <!-- mode 4 (802.3ad): lacp_rate -->
                   <template v-if="row.bondMode==4">
-                    <span style="font-size:10px;color:var(--ot-text-3)">lacp</span>
-                    <el-select v-model="row.lacpRate" size="small" style="width:55px" @change="preview">
+                    <span class="param-label">lacp</span>
+                    <el-select v-model="row.lacpRate" size="small" class="ctrl-lacp" @change="preview">
                       <el-option label="slow" value="slow" /><el-option label="fast" value="fast" />
                     </el-select>
                   </template>
                   <!-- mode 2/4: xmit_hash_policy -->
                   <template v-if="row.bondMode==2||row.bondMode==4">
-                    <span style="font-size:10px;color:var(--ot-text-3)">hash</span>
-                    <el-select v-model="row.xmitHash" size="small" style="width:70px" @change="preview">
+                    <span class="param-label">hash</span>
+                    <el-select v-model="row.xmitHash" size="small" class="ctrl-bond-mode" @change="preview">
                       <el-option label="layer2" value="layer2" />
                       <el-option label="layer2+3" value="layer2+3" />
                       <el-option label="layer3+4" value="layer3+4" />
                     </el-select>
                   </template>
                 </div>
-                <div v-if="row.bondMode==1||row.bondMode==5||row.bondMode==6" style="display:flex;gap:2px;align-items:center;margin-top:1px">
-                  <span style="font-size:10px;color:var(--ot-text-3)">primary</span>
-                  <el-input v-model="row.primary" size="small" style="width:110px" placeholder="主口" @input="preview" />
+                <div v-if="row.bondMode==1||row.bondMode==5||row.bondMode==6" class="inline-params">
+                  <span class="param-label">primary</span>
+                  <el-input v-model="row.primary" size="small" class="ctrl-primary" placeholder="主口" @input="preview" />
                 </div>
               </template>
               <template v-else-if="row._type==='vlan'">
-                <span style="font-size:11px;color:var(--ot-text-3);margin-right:2px">ID</span>
-                <el-input-number v-model="row.vlanId" size="small" :min="1" :max="4094" style="width:75px" @change="onVlanIdChange(row)" controls-position="right" />
+                <div class="inline-params">
+                  <span class="param-label">ID</span>
+                  <el-input-number v-model="row.vlanId" size="small" :min="1" :max="4094" class="ctrl-vlan-id" @change="onVlanIdChange(row)" controls-position="right" />
+                </div>
               </template>
-              <span v-else style="color:var(--ot-text-3);font-size:11px">-</span>
+              <span v-else class="cell-static">-</span>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="80" fixed="right">
@@ -162,30 +168,30 @@
             </template>
           </el-table-column>
         </el-table>
-      </el-card>
-    </div>
+    </CardSection>
 
-    <!-- 下半部: 实时预览 -->
-    <div style="flex:1;overflow-y:auto;min-height:0">
-      <el-card shadow="never" size="small" style="height:100%">
-        <template #header>
-          <span style="font-weight:600">实时预览</span>
-          <!-- 高2：预览与下载必须是同一份内容；参数改过之后旧预览立即标记失效 -->
-          <el-tag v-if="previewValid" size="small" type="success" style="margin-left:8px">下载内容 = 预览内容</el-tag>
-          <el-tag v-else-if="previewScript" size="small" type="warning" style="margin-left:8px">预览已失效（参数已修改）</el-tag>
-        </template>
-        <pre class="preview-block" v-if="previewScript">{{ previewScript }}</pre>
-        <div v-else style="color:var(--ot-text-4);text-align:center;padding:40px">
-          {{ localErrors.length || serverError ? '当前参数未通过校验，暂无预览' : '添加接口后自动预览' }}
-        </div>
-      </el-card>
-    </div>
+    <!-- 下半部: 实时预览。preview-card 用 flex:1 + min-height:0 撑满页面剩余高度，
+         代码块在卡体内部滚动 —— 卡片内不再留固定空高（原 height:calc(100% - 40px) 与
+         内层 margin 一起造成过卡底的 60px 空带）。 -->
+    <!-- 高2：预览与下载必须是同一份内容；参数改过之后旧预览立即标记失效 -->
+    <CardSection title="实时预览" class="preview-card">
+      <template #extra>
+        <el-tag v-if="previewValid" size="small" type="success">下载内容 = 预览内容</el-tag>
+        <el-tag v-else-if="previewScript" size="small" type="warning">预览已失效（参数已修改）</el-tag>
+      </template>
+      <pre v-if="previewScript" class="preview-block">{{ previewScript }}</pre>
+      <div v-else class="preview-empty">
+        {{ localErrors.length || serverError ? '当前参数未通过校验，暂无预览' : '添加接口后自动预览' }}
+      </div>
+    </CardSection>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
 import http, { flattenDetail } from "../api"
+import PageHeader from "../components/PageHeader.vue"
+import CardSection from "../components/CardSection.vue"
 
 const meta = reactive({ os_options: [], formats: [], bond_modes: [], netplan_renderers: [] })
 const config = reactive({ os: "rhel", format: "nmcli", hostname: "", netplan_renderer: "networkd" })
@@ -503,20 +509,90 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 布局：根容器 .page（全局）负责纵向 flex 与 16px 区块间距；
+   这里只补 height:100% —— 高度由父容器（el-main，已是有界 flex 项）决定，
+   不再写死"视口高度 − 顶栏高度"。预览卡 flex:1 撑满剩余高度并内部滚动。 */
+.netconfig-page {
+  height: 100%;
+}
+
+/* 工具栏：row-between（全局）给两端对齐，这里补换行与组间距（原 margin-left 链改为 gap） */
+.toolbar {
+  flex-wrap: wrap;
+  gap: var(--ot-space-1) var(--ot-space-2);
+}
+.toolbar-fields {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ot-space-2);
+}
+
+/* 表单控件定宽（原内联宽度原样收编；控件宽度不属于被审计的布局高度硬编码） */
+.ctrl-os { width: 100px; }
+.ctrl-format { width: 100px; }
+.ctrl-host { width: 120px; }
+.ctrl-renderer { width: 130px; }
+.ctrl-type { width: 68px; }
+.ctrl-parent { width: 120px; }
+.ctrl-bond-mode { width: 70px; }
+.ctrl-miimon { width: 42px; }
+.ctrl-lacp { width: 55px; }
+.ctrl-primary { width: 110px; }
+.ctrl-vlan-id { width: 75px; }
+
+/* 表格内的小字说明（字号统一走 token --ot-font-xs，颜色一律 var(--ot-*)） */
+.vlan-tag { font-size: var(--ot-font-xs); color: var(--ot-primary); }
+.cell-static { font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.param-label { font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.inline-params {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ot-space-1);
+  line-height: 1.6;
+}
+.inline-params + .inline-params { margin-top: var(--ot-space-1); }
+
+/* 预览卡：卡根 flex 撑满、卡体 flex 撑满、代码块 flex 撑满 —— 三层都是自适应，
+   没有任何固定空高；原来的 height:calc(100% - 40px) 是 60px 空带的根源。 */
+.preview-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.preview-card :deep(.el-card__body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .preview-block {
+  margin: 0;
+  flex: 1;
+  min-height: 0;
   background: var(--ot-bg-code);
   color: var(--ot-code-fg);
-  padding: 12px 16px;
+  padding: var(--ot-space-3) var(--ot-space-4);
   border-radius: 6px;
-  font-size: 12px;
+  font-size: var(--ot-font-xs);
   line-height: 1.5;
   white-space: pre;
-  overflow-x: auto;
+  overflow: auto;
   font-family: monospace;
-  height: calc(100% - 40px);
-  overflow-y: auto;
 }
-.err-list { margin: 4px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
-.err-mono { margin: 4px 0 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+.preview-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ot-text-4);
+  text-align: center;
+  padding: var(--ot-space-6);
+}
+
+.err-list { margin: var(--ot-space-1) 0 0; padding-left: 18px; font-size: var(--ot-font-xs); line-height: 1.6; }
+.err-mono { margin: var(--ot-space-1) 0 0; font-size: var(--ot-font-xs); line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
 .input-invalid :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px var(--ot-danger) inset; }
 </style>
