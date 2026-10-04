@@ -161,6 +161,44 @@ def get_pager_cmds(device_type: str) -> list:
     return ["terminal length 0"]
 
 
+# ── 老式 SSH 设备的握手失败：把"看不懂的报错"翻译成"能照着做的提示" ──────────────
+# 来由（2026-10-04 真机实测）：容器里是 paramiko 5.0.0，它**已彻底移除 `ssh-rsa` 主机密钥算法**
+# （`_key_info` 里没有 ssh-rsa，设备一旦只提供它，paramiko 直接 `KeyError: 'ssh-rsa'`），
+# 老式 kex（`diffie-hellman-group14-sha1`、`kex_group1`）也已移出默认。
+# 于是**只支持 ssh-rsa 的老设备（大量在用的老 H3C/华为/思科机型）一律连不上**，
+# 报的是 "Incompatible ssh peer (no acceptable host key / kex algorithm)" ——
+# 运维极易误判成"账号密码错"。这里把它翻译成明确的处置步骤。
+_LEGACY_SSH_SIGNS = (
+    "no acceptable host key",
+    "no acceptable kex algorithm",
+    "no acceptable cipher",
+    "no acceptable mac",
+    "ssh-rsa",
+    "no matching host key",
+    "no matching key exchange",
+)
+
+_LEGACY_SSH_HINT = (
+    "该设备只提供**老式 SSH 主机密钥/算法**（ssh-rsa / SHA-1），而巡检所用的 SSH 库较新、已移除这些算法，"
+    "因此在**握手阶段**就失败 —— 这不是账号密码问题，换密码也没用。两种处置：\n"
+    "  ①【推荐，不动服务】在设备上生成较新的主机密钥后重试：\n"
+    "      华三 Comware： public-key local create ecdsa secp256r1\n"
+    "      华为 VRP    ： ecc local-key-pair create   （或 rsa local-key-pair create）\n"
+    "      思科 IOS    ： crypto key generate rsa modulus 2048  （IOS 15.2+ 会提供 rsa-sha2-256/512）\n"
+    "  ②【需产品侧改动】由管理员把巡检服务的 SSH 库降到仍支持 ssh-rsa 的版本"
+    "（能连上老设备，但会降低整条链路的 SSH 安全基线，需评估）。"
+)
+
+
+def _friendly_ssh_error(exc: Exception) -> str:
+    """把连接类异常翻译成人能照着做的提示；**原始错误始终保留**在末尾（不掩盖真相）。"""
+    raw = "%s: %s" % (type(exc).__name__, exc)
+    low = raw.lower()
+    if any(s in low for s in _LEGACY_SSH_SIGNS):
+        return "%s\n  （原始错误：%s）" % (_LEGACY_SSH_HINT, raw[:300])
+    return raw
+
+
 def _preflight(host: str, port, timeout: float) -> None:
     """连接设备前先做一次 TCP 预检；不通就抛一句**能看懂**的错。
 
@@ -323,7 +361,9 @@ async def inspect_one(db: AsyncSession, asset: models.Asset, kind: str = "defaul
                                           metric_cmds, custom_cmds,
                                           settings.enable_pager_disable, on_line)
     except Exception as e:
-        err = f"{type(e).__name__}: {e}"
+        # ★ 不直接把原始异常抛给运维：老设备的 SSH 握手失败要翻译成"能照着做"的提示，
+        #   但**原始错误仍然附在末尾**（保留证据，不掩盖）。
+        err = _friendly_ssh_error(e)
         emit({"type": "error", "asset_id": asset.id, "asset_name": asset_name, "error": err})
         return {"asset_id": asset.id, "asset_name": asset_name, "status": "failed", "error": err, "metrics": {}, "raw": []}
 

@@ -171,5 +171,47 @@ class ServiceModuleBindingsTest(unittest.TestCase):
                         "app/ct/inspection/service.py 必须导入 sqlalchemy.select（告警检查用）")
 
 
+class LegacySshHintTest(unittest.TestCase):
+    """老式 SSH 设备的握手失败要翻译成"能照着做"的提示（真机实测踩到的坑）。
+
+    背景：paramiko 5.x 已移除 `ssh-rsa` 主机密钥与老式 kex ⇒ 只支持 ssh-rsa 的老设备
+    （大量在用机型）握手阶段就失败，报 "no acceptable host key / kex algorithm"，
+    运维极易误判成"账号密码错"。这里守三件事：能识别、给出处置步骤、**原始错误不被吞掉**。
+    """
+
+    def test_host_key_error_gets_actionable_hint(self):
+        msg = service._friendly_ssh_error(
+            Exception("Incompatible ssh peer (no acceptable host key)"))
+        self.assertIn("老式 SSH 主机密钥", msg)
+        self.assertIn("public-key local create ecdsa secp256r1", msg)   # 华三
+        self.assertIn("ecc local-key-pair create", msg)                  # 华为
+        self.assertIn("crypto key generate rsa", msg)                    # 思科
+        self.assertIn("no acceptable host key", msg)                     # ★ 原始错误必须保留
+
+    def test_kex_error_gets_hint(self):
+        msg = service._friendly_ssh_error(
+            Exception("Incompatible ssh peer (no acceptable kex algorithm)"))
+        self.assertIn("老式 SSH", msg)
+        self.assertIn("no acceptable kex algorithm", msg)
+
+    def test_paramiko5_keyerror_ssh_rsa_gets_hint(self):
+        """paramiko 5 遇到 ssh-rsa 时会抛 KeyError('ssh-rsa')，也要能识别。"""
+        msg = service._friendly_ssh_error(KeyError("ssh-rsa"))
+        self.assertIn("老式 SSH", msg)
+        self.assertIn("ssh-rsa", msg)
+
+    def test_auth_failure_is_not_mislabeled(self):
+        """★ 反向护栏：认证失败**不能**被误报成"老式算法"问题，否则运维会去改错方向。"""
+        msg = service._friendly_ssh_error(Exception(
+            "Authentication to device failed. Common causes of this problem are: "
+            "1. Invalid username and password 2. Incorrect SSH-key 3. Incorrect configuration"))
+        self.assertNotIn("老式 SSH", msg)
+        self.assertIn("Authentication to device failed", msg)
+
+    def test_unrelated_error_passes_through_unchanged(self):
+        self.assertEqual(service._friendly_ssh_error(TimeoutError("connect timed out")),
+                         "TimeoutError: connect timed out")
+
+
 if __name__ == "__main__":
     unittest.main()
