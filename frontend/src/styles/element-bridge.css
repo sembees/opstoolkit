@@ -42,3 +42,16 @@
   --el-fill-color-light: var(--ot-bg-hover);
   --el-fill-color-blank: var(--ot-bg-container);
 }
+
+/* ── 布局呼吸感（"从容感"旋钮，全站统一）────────────────────────────────
+   ★ 这里有个**真坑**（实测踩到）：这两个内边距**不能只写在 `:root` 里**。
+     Element Plus 是在**组件选择器自己身上**重新声明默认值的：
+       .el-main{--el-main-padding:20px; … padding:var(--el-main-padding) …}
+       .el-card{--el-card-padding:20px; …}
+     而"元素自身声明的自定义属性"会盖掉它从 `:root` 继承到的值 ⇒ 写 `:root{--el-main-padding:24px}`
+     **完全不起作用**（我第一版就是这么写的，几何测量显示内容区留白仍是 20px 才发现的）。
+     正确做法：用**同等特异性的规则**、在组件库样式之后覆盖（本文件在 main.js 里排在 dist/index.css 之后）。
+   另外三处呼吸感旋钮在 main.css：`.page` 的区块间距、表格行高、表单项间距。
+   想要更松/更紧：改这几处即可，都是单一数值。 */
+.el-main { --el-main-padding: var(--ot-space-5); }   /* 内容区与侧栏/视口留白 20 → 24px */
+.el-card { --el-card-padding: var(--ot-space-5); }   /* 卡片内边距 20 → 24px（卡头内边距随之自动跟随） */

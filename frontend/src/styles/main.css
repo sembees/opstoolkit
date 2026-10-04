@@ -79,9 +79,20 @@ html, body, #app {
 .page {
   display: flex;
   flex-direction: column;
-  gap: var(--ot-space-4);
+  gap: var(--ot-space-5);      /* 区块间距 16 → 24px（"从容感"旋钮之一） */
 }
 /* ★ PageHeader 自带 margin-bottom 是为了**单独使用**时也有下间距；但放进 .page 容器后
    flex 的 gap 与它的 margin 会叠加（页头下变成 32px，实测发现）。这里在 .page 内清零，
-   让"页头与内容之间"就等于容器 gap（16px）。 */
+   让"页头与内容之间"就等于容器 gap（现为 24px）。 */
 .page > .page-header { margin-bottom: 0; }
+
+/* ── 呼吸感：表格行高与表单项间距放宽 ──────────────────────────────────
+   为什么：视觉一致性做完了，但整体偏挤（用户反馈"间距还是需要调整一下，显得更从容"）。
+   · 表格：组件库 small 表的单元格纵向内边距是 4px（行高 32px）→ 提到 8px（行高 40px），
+     与 default 表的纵向内边距一致；一行一行读起来明显更舒展。
+   · 表单：表单项默认 margin-bottom 18px → 24px；工具条里的 inline 表单保持 16px，
+     免得一行控件之间被拉得太开。
+   ★ 这两处也是旋钮：想要更松/更紧，改这两个数即可。 */
+.el-table--small .el-table__cell { padding: 8px 0; }
+.el-form-item { margin-bottom: var(--ot-space-5); }
+.el-form--inline .el-form-item { margin-bottom: var(--ot-space-4); }
