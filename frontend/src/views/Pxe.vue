@@ -133,15 +133,19 @@
             </el-form-item>
           </el-col>
           <el-col :span="8">
-            <el-form-item label="版本">
+            <el-form-item>
+              <template #label>
+                版本 <el-tooltip v-if="form.os_version && !mediaReady" placement="top" effect="light">
+                  <template #content>
+                    <div class="tip-body">没有 {{ form.os_type }}/{{ form.os_version }}/ 的引导介质，装机时 iPXE 会报 "Could not boot image"</div>
+                  </template>
+                  <el-icon class="tip-icon"><WarningFilled /></el-icon>
+                </el-tooltip>
+              </template>
               <el-select v-model="form.os_version" filterable allow-create default-first-option
                          class="w-full" placeholder="选一个已提取介质的版本">
                 <el-option v-for="v in versionOptions" :key="v.value" :label="v.label" :value="v.value" />
               </el-select>
-              <div v-if="form.os_version && !mediaReady"
-                   class="form-hint">
-                没有 {{ form.os_type }}/{{ form.os_version }}/ 的引导介质，装机时 iPXE 会报 "Could not boot image"
-              </div>
             </el-form-item>
           </el-col>
         </el-row>
@@ -158,9 +162,13 @@
             <el-form-item label="管理员密码">
               <el-input v-model="form.admin_password" type="password" show-password
                         :placeholder="editingId ? '留空不修改' : '新建必填'" />
-              <div v-if="!editingId && !form.admin_password"
-                   class="form-hint">
-                新建时必填：这是裸机 root 密码，后端不允许留空，也不会代填任何默认值
+              <div v-if="!editingId && !form.admin_password" class="form-hint">
+                <span class="warn-text">新建时必填：裸机 root 密码，不允许留空</span> <el-tooltip placement="top" effect="light">
+                  <template #content>
+                    <div class="tip-body">这是裸机 root 密码，后端不允许留空，也不会代填任何默认值。</div>
+                  </template>
+                  <el-button link type="primary" size="small">为什么必填</el-button>
+                </el-tooltip>
               </div>
             </el-form-item>
           </el-col>
@@ -171,6 +179,7 @@
         </el-form-item>
 
         <el-divider content-position="left">磁盘</el-divider>
+        <div class="group-label">目标盘与分区方案</div>
         <el-row :gutter="12">
           <el-col :span="8">
             <el-form-item label="分区方案">
@@ -221,51 +230,60 @@
             </el-form-item>
           </el-col>
         </el-row>
-        <el-alert v-if="form.disk_target_mode === 'auto'" type="info" :closable="false"
-                  class="mb-3"
-                  title="自动选盘：换硬件不用改模板" />
-        <div v-if="form.disk_target_mode === 'auto'" class="disk-auto-note">
-          RHEL 系（anaconda 没有现成的自动选盘原语）在 <code>%pre</code> 里按
-          "非可移动、非光驱、容量达标、按盘名排序取第一块"选出目标盘，
-          再 <code>%include</code> 生成出来的分区片段。盘名不再写死，NVMe(<code>nvme0n1</code>) /
-          virtio-blk(<code>vda</code>) 都能装。<br />
-          <b class="warn-text">Ubuntu 的 layout=custom 不支持自动选盘</b>：
-          subiquity 没有"自动挑最大盘"的写法，必须显式指定目标盘（否则生成时直接 422 拒绝）。
+        <div v-if="form.disk_target_mode === 'auto'" class="disk-auto-line">
+          <span>自动选盘：换硬件不用改模板；<b class="warn-text">Ubuntu 不支持自动选盘</b>，须按盘名指定</span> <el-tooltip placement="top" effect="light">
+            <template #content>
+              <div class="tip-body">
+                RHEL 系（anaconda 没有现成的自动选盘原语）在 <code>%pre</code> 里按
+                "非可移动、非光驱、容量达标、按盘名排序取第一块"选出目标盘，
+                再 <code>%include</code> 生成出来的分区片段。盘名不再写死，NVMe(<code>nvme0n1</code>) /
+                virtio-blk(<code>vda</code>) 都能装。<br />
+                <b class="warn-text">Ubuntu 的 layout=custom 不支持自动选盘</b>：
+                subiquity 没有"自动挑最大盘"的写法，必须显式指定目标盘（否则生成时直接 422 拒绝）。
+              </div>
+            </template>
+            <el-button link type="primary" size="small">实现细节</el-button>
+          </el-tooltip>
         </div>
 
-        <el-alert
-          v-if="form.os_type === 'ubuntu' && form.disk_scheme === 'custom'"
-          type="warning" :closable="false" class="mb-3"
-          title="Ubuntu 自定义分区：请用「按盘名」指定目标盘"
-        >
-          <div class="alert-detail">
-            subiquity 认目标盘的方式与 RHEL 不同（真机实测，见 RUNBOOK-STATE §5.47）：
-            <ul class="alert-list">
-              <li>
-                <code>serial</code>：subiquity 取的是 sysfs 的
-                <code>/sys/block/sdX/device/serial</code>，而虚拟化（QEMU/virtio-scsi）下该属性为空
-                → 报 <code>matched no disk</code>，装不上；
-              </li>
-              <li><code>wwn</code> / <code>model</code>：盘可能没有 WWN，或同型号多盘时产生歧义；</li>
-              <li>
-                它<b>不认识</b>的键（如 <code>id_path</code>）：<b>不报错</b>，而是退回"匹配第一块盘" ——
-                若数据盘排在前面就<b>直接抹掉数据盘</b>（产品已拒绝此键）。
-              </li>
-            </ul>
-            所以 Ubuntu 侧请选 <b>按盘名</b> 填系统盘设备名（如 <code>sdb</code>）：
-            名字填错会明确报错、不会错装，但<b>务必确认它与「数据盘」不是同一块盘</b>
-            （系统盘会被清空分区）。<br />
-            <b>未验证</b>：真机上若磁盘提供真实序列号 / WWN，
-            <code>serial</code> / <code>wwn</code> 也许可用 —— 本环境无真机，未做验证，
-            因此不作为结论。
-          </div>
-        </el-alert>
+        <div v-if="form.os_type === 'ubuntu' && form.disk_scheme === 'custom'" class="form-hint mb-3">
+          <b>Ubuntu 自定义分区：请用「按盘名」指定目标盘</b> <el-tooltip placement="top" effect="light">
+            <template #content>
+              <div class="alert-detail">
+                subiquity 认目标盘的方式与 RHEL 不同（真机实测，见 RUNBOOK-STATE §5.47）：
+                <ul class="alert-list">
+                  <li>
+                    <code>serial</code>：subiquity 取的是 sysfs 的
+                    <code>/sys/block/sdX/device/serial</code>，而虚拟化（QEMU/virtio-scsi）下该属性为空
+                    → 报 <code>matched no disk</code>，装不上；
+                  </li>
+                  <li><code>wwn</code> / <code>model</code>：盘可能没有 WWN，或同型号多盘时产生歧义；</li>
+                  <li>
+                    它<b>不认识</b>的键（如 <code>id_path</code>）：<b>不报错</b>，而是退回"匹配第一块盘" ——
+                    若数据盘排在前面就<b>直接抹掉数据盘</b>（产品已拒绝此键）。
+                  </li>
+                </ul>
+                所以 Ubuntu 侧请选 <b>按盘名</b> 填系统盘设备名（如 <code>sdb</code>）：
+                名字填错会明确报错、不会错装，但<b>务必确认它与「数据盘」不是同一块盘</b>
+                （系统盘会被清空分区）。<br />
+                <b>未验证</b>：真机上若磁盘提供真实序列号 / WWN，
+                <code>serial</code> / <code>wwn</code> 也许可用 —— 本环境无真机，未做验证，
+                因此不作为结论。
+              </div>
+            </template>
+            <el-button link type="primary" size="small">subiquity 实测差异</el-button>
+          </el-tooltip>
+        </div>
 
         <template v-if="form.disk_scheme === 'custom'">
           <el-divider content-position="left">自定义分区表</el-divider>
           <div class="help-text">
-            大小为 <code>512M</code>/<code>20G</code>/<code>rest</code>（<code>rest</code> 只能放在最后一行，表示用掉剩余空间）；
-            挂载点留空 = 只建分区不挂载；填了 VG 与 LV 才是 LVM 逻辑卷。
+            <code>rest</code> 只能放在最后一行；挂载点留空 = 只建分区不挂载 <el-tooltip placement="top" effect="light">
+              <template #content>
+                <div class="tip-body">大小为 <code>512M</code>/<code>20G</code>/<code>rest</code>（<code>rest</code> 只能放在最后一行，表示用掉剩余空间）；挂载点留空 = 只建分区不挂载；填了 VG 与 LV 才是 LVM 逻辑卷。</div>
+              </template>
+              <el-button link type="primary" size="small">大小写法</el-button>
+            </el-tooltip>
           </div>
           <el-table :data="form.partitions" size="small" class="table-gap">
             <el-table-column label="挂载点" width="140">
@@ -301,23 +319,33 @@
           <el-divider content-position="left">其它数据盘（默认<b>不格式化</b>）</el-divider>
           <div class="help-text">
             这里只做"挂载"。要格式化别的盘必须显式打开下面的开关 —— 生产上默认不动数据盘。<br />
-            <b class="warn-text">识别方式必须填「容量」/「序列号」/「WWID」之一</b>：
-            盘名（sda/sdb）由内核探测顺序决定，<b>同一台机器两次启动都可能互换</b>，
-            拿它当"别碰这块盘"的判据会把系统盘排除掉、让安装落到数据盘上并抹掉它（真机实测过）。
-            盘名只作备注。容量写法如 <code>30G</code>（G/M/T 按二进制，GB/MB/TB 按十进制）。<br />
+            <span class="warn-text">识别方式必须填「容量」/「序列号」/「WWID」之一，盘名只作备注</span> <el-tooltip placement="top" effect="light">
+              <template #content>
+                <div class="tip-body">盘名（sda/sdb）由内核探测顺序决定，<b>同一台机器两次启动都可能互换</b>，拿它当"别碰这块盘"的判据会把系统盘排除掉、让安装落到数据盘上并抹掉它（真机实测过）。容量写法如 <code>30G</code>（G/M/T 按二进制，GB/MB/TB 按十进制）。</div>
+              </template>
+              <el-button link type="primary" size="small">为什么?</el-button>
+            </el-tooltip><br />
+            挂载点必须二选一：① 打开「格式化」；② 填「挂已有文件系统」的 UUID / 卷标 <el-tooltip placement="top" effect="light">
+              <template #content>
+                <div class="tip-body">要给数据盘填「挂载点」必须二选一：① 打开「格式化」（建新分区再挂）；② 在「挂已有文件系统」里填该分区文件系统的 <b>UUID</b> 或<b>卷标</b>（保留数据、不格式化）。</div>
+              </template>
+              <el-button link type="primary" size="small">细节</el-button>
+            </el-tooltip><br />
+            <span class="warn-text">「挂已有文件系统」只在 RHEL 系实现，Ubuntu 会被后端拒绝</span> <el-tooltip placement="top" effect="light">
+              <template #content>
+                <div class="tip-body">「挂已有文件系统」只在 <b>RHEL 系</b>（kickstart 的
+                <code>part &lt;挂载点&gt; --onpart=UUID=… --noformat</code>）实现；
+                Ubuntu 侧的 <code>preserve: true</code> 官方文档确实存在，但本项目<b>尚未验证</b>，
+                后端会拒绝（fail-closed，不赌）。填了它会自动关掉「格式化」——
+                既有文件系统不能被格式化。另外：用 clearpart 时 <code>--onpart</code> 只能指向
+                <b>主分区</b>（官方原文：不能用在逻辑分区上），产物里会写明这条边界。
+                「文件系统」列可留空：<code>--fstype</code> 在该组合下是否必需官方文档没说，
+                填了就原样写进产物。</div>
+              </template>
+              <el-button link type="primary" size="small">细节</el-button>
+            </el-tooltip>
             <!-- 后端契约：不格式化时不会建分区，挂载点会被丢弃 ⇒ 直接 422（fail-closed），
                  别让运维填完挂载点才撞一个 422。 -->
-            <b class="warn-text">要给数据盘填「挂载点」必须二选一</b>：
-            ① 打开「格式化」（建新分区再挂）；② 在「挂已有文件系统」里填该分区文件系统的
-            <b>UUID</b> 或<b>卷标</b>（保留数据、不格式化）。<br />
-            「挂已有文件系统」只在 <b>RHEL 系</b>（kickstart 的
-            <code>part &lt;挂载点&gt; --onpart=UUID=… --noformat</code>）实现；
-            Ubuntu 侧的 <code>preserve: true</code> 官方文档确实存在，但本项目<b>尚未验证</b>，
-            后端会拒绝（fail-closed，不赌）。填了它会自动关掉「格式化」——
-            既有文件系统不能被格式化。另外：用 clearpart 时 <code>--onpart</code> 只能指向
-            <b>主分区</b>（官方原文：不能用在逻辑分区上），产物里会写明这条边界。
-            「文件系统」列可留空：<code>--fstype</code> 在该组合下是否必需官方文档没说，
-            填了就原样写进产物。
           </div>
           <el-table :data="form.data_disks" size="small" class="table-gap">
             <el-table-column label="容量（识别用）" width="130">
@@ -508,11 +536,18 @@
         </el-form-item>
       </el-form>
       <el-alert v-if="deployForm.deploy_mode === 'standalone'" type="warning" :closable="false" show-icon>
-        将在本网段启动完整 DHCP，确认无其他 DHCP 服务器，否则会与现有 DHCP 冲突导致断网！
+        <template #title>
+          将在本网段启动完整 DHCP，与其他 DHCP 冲突会断网 <el-tooltip placement="top" effect="light">
+            <template #content>
+              <div class="tip-body">部署前请确认本网段无其他 DHCP 服务器，否则会与现有 DHCP 冲突导致断网。</div>
+            </template>
+            <el-button link type="primary" size="small">风险细节</el-button>
+          </el-tooltip>
+        </template>
       </el-alert>
-      <el-alert v-else type="info" :closable="false" show-icon>
+      <div v-else class="mode-note">
         {{ deployForm.deploy_mode === 'proxy' ? 'ProxyDHCP 模式与现有 DHCP 并存，不分配地址，影响面小。' : '中继模式仅提供引导，依赖外部 DHCP 与交换机 IP helpers。' }}
-      </el-alert>
+      </div>
       <!-- ★ 外部审查 U5-F8：部署与「生成配置」弹窗用的是**两套参数**，界面以前对此只字不提。
            事实（都读过后端）：部署按**模板**生成（内核路径留空时由后端按模板 os_type/os_version
            推导）、http_root 由后端强制为 http://<server_ip>:8000/pxe/serve（不吃前端传值）、
@@ -521,7 +556,12 @@
       <el-descriptions :column="1" size="small" border class="mt-10">
         <el-descriptions-item label="将按模板生成">
           {{ deployRow ? (deployRow.os_type + '/' + deployRow.os_version) : '-' }}
-          —— 内核/initrd 路径按模板版本推导（要覆盖请用「生成配置」弹窗里的路径再部署）
+          —— 内核/initrd 路径按模板版本推导 <el-tooltip placement="top" effect="light">
+            <template #content>
+              <div class="tip-body">要覆盖路径，请用「生成配置」弹窗里的路径再部署。</div>
+            </template>
+            <el-button link type="primary" size="small">如何覆盖</el-button>
+          </el-tooltip>
         </el-descriptions-item>
         <el-descriptions-item label="将带上装机记录">
           {{ deployInstalls.length }} 条（模板里已登记的 MAC → 各自菜单/应答文件）
@@ -546,8 +586,12 @@
         <code class="path-code">/srv/opstk/pxe-web/{{ (extractConfirm.row && extractConfirm.row._osType || '').trim()
           }}/{{ (extractConfirm.row && extractConfirm.row._osVer || '').trim() }}/</code>
         <div class="warn-note">
-          目录名必须与模板里的「系统 + 版本」完全一致，否则生成出来的内核 URL 是 404
-          （机器端只报 "Could not boot image"）。提取是长任务，请确认系统和版本没选错。
+          目录名必须与模板里的「系统 + 版本」完全一致，否则内核 URL 是 404 <el-tooltip placement="top" effect="light">
+            <template #content>
+              <div class="tip-body">生成出来的内核 URL 对不上时，机器端只报 "Could not boot image"。提取是长任务，请确认系统和版本没选错。</div>
+            </template>
+            <el-button link type="primary" size="small">细节</el-button>
+          </el-tooltip>
         </div>
       </div>
       <template #footer>
@@ -1112,7 +1156,12 @@ onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos()
 .help-text { margin-bottom: 6px; font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 .alert-detail { font-size: var(--ot-font-xs); line-height: 1.6; }
 .alert-list { margin: var(--ot-space-1) 0 0 var(--ot-space-4); padding: 0; }
-.disk-auto-note { margin: -8px 0 12px; font-size: var(--ot-font-xs); line-height: 1.6; color: var(--ot-text-3); }
+/* 悬浮长说明：tooltip 气泡内容限宽（#content slot 带 scoped 属性，样式可达传送后的节点） */
+.tip-body { max-width: 420px; font-size: var(--ot-font-xs); line-height: 1.6; }
+.tip-icon { color: var(--ot-warning); cursor: help; }
+/* 压成一行的区块说明（替代原整段 disk-auto-note / el-alert 说明） */
+.disk-auto-line { margin-bottom: var(--ot-space-3); font-size: var(--ot-font-xs); color: var(--ot-text-3); display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--ot-space-2); }
+.mode-note { margin-top: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 .written-note { margin-top: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 .dialog-body { line-height: 1.7; }
 .path-code { font-size: var(--ot-font-sm); }
