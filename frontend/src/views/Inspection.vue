@@ -52,30 +52,61 @@
          运行/完成时承载实时输出终端、进度与结果明细 -->
     <CardSection title="巡检结果">
       <template #extra>
-        <el-tag v-if="running" type="warning" size="small">执行中</el-tag>
-        <el-tag v-else-if="completed" type="success" size="small">已完成</el-tag>
+        <div class="inline-actions">
+          <el-tag v-if="running" type="warning" size="small">执行中</el-tag>
+          <el-tag v-else-if="completed" type="success" size="small">已完成</el-tag>
+          <!-- 结果导出（后端任务落库后经「task」事件回推 task_id）：
+               没有 lastTaskId 时禁用，悬停 title 提示先跑一次巡检 -->
+          <el-dropdown v-if="lastTaskId" trigger="click" @command="downloadResult">
+            <el-button size="small" type="primary" plain>
+              下载结果 <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="txt">报告 (txt)</el-dropdown-item>
+                <el-dropdown-item command="json">数据 (json)</el-dropdown-item>
+                <el-dropdown-item command="csv">表格 (csv)</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-button v-else size="small" type="primary" plain disabled title="先跑一次巡检">
+            下载结果 <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+        </div>
       </template>
 
       <!-- 空闲态：无输出、无结果、未在跑 → 空态引导 -->
       <el-empty
-        v-if="!outputLines.length && !results.length && !running"
+        v-if="!outputGroups.length && !results.length && !running"
         description="尚未运行巡检：选择模板与设备后点「开始巡检」"
       />
 
       <div v-else class="result-stack">
         <!-- 实时输出 -->
-        <div v-show="outputLines.length">
+        <div v-show="outputGroups.length">
           <div class="section-title stack-2"><el-icon><Monitor /></el-icon> 实时输出</div>
+          <!-- 按设备分组渲染：一台设备一块，块头是设备名（系统级行归入「系统」块），
+               块内行沿用原有 terminal-line-* 着色类 -->
           <div class="terminal-output" ref="terminalRef">
-            <div v-for="(line, i) in outputLines" :key="i" :class="'terminal-line-' + line.type">{{ line.text }}</div>
+            <div v-for="(g, gi) in outputGroups" :key="gi" class="terminal-group">
+              <div class="section-title">{{ g.asset_name || '系统' }}</div>
+              <div v-for="(line, i) in g.lines" :key="i" :class="'terminal-line-' + line.type">{{ line.text }}</div>
+            </div>
           </div>
         </div>
 
         <!-- 巡检进度 -->
         <div v-if="running && progressTotal > 0" class="progress-block">
           <div class="progress-line">
-            巡检进度: {{ progressDone }} / {{ progressTotal }} 台已完成
-            <span v-if="progressFailed" class="progress-failed">{{ progressFailed }} 台失败</span>
+            <!-- progress 事件新增 started 字段：推送过就展示「已开始 x/N · 完成 y · 失败 z」；
+                 旧后端没有 started 时退回原 done/failed 展示（向后兼容） -->
+            <template v-if="progressHasStarted">
+              已开始 {{ progressStarted }}/{{ progressTotal }} 台 · 完成 {{ progressDone }} · 失败 {{ progressFailed }}
+            </template>
+            <template v-else>
+              巡检进度: {{ progressDone }} / {{ progressTotal }} 台已完成
+              <span v-if="progressFailed" class="progress-failed">{{ progressFailed }} 台失败</span>
+            </template>
           </div>
           <el-progress
             :percentage="Math.round((progressDone + progressFailed) * 100 / progressTotal)"
@@ -260,7 +291,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import http from '../api'
+import http, { downloadZip } from '../api'
 import { ElMessage } from 'element-plus'
 import PageHeader from '../components/PageHeader.vue'
 import CardSection from '../components/CardSection.vue'
@@ -276,12 +307,17 @@ const customCommands = ref('')
 const selectedTemplateId = ref('')
 const running = ref(false)
 const completed = ref(false)
-const outputLines = ref([])
+// 实时输出改为**按设备分组**：[{ asset_id, asset_name, lines: [{ text, type }] }]，
+// 一台设备一块；无 asset_id 的系统级行（连接建立/模板/全部完成/致命错误）归入「系统」块
+const outputGroups = ref([])
 const results = ref([])
 const activeResults = ref([])
 const progressDone = ref(0)
 const progressTotal = ref(0)
 const progressFailed = ref(0)
+const progressStarted = ref(0)        // progress 事件新增的 started（已开始台数）
+const progressHasStarted = ref(false) // 本次巡检后端是否推送过 started 字段（旧后端没有 → 退回旧展示）
+const lastTaskId = ref('')            // 「task」事件回推的任务 id（后端已落库），用于结果导出
 const terminalRef = ref()
 const rawDialogVisible = ref(false)
 const rawDetail = ref(null)
@@ -341,13 +377,49 @@ function changeText(row) {
   return map[v] || String(v)
 }
 
-function pushLine(text, type) {
-  outputLines.value.push({ text, type: type || 'info' })
+// 分组追加：设备行按 asset_id 找到该设备已有的块（一台设备一块，同一设备的行连续
+// 追加进同一块），找不到就新开一块；系统行（无 asset_id）仅在「最后一块是系统块」时
+// 续写、否则新开 —— 保证「连接建立 / 全部完成 / FATAL」按时间顺序出现在末尾，不跳回顶部。
+// 终端滚动：滚动容器仍是 .terminal-output（terminalRef）本身，内部从扁平行换成
+// 分组块后 scrollHeight 依旧等于全部内容高度，nextTick 贴底逻辑无需改变。
+function pushLine(text, type, assetId, assetName) {
+  const groups = outputGroups.value
+  let g = null
+  if (assetId) {
+    g = groups.find(x => x.asset_id === assetId)
+  } else {
+    const last = groups[groups.length - 1]
+    if (last && !last.asset_id) g = last
+  }
+  if (!g) {
+    g = { asset_id: assetId || '', asset_name: assetName || '', lines: [] }
+    groups.push(g)
+  }
+  if (assetName && !g.asset_name) g.asset_name = assetName
+  g.lines.push({ text, type: type || 'info' })
   nextTick(() => { if (terminalRef.value) terminalRef.value.scrollTop = terminalRef.value.scrollHeight })
 }
 
-function clearOutput() { outputLines.value = []; results.value = []; completed.value = false }
+// 清屏：分组结构随 outputLines→outputGroups 一并清空；lastTaskId 特意不清 ——
+// 任务已在后端落库，清屏后仍可导出上一次结果，下次巡检收到新 task 事件会自动覆盖。
+// 进度展示状态一并复位（新巡检从兼容态开始，收到带 started 的 progress 再切换）。
+function clearOutput() {
+  outputGroups.value = []
+  results.value = []
+  completed.value = false
+  progressStarted.value = 0
+  progressHasStarted.value = false
+}
 function showRaw(row) { rawDetail.value = row; rawDialogVisible.value = true }
+
+// 导出巡检结果：downloadZip 返回 true/false（内部已处理 30s 超时、错误弹窗、blob
+// 下载与文件名），只有 true 才提示成功；false 时它内部已弹过错误，这里不能再补
+// 一句「已开始下载」造成假成功。
+async function downloadResult(fmt) {
+  if (!lastTaskId.value) { ElMessage.warning('先跑一次巡检'); return }
+  const ok = await downloadZip('/ct/inspection/tasks/' + lastTaskId.value + '/export', { fmt })
+  if (ok) ElMessage.success('已开始下载')
+}
 
 function onTemplateChange() {
   if (currentTemplate.value) ElMessage.info('已选模板: ' + currentTemplate.value.name + ' (' + currentTemplate.value.items.length + ' 项)')
@@ -456,15 +528,19 @@ async function startInspection() {
 
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data)
-    if (msg.type === 'start') pushLine('\n--- ' + msg.asset_name + ' ---', 'info')
-    else if (msg.type === 'cmd') pushLine('> ' + msg.cmd, 'cmd')
-    else if (msg.type === 'output') msg.output.split('\n').forEach(l => { if (l.trim()) pushLine(l, 'info') })
-    else if (msg.type === 'error') pushLine('[ERROR] ' + msg.error, 'err')
-    else if (msg.type === 'done') pushLine('[完成] ' + msg.asset_name, 'ok')
+    // 任务落库确认：服务端建好任务后先回推 task_id，记下来供「下载结果」导出用
+    if (msg.type === 'task') lastTaskId.value = msg.task_id || ''
+    else if (msg.type === 'start') pushLine('\n--- ' + msg.asset_name + ' ---', 'info', msg.asset_id, msg.asset_name)
+    else if (msg.type === 'cmd') pushLine('> ' + msg.cmd, 'cmd', msg.asset_id, msg.asset_name)
+    else if (msg.type === 'output') msg.output.split('\n').forEach(l => { if (l.trim()) pushLine(l, 'info', msg.asset_id, msg.asset_name) })
+    else if (msg.type === 'error') pushLine('[ERROR] ' + msg.error, 'err', msg.asset_id, msg.asset_name)
+    else if (msg.type === 'done') pushLine('[完成] ' + msg.asset_name, 'ok', msg.asset_id, msg.asset_name)
     else if (msg.type === 'progress') {
       progressDone.value = msg.done || 0
       progressFailed.value = msg.failed || 0
       progressTotal.value = msg.total || 0
+      // started 是新增字段：出现过就切到「已开始 x/N · 完成 y · 失败 z」展示
+      if (msg.started !== undefined) { progressStarted.value = msg.started || 0; progressHasStarted.value = true }
     }
     else if (msg.type === 'complete') {
       results.value = msg.results || []
@@ -547,6 +623,10 @@ onMounted(async () => {
 .metric-mini :deep(.el-card__body) { padding: var(--ot-space-3); text-align: center; }
 .metric-key { font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 .metric-val { font-size: var(--ot-font-sm); font-weight: 600; margin-top: var(--ot-space-1); }
+
+/* ── 实时输出按设备分组：块间留一行呼吸；块头用全局 .section-title（加粗），
+      颜色继承 .terminal-output 的 --ot-term-fg，与终端内行一致 ── */
+.terminal-group + .terminal-group { margin-top: var(--ot-space-3); }
 
 /* ── 弹窗 / 抽屉 ── */
 .raw-terminal { max-height: 400px; }

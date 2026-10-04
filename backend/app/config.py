@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     inspection_timeout: int = 60
     inspection_concurrency: int = 10
     enable_pager_disable: bool = True
+    # ★ 连接阶段单独一个短超时（与"命令读取超时"分开）：
+    #   实测过不可达设备（如 192.168.1.2 被丢给默认网关）时，TCP SYN 会被静默丢弃，
+    #   而**这一阶段不受 netmiko 的 conn_timeout 管**，由操作系统 SYN 重试决定（Linux 默认 ~127s）
+    #   ⇒ 界面上就是"点了开始巡检一直卡着"。配合下面的预检，把等待压到秒级。
+    inspection_connect_timeout: int = 10
+    # 连接前的 TCP 预检超时（秒）：不通就立刻报"设备不可达"，不进入 SSH 流程。
+    inspection_preflight_timeout: float = 3.0
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000"
 

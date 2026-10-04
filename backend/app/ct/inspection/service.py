@@ -6,6 +6,7 @@ import os
 import tempfile
 from typing import Callable, Optional
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -43,19 +44,32 @@ async def recover_interrupted_tasks() -> int:
         return int(res.rowcount or 0)
 
 
-async def run_task_in_background(task_id: str) -> None:
-    """后台执行巡检任务并写入结果；异常时标记 failed。"""
+async def run_task_in_background(task_id: str, on_event=None) -> list:
+    """后台执行巡检任务并写入结果；异常时标记 failed。
+
+    `on_event`：**同步**回调（服务层就是同步 `emit` 的），用于把实时事件转发给调用方，
+    例如 WebSocket 直播。★ **绝不能直接传 async 函数** —— WS 那条链路以前就是这么传的，
+    结果每次 `emit` 都产生一个没人 await 的协程：**一个事件都没发出去**，前端只看到自己写的那行
+    "连接已建立"，看着就像"界面卡死"。正确做法见 `api/inspection.py::inspection_ws`：
+    同步回调 → `asyncio.Queue`（跨线程 `call_soon_threadsafe`）→ 单独的 drain 协程负责发送。
+
+    返回：每台设备的结果列表（WS 需要它来发 complete 消息）。
+    """
+    results: list = []
     try:
         async with async_session() as db:
             task = await db.get(models.InspectionTask, task_id)
             if task is None:
-                return
+                return results
             task.status = "running"
             task.finished_at = None
             # 收集实时输出，用于任务回放
             output_log = []
             def capture_log(ev):
-                # 只保存关键事件，不存大段输出
+                # ★ 直播先发**原样**事件（不截断）；只对"存进 DB 的那份"截断，
+                #   否则单条长输出（如整份 running-config）会把 output_log 撑爆。
+                if on_event is not None:
+                    on_event(ev)
                 entry = dict(ev)
                 if entry.get("type") == "output":
                     entry["output"] = (entry.get("output") or "")[:500]
@@ -115,6 +129,14 @@ async def run_task_in_background(task_id: str) -> None:
             task.finished_at = utcnow()
             await db.commit()
     except Exception:  # noqa: BLE001
+        # ★ 这里**必须留下原因**。原来静默吞掉，导致"任务被标 failed、却一行结果都没落库"
+        #   这种现象完全查不出所以然（实测踩到：status=failed、InspectionResult 0 行、
+        #   而 output_log 里只有 start/error）。留 traceback 才能定位。
+        import logging
+        import traceback
+
+        logging.getLogger(__name__).exception("巡检任务 %s 执行失败", task_id)
+        traceback.print_exc()
         try:
             async with async_session() as db:
                 task = await db.get(models.InspectionTask, task_id)
@@ -124,6 +146,7 @@ async def run_task_in_background(task_id: str) -> None:
                     await db.commit()
         except Exception:  # noqa: BLE001
             pass
+    return results
 
 
 
@@ -138,6 +161,26 @@ def get_pager_cmds(device_type: str) -> list:
     return ["terminal length 0"]
 
 
+def _preflight(host: str, port, timeout: float) -> None:
+    """连接设备前先做一次 TCP 预检；不通就抛一句**能看懂**的错。
+
+    为什么必须做（实测教训）：像 `192.168.1.2` 这种"不在任何本地网段、被丢给默认网关"的地址，
+    TCP SYN 会被静默丢弃，而**连接阶段不受 netmiko 的 conn_timeout 管** —— 由操作系统的
+    SYN 重试决定（Linux 默认 ~127 秒）。用户点了「开始巡检」后界面就一直卡着，
+    既没有进度也没有报错。预检把这个等待压到数秒，并明确指出"不可达"而不是抛一个晦涩的异常。
+    """
+    import socket
+    try:
+        with socket.create_connection((host, int(port or 22)), timeout=timeout):
+            return
+    except OSError as e:
+        raise RuntimeError(
+            "设备不可达：%s:%s 在 %.0f 秒内建不起 TCP 连接（%s）。"
+            "请确认地址与端口正确、设备在线，且本机到该地址有路由。"
+            % (host, port or 22, timeout, e.__class__.__name__)
+        ) from e
+
+
 def _build_connect_params(asset: models.Asset, cred_plain: dict) -> dict:
     """构建 netmiko ConnectHandler 参数。
 
@@ -150,8 +193,12 @@ def _build_connect_params(asset: models.Asset, cred_plain: dict) -> dict:
         "host": asset.host,
         "port": asset.port or cred_plain.get("port") or 22,
         "username": cred_plain.get("username", ""),
+        # ★ 连接超时与读取超时**分开**：
+        #   · timeout      = 通道读取超时 → 60s（长命令如 display current-configuration 需要）
+        #   · conn_timeout = TCP/SSH 握手超时 → 10s（快速失败）
+        #   以前两者都是 60s，配上"TCP 阶段没人管"，不可达设备会让人以为界面卡死。
         "timeout": settings.inspection_timeout,
-        "conn_timeout": settings.inspection_timeout,
+        "conn_timeout": settings.inspection_connect_timeout,
     }
     if cred_plain.get("password"):
         params["password"] = cred_plain["password"]
@@ -270,6 +317,8 @@ async def inspect_one(db: AsyncSession, asset: models.Asset, kind: str = "defaul
         emit(ev)
 
     try:
+        # ★ 先做 TCP 预检（默认 3s）：不可达就**立刻**报错，不要等 OS 的 SYN 重试（~127s）。
+        _preflight(asset.host, params.get("port"), settings.inspection_preflight_timeout)
         outputs = await asyncio.to_thread(_connect_and_run, params, key_text,
                                           metric_cmds, custom_cmds,
                                           settings.enable_pager_disable, on_line)
