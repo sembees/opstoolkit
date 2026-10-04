@@ -159,15 +159,18 @@
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="管理员"><el-input v-model="form.admin_user" /></el-form-item></el-col>
           <el-col :span="8">
+            <!-- 提示放在**输入框右侧**（图标 tooltip），而不是塞进标签：
+                 标签宽只有 90px，「管理员密码」+ 图标会把最后一个字挤到第二行（实测截图所见）。
+                 用 .inline-unit（输入框占满 + 图标贴右，nowrap）保证整行不折。 -->
             <el-form-item label="管理员密码">
-              <el-input v-model="form.admin_password" type="password" show-password
-                        :placeholder="editingId ? '留空不修改' : '新建必填'" />
-              <div v-if="!editingId && !form.admin_password" class="form-hint">
-                <span class="warn-text">新建时必填：裸机 root 密码，不允许留空</span> <el-tooltip placement="top" effect="light">
+              <div class="inline-unit">
+                <el-input v-model="form.admin_password" type="password" show-password
+                          :placeholder="editingId ? '留空不修改' : '新建必填'" />
+                <el-tooltip v-if="!editingId && !form.admin_password" placement="top" effect="light">
                   <template #content>
-                    <div class="tip-body">这是裸机 root 密码，后端不允许留空，也不会代填任何默认值。</div>
+                    <div class="tip-body">新建时必填：这是裸机 root 密码，后端不允许留空，也不会代填任何默认值。</div>
                   </template>
-                  <el-button link type="primary" size="small">为什么必填</el-button>
+                  <el-icon class="tip-icon"><WarningFilled /></el-icon>
                 </el-tooltip>
               </div>
             </el-form-item>
@@ -194,9 +197,9 @@
           <el-col :span="8">
             <el-form-item label="目标磁盘">
               <el-select v-model="form.disk_target_mode">
-                <el-option label="自动（选最大的盘）" value="auto" />
+                <el-option label="自动（最大盘）" value="auto" />
                 <el-option label="按盘名指定" value="name" />
-                <el-option label="按序列号/型号匹配" value="match" />
+                <el-option label="按序列号/型号" value="match" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -211,14 +214,19 @@
             </el-form-item>
           </el-col>
           <el-col :span="8" v-if="form.disk_target_mode === 'match'">
-            <el-form-item label="型号（序列号为空时用）">
+            <el-form-item label="型号（兜底）">
               <el-input v-model="form.disk_model" placeholder="如 INTEL SSDSC2KB480G8" />
             </el-form-item>
           </el-col>
           <el-col :span="8">
-            <el-form-item label="忽略小于(GB)">
-              <el-input-number v-model="form.disk_min_size_gb" :min="0" :max="100000"
-                               controls-position="right" class="w-full" />
+            <!-- 原标签「忽略小于(GB)」在 90px 的 label 宽度下自己折成两行（(GB) 掉到第二行）。
+                 改成短标签 + 行内单位：标签不折行，单位也不多占一行。 -->
+            <el-form-item label="最小容量">
+              <div class="inline-unit">
+                <el-input-number v-model="form.disk_min_size_gb" :min="0" :max="100000"
+                                 controls-position="right" class="w-full" />
+                <span class="text-muted">GB</span>
+              </div>
             </el-form-item>
           </el-col>
           <el-col :span="8">
@@ -1144,6 +1152,8 @@ onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos()
 .os-type-select { width: 90px; margin-right: 6px; }
 .os-ver-input { width: 80px; margin-right: 6px; }
 .w-full { width: 100%; }
+/* 输入框 + 行内单位（如 GB）：不换行、垂直居中，单位贴输入框右侧 */
+.inline-unit { display: flex; align-items: center; gap: var(--ot-space-1); width: 100%; white-space: nowrap; }
 .existing-kind { width: 84px; }
 .existing-value { width: 146px; margin-left: var(--ot-space-1); }
 .table-gap { margin-bottom: 6px; }
