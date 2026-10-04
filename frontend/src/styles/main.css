@@ -60,6 +60,21 @@ html, body, #app {
 }
 .text-muted { color: var(--ot-text-3); }
 
+/* ── 表格操作列：把多个 link 按钮排成**一行**、不再换行 ──────────────────
+   为什么需要这个约定：Element Plus 默认给相邻按钮 `margin-left: 12px`，
+   5 个两字按钮（查看/导出/克隆/编辑/删除）约 5×28 + 4×12 ≈ 188px，
+   正好顶破 190px 的列宽（扣掉单元格左右各 12px 内边距后只剩 ~166px）——
+   于是最后一个按钮被挤到第二行，整行高度从 45px 撑到 ~71px（用户实测截图）。
+   用法：把操作列里的按钮们包进 <div class="table-actions">…</div>。 */
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ot-space-1);      /* 4px，比组件库默认的 12px 紧凑 */
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.table-actions .el-button + .el-button { margin-left: 0; }   /* 抵消 EP 的相邻外边距 */
+
 /* ── 页面根容器：纵向排列，区块间距统一由 gap 给出 ─────────────────── */
 .page {
   display: flex;

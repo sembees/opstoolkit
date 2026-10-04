@@ -153,15 +153,19 @@
             <el-tag :type="row.is_system ? 'info' : 'success'" size="small">{{ row.is_system ? '系统' : '自定义' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="190" fixed="right">
+        <el-table-column label="操作" min-width="200" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openTplView(row)">查看</el-button>
-            <el-button link type="success" size="small" @click="exportTemplate(row)">导出</el-button>
-            <el-button link type="primary" size="small" @click="cloneTpl(row)">克隆</el-button>
-            <el-button link type="warning" size="small" :disabled="row.is_system" @click="openTplEdit(row)">编辑</el-button>
-            <el-popconfirm title="确定删除?" @confirm="delTpl(row.id)">
-              <template #reference><el-button link type="danger" size="small" :disabled="row.is_system">删除</el-button></template>
-            </el-popconfirm>
+            <!-- 5 个操作必须排在**同一行**：包进 .table-actions（工具类里已抵消
+                 EP 相邻按钮的 12px 外边距并换成 4px 间距）—— 详见 main.css 的注释。 -->
+            <div class="table-actions">
+              <el-button link type="primary" size="small" @click="openTplView(row)">查看</el-button>
+              <el-button link type="success" size="small" @click="exportTemplate(row)">导出</el-button>
+              <el-button link type="primary" size="small" @click="cloneTpl(row)">克隆</el-button>
+              <el-button link type="warning" size="small" :disabled="row.is_system" @click="openTplEdit(row)">编辑</el-button>
+              <el-popconfirm title="确定删除?" @confirm="delTpl(row.id)">
+                <template #reference><el-button link type="danger" size="small" :disabled="row.is_system">删除</el-button></template>
+              </el-popconfirm>
+            </div>
           </template>
         </el-table-column>
       </el-table>
