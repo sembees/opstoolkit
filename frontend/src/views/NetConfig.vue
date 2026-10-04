@@ -64,10 +64,10 @@
         </el-alert>
 
         <el-table :data="items" size="small" stripe border max-height="380">
-          <el-table-column label="#" width="36">
+          <el-table-column label="#" width="30">
             <template #default="{ $index }">{{ $index + 1 }}</template>
           </el-table-column>
-          <el-table-column label="类型" width="80">
+          <el-table-column label="类型" width="74">
             <template #default="{ row }">
               <el-select v-model="row._type" size="small" @change="preview" class="ctrl-type">
                 <el-option label="物理" value="iface" />
@@ -77,13 +77,14 @@
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="接口名" width="120">
+          <el-table-column label="接口名" width="112">
             <template #default="{ row }">
               <span v-if="row._type==='vlan'" class="vlan-tag">{{ row.parent }}.{{ row.vlanId }}</span>
               <el-input v-else v-model="row.name" size="small" placeholder="eth0 / bond0 / br0" @input="preview" />
             </template>
           </el-table-column>
-          <el-table-column label="模式" width="75">
+          <!-- 模式列 96px：要容得下 static/dhcp 文本 + 下拉箭头（70px 会显示成 "d..."） -->
+          <el-table-column label="模式" width="96">
             <template #default="{ row }">
               <!-- bond 的模式是聚合模式（在右侧参数列）；网桥可留空=自动（有 IP 即静态） -->
               <el-select v-model="row.mode" size="small" @change="preview" v-if="row._type !== 'bond' && row._type !== 'vlan'">
@@ -94,25 +95,25 @@
               <span v-else class="cell-static">static</span>
             </template>
           </el-table-column>
-          <el-table-column label="IP/掩码" width="140">
+          <el-table-column label="IP/掩码" width="132">
             <template #default="{ row, $index }">
               <el-input v-model="row.ip" size="small" placeholder="10.0.0.1/24" @input="preview"
                         :disabled="row.mode==='dhcp'" :class="{ 'input-invalid': errorRows.has($index) }" />
             </template>
           </el-table-column>
-          <el-table-column label="网关" width="110">
+          <el-table-column label="网关" width="100">
             <template #default="{ row }">
               <el-input v-model="row.gateway" size="small" placeholder="网关" @input="preview" :disabled="row.mode==='dhcp'" />
             </template>
           </el-table-column>
-          <el-table-column label="DNS" width="130">
+          <el-table-column label="DNS" width="110">
             <template #default="{ row }">
               <el-input v-model="row.dnsStr" size="small"
                         :placeholder="dnsPlaceholder(row)"
                         @input="onDnsChange(row)" :disabled="dnsDisabled(row)" />
             </template>
           </el-table-column>
-          <el-table-column label="从接口/父接口" min-width="130">
+          <el-table-column label="从接口/父接口" min-width="120">
             <template #default="{ row }">
               <el-input v-if="row._type==='bond' || row._type==='bridge'" v-model="row.slavesStr" size="small" :placeholder="row._type==='bond'?'eth0,eth1':'网口名'" @input="onSlavesChange(row)" />
               <el-select v-else-if="row._type==='vlan'" v-model="row.parent" size="small" @change="onVlanParentChange(row)" class="ctrl-parent">
@@ -121,50 +122,59 @@
               <span v-else class="cell-static">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="Bond/VLAN参数" width="190">
+          <!-- Bond/VLAN 参数：改成"标签 + 控件"的两列网格。
+               原先所有控件塞在一个 inline 容器里（模式/miimon/lacp/hash/primary 挤成一行再换行），
+               190px 宽根本放不下，看起来一团；现在每个参数一行、标签右对齐，参数随 mode 增减也一目了然。 -->
+          <el-table-column label="Bond/VLAN 参数" width="250">
             <template #default="{ row }">
               <template v-if="row._type==='bond'">
-                <div class="inline-params">
-                  <el-select v-model="row.bondMode" size="small" class="ctrl-bond-mode" @change="onBondModeChange(row)">
+                <div class="param-grid">
+                  <span class="param-label">模式</span>
+                  <el-select v-model="row.bondMode" size="small" @change="onBondModeChange(row)">
                     <el-option v-for="m in meta.bond_modes" :key="m.id" :label="m.name" :value="m.id" />
                   </el-select>
                   <span class="param-label">miimon</span>
-                  <el-input v-model="row.miimon" size="small" class="ctrl-miimon" placeholder="100" @input="preview" />
+                  <el-input v-model="row.miimon" size="small" placeholder="100" @input="preview" />
                   <!-- mode 4 (802.3ad): lacp_rate -->
                   <template v-if="row.bondMode==4">
-                    <span class="param-label">lacp</span>
-                    <el-select v-model="row.lacpRate" size="small" class="ctrl-lacp" @change="preview">
+                    <span class="param-label">lacp 速率</span>
+                    <el-select v-model="row.lacpRate" size="small" @change="preview">
                       <el-option label="slow" value="slow" /><el-option label="fast" value="fast" />
                     </el-select>
                   </template>
                   <!-- mode 2/4: xmit_hash_policy -->
                   <template v-if="row.bondMode==2||row.bondMode==4">
-                    <span class="param-label">hash</span>
-                    <el-select v-model="row.xmitHash" size="small" class="ctrl-bond-mode" @change="preview">
+                    <span class="param-label">hash 策略</span>
+                    <el-select v-model="row.xmitHash" size="small" @change="preview">
                       <el-option label="layer2" value="layer2" />
                       <el-option label="layer2+3" value="layer2+3" />
                       <el-option label="layer3+4" value="layer3+4" />
                     </el-select>
                   </template>
-                </div>
-                <div v-if="row.bondMode==1||row.bondMode==5||row.bondMode==6" class="inline-params">
-                  <span class="param-label">primary</span>
-                  <el-input v-model="row.primary" size="small" class="ctrl-primary" placeholder="主口" @input="preview" />
+                  <template v-if="row.bondMode==1||row.bondMode==5||row.bondMode==6">
+                    <span class="param-label">主接口</span>
+                    <el-input v-model="row.primary" size="small" placeholder="如 eth0" @input="preview" />
+                  </template>
                 </div>
               </template>
               <template v-else-if="row._type==='vlan'">
-                <div class="inline-params">
-                  <span class="param-label">ID</span>
-                  <el-input-number v-model="row.vlanId" size="small" :min="1" :max="4094" class="ctrl-vlan-id" @change="onVlanIdChange(row)" controls-position="right" />
+                <div class="param-grid">
+                  <span class="param-label">VLAN ID</span>
+                  <el-input-number v-model="row.vlanId" size="small" :min="1" :max="4094"
+                                   controls-position="right" @change="onVlanIdChange(row)" />
                 </div>
               </template>
               <span v-else class="cell-static">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="80" fixed="right">
+          <el-table-column label="操作" width="120" fixed="right">
             <template #default="{ $index }">
-              <el-button link type="primary" size="small" @click="dupItem($index)">复制</el-button>
-              <el-button link type="danger" size="small" @click="delItem($index)">删除</el-button>
+              <!-- 复制/删除必须在同一行：`.table-actions` 抵消 EP 相邻按钮的 12px 外边距
+                   （全站工具类，定义在 styles/main.css；80px 列宽 + 12px 间距本来必折行） -->
+              <div class="table-actions">
+                <el-button link type="primary" size="small" @click="dupItem($index)">复制</el-button>
+                <el-button link type="danger" size="small" @click="delItem($index)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -535,11 +545,18 @@ onMounted(async () => {
 .ctrl-renderer { width: 130px; }
 .ctrl-type { width: 68px; }
 .ctrl-parent { width: 120px; }
-.ctrl-bond-mode { width: 70px; }
-.ctrl-miimon { width: 42px; }
-.ctrl-lacp { width: 55px; }
-.ctrl-primary { width: 110px; }
-.ctrl-vlan-id { width: 75px; }
+/* Bond/VLAN 参数：标签 + 控件两列网格（标签右对齐、控件占满剩余宽度）。
+   取代原先按控件写死的 .ctrl-* 宽度（70/42/55/110/75px）——那些宽度在 190px 列里必然换行。 */
+.param-grid {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--ot-space-1) var(--ot-space-2);
+}
+.param-grid .param-label { text-align: right; }
+.param-grid :deep(.el-select),
+.param-grid :deep(.el-input),
+.param-grid :deep(.el-input-number) { width: 100%; }
 
 /* 表格内的小字说明（字号统一走 token --ot-font-xs，颜色一律 var(--ot-*)） */
 .vlan-tag { font-size: var(--ot-font-xs); color: var(--ot-primary); }
