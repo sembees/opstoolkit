@@ -161,13 +161,16 @@ def get_pager_cmds(device_type: str) -> list:
     return ["terminal length 0"]
 
 
-# ── 老式 SSH 设备的握手失败：把"看不懂的报错"翻译成"能照着做的提示" ──────────────
-# 来由（2026-10-04 真机实测）：容器里是 paramiko 5.0.0，它**已彻底移除 `ssh-rsa` 主机密钥算法**
-# （`_key_info` 里没有 ssh-rsa，设备一旦只提供它，paramiko 直接 `KeyError: 'ssh-rsa'`），
-# 老式 kex（`diffie-hellman-group14-sha1`、`kex_group1`）也已移出默认。
-# 于是**只支持 ssh-rsa 的老设备（大量在用的老 H3C/华为/思科机型）一律连不上**，
-# 报的是 "Incompatible ssh peer (no acceptable host key / kex algorithm)" ——
-# 运维极易误判成"账号密码错"。这里把它翻译成明确的处置步骤。
+# ── 老设备 SSH 支持：自检 + 失败时的可执行提示 ────────────────────────────────
+# 来由（2026-10-04 真机事故）：paramiko 是 netmiko 的**传递依赖**、以前没钉版本，
+# 于是飘到了 5.0.0 —— 而 5.0.0 **彻底删除**了 SHA-1 那套实现（`KexGroup14`/`kex_group1`/`DSSKey` 都没了、
+# `RSAKey.HASHES` 里也去掉了 `ssh-rsa`）。后果：**只支持 ssh-rsa 的老设备（大量在用机型）全部连不上**，
+# 报的是英文 `Incompatible ssh peer (no acceptable host key / kex algorithm)`，运维极易误判成"账号密码错"。
+# 处置：requirements.txt 里**钉住 paramiko==3.5.1**（仍带 ssh-rsa 与 group14-sha1，且含 Terrapin 修复）。
+# 本模块负责两件事：
+#   1) `legacy_ssh_support()`：自检运行环境是否仍带老算法（启动告警 + /health 可见），
+#      这样**将来镜像重建把 paramiko 又飘上去时不会悄悄失效**；
+#   2) 连接真失败时，把英文底层报错翻译成"能照着做"的中文提示（原始错误保留在末尾）。
 _LEGACY_SSH_SIGNS = (
     "no acceptable host key",
     "no acceptable kex algorithm",
@@ -179,15 +182,45 @@ _LEGACY_SSH_SIGNS = (
 )
 
 _LEGACY_SSH_HINT = (
-    "该设备只提供**老式 SSH 主机密钥/算法**（ssh-rsa / SHA-1），而巡检所用的 SSH 库较新、已移除这些算法，"
-    "因此在**握手阶段**就失败 —— 这不是账号密码问题，换密码也没用。两种处置：\n"
-    "  ①【推荐，不动服务】在设备上生成较新的主机密钥后重试：\n"
-    "      华三 Comware： public-key local create ecdsa secp256r1\n"
-    "      华为 VRP    ： ecc local-key-pair create   （或 rsa local-key-pair create）\n"
-    "      思科 IOS    ： crypto key generate rsa modulus 2048  （IOS 15.2+ 会提供 rsa-sha2-256/512）\n"
-    "  ②【需产品侧改动】由管理员把巡检服务的 SSH 库降到仍支持 ssh-rsa 的版本"
-    "（能连上老设备，但会降低整条链路的 SSH 安全基线，需评估）。"
+    "SSH 握手失败：设备与巡检服务的算法对不上 —— **不是账号密码问题**（换密码没用）。\n"
+    "  本应用会主动尝试老式算法（ssh-rsa、diffie-hellman-group14-sha1/group1-sha1、AES-CBC、hmac-sha1），"
+    "正常的老设备应当能连上；出现本条说明设备用的是**更老或非标准**的算法（例如只支持 ssh-dss、SSH v1，"
+    "或厂商私有算法），或者服务的 SSH 库被升级过、丢掉了老算法。排查顺序：\n"
+    "  ① 看服务是否仍带老算法：`GET /api/health` 的 `legacy_ssh` 字段（或启动日志）——"
+    "若显示不支持，把 paramiko 钉回 3.5.1（见 backend/requirements.txt 注释）；\n"
+    "  ② 若设备确实只支持更老的算法，可在**设备侧**生成较新主机密钥（推荐，不动服务）：\n"
+    "      华三 Comware： public-key local create ecdsa secp256r1   ← 本项已真机验证\n"
+    "      华为 VRP    ： ecc local-key-pair create（或 rsa local-key-pair create）\n"
+    "      思科 IOS    ： crypto key generate rsa modulus 2048\n"
+    "  ③ 若必须支持 ssh-dss / SSH v1 这类已淘汰算法，需单独评估（安全基线问题，不建议）。"
 )
+
+
+def legacy_ssh_support() -> tuple:
+    """自检：当前 SSH 库是否仍带老设备需要的算法。返回 `(是否支持, 说明)`。
+
+    为什么必须有这个自检：paramiko 一旦被升到 4/5，**所有只支持 ssh-rsa 的老设备会集体连不上**，
+    而故障现象是英文报错、极易被误判成"密码错"。把它暴露到 `/health` 与启动日志，运维一眼能看出根因。
+    """
+    try:
+        from paramiko.transport import Transport
+
+        keys = set(Transport._preferred_keys) | set(getattr(Transport, "_key_info", {}))
+        kex = set(Transport._preferred_kex)
+        has_key = "ssh-rsa" in keys
+        has_kex = bool(kex & {"diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1",
+                              "diffie-hellman-group-exchange-sha1"})
+        if has_key and has_kex:
+            return True, "SSH 库支持老式算法（ssh-rsa + SHA-1 kex），可巡检老设备"
+        missing = []
+        if not has_key:
+            missing.append("ssh-rsa 主机密钥")
+        if not has_kex:
+            missing.append("SHA-1 密钥交换")
+        return False, ("当前 SSH 库缺少：%s —— 只支持老式算法的设备将无法巡检；"
+                       "请把 paramiko 钉回 3.5.1（见 backend/requirements.txt）" % "、".join(missing))
+    except Exception as e:  # noqa: BLE001
+        return False, "SSH 库能力自检失败：%r" % (e,)
 
 
 def _friendly_ssh_error(exc: Exception) -> str:

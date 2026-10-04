@@ -1,4 +1,5 @@
 """FastAPI 应用入口。"""
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -16,9 +17,15 @@ async def lifespan(app: FastAPI):
 
     ensure_secret_key()
     await init_db()
-    from app.ct.inspection.service import recover_interrupted_tasks
+    from app.ct.inspection.service import legacy_ssh_support, recover_interrupted_tasks
 
     await recover_interrupted_tasks()
+    # ★ 老设备 SSH 兼容性自检：paramiko 是传递依赖，一旦被镜像重建升到 4/5 就会**静默丢掉
+    #   ssh-rsa/SHA-1 kex**，届时只支持老算法的设备会集体连不上（2026-10-04 真机事故）。
+    #   启动就吼一声，别等到用户点巡检才发现。
+    _legacy_ok, _legacy_why = legacy_ssh_support()
+    if not _legacy_ok:
+        logging.getLogger(__name__).warning("【老设备巡检能力缺失】%s", _legacy_why)
     yield
 
 
@@ -40,7 +47,12 @@ app.include_router(api_router, prefix=settings.api_prefix)
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "app": settings.app_name}
+    """健康检查。★ `legacy_ssh` 暴露"能否巡检老设备"：只有支持 ssh-rsa/SHA-1 kex 的 SSH 库
+    才能连上大量在用的老机型（详见 app/ct/inspection/service.py 里的自检说明）。"""
+    from app.ct.inspection.service import legacy_ssh_support
+
+    ok, why = legacy_ssh_support()
+    return {"status": "ok", "app": settings.app_name, "legacy_ssh": ok, "legacy_ssh_detail": why}
 
 
 # PXE/ZTP HTTP 文件服务 (本机部署后生效，必须在根路径前注册)

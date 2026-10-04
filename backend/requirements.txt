@@ -8,6 +8,15 @@ passlib[bcrypt]==1.7.4
 python-multipart==0.0.20
 cryptography==44.0.0
 netmiko==4.4.0
+# ★ paramiko 必须钉住（2026-10-04 真机事故的根因）：
+#   以前这里没有 paramiko，它作为 netmiko 的传递依赖**飘到了 5.0.0**，而 5.0.0 已经
+#   **彻底删除**了 SHA-1 那套实现：`KexGroup14`(group14-sha1) 类被删、`kex_group1` 模块没了、
+#   `DSSKey` 没了、`RSAKey.HASHES` 里也去掉了 `ssh-rsa`。后果是**只支持 ssh-rsa 的老设备
+#   一律连不上**（握手阶段就报 `Incompatible ssh peer (no acceptable host key / kex algorithm)`），
+#   而运维极易误判成"账号密码错"。
+#   3.5.1 仍带 `ssh-rsa` 与 `diffie-hellman-group14-sha1`，且已含 Terrapin(CVE-2023-48795) 修复（3.4+）。
+#   升级 paramiko 到 4/5 之前**必须先确认老设备兼容性**，否则巡检会对老设备集体失效。
+paramiko==3.5.1
 textfsm==1.1.3
 jinja2==3.1.5
 apscheduler==3.11.0

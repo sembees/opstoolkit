@@ -182,8 +182,9 @@ class LegacySshHintTest(unittest.TestCase):
     def test_host_key_error_gets_actionable_hint(self):
         msg = service._friendly_ssh_error(
             Exception("Incompatible ssh peer (no acceptable host key)"))
-        self.assertIn("老式 SSH 主机密钥", msg)
-        self.assertIn("public-key local create ecdsa secp256r1", msg)   # 华三
+        self.assertIn("算法对不上", msg)
+        self.assertIn("不是账号密码问题", msg)
+        self.assertIn("public-key local create ecdsa secp256r1", msg)   # 华三（已真机验证）
         self.assertIn("ecc local-key-pair create", msg)                  # 华为
         self.assertIn("crypto key generate rsa", msg)                    # 思科
         self.assertIn("no acceptable host key", msg)                     # ★ 原始错误必须保留
@@ -191,26 +192,59 @@ class LegacySshHintTest(unittest.TestCase):
     def test_kex_error_gets_hint(self):
         msg = service._friendly_ssh_error(
             Exception("Incompatible ssh peer (no acceptable kex algorithm)"))
-        self.assertIn("老式 SSH", msg)
+        self.assertIn("算法对不上", msg)
         self.assertIn("no acceptable kex algorithm", msg)
 
     def test_paramiko5_keyerror_ssh_rsa_gets_hint(self):
         """paramiko 5 遇到 ssh-rsa 时会抛 KeyError('ssh-rsa')，也要能识别。"""
         msg = service._friendly_ssh_error(KeyError("ssh-rsa"))
-        self.assertIn("老式 SSH", msg)
+        self.assertIn("算法对不上", msg)
         self.assertIn("ssh-rsa", msg)
 
     def test_auth_failure_is_not_mislabeled(self):
-        """★ 反向护栏：认证失败**不能**被误报成"老式算法"问题，否则运维会去改错方向。"""
+        """★ 反向护栏：认证失败**不能**被误报成"算法"问题，否则运维会去改错方向。"""
         msg = service._friendly_ssh_error(Exception(
             "Authentication to device failed. Common causes of this problem are: "
             "1. Invalid username and password 2. Incorrect SSH-key 3. Incorrect configuration"))
-        self.assertNotIn("老式 SSH", msg)
+        self.assertNotIn("算法对不上", msg)
         self.assertIn("Authentication to device failed", msg)
 
     def test_unrelated_error_passes_through_unchanged(self):
         self.assertEqual(service._friendly_ssh_error(TimeoutError("connect timed out")),
                          "TimeoutError: connect timed out")
+
+
+class LegacySshSupportSelfCheckTest(unittest.TestCase):
+    """★ 护栏：自检必须能识别"当前 SSH 库还带不带老算法"。
+
+    这是防止**镜像重建把 paramiko 又飘到 4/5** 的护栏 —— 那次事故里老设备是"集体"连不上，
+    而报错是英文的，运维会误判成密码错。把能力暴露到 /health 与启动日志后，一眼能看出根因。
+    """
+
+    def test_current_env_supports_legacy(self):
+        ok, why = service.legacy_ssh_support()
+        self.assertTrue(ok, "当前环境应支持老设备（requirements 已钉 paramiko==3.5.1）：%s" % why)
+        self.assertIn("ssh-rsa", why)
+
+    def test_detects_a_modern_paramiko_without_legacy_algorithms(self):
+        """模拟 paramiko 4/5：既没有 ssh-rsa、也没有 SHA-1 kex ⇒ 必须判为不支持并给出修法。"""
+        from paramiko.transport import Transport
+
+        old_keys, old_kex = Transport._preferred_keys, Transport._preferred_kex
+        old_key_info = getattr(Transport, "_key_info", None)
+        try:
+            Transport._preferred_keys = ("rsa-sha2-256", "ssh-ed25519")
+            Transport._preferred_kex = ("curve25519-sha256@libssh.org", "diffie-hellman-group14-sha256")
+            if isinstance(old_key_info, dict):
+                Transport._key_info = {k: v for k, v in old_key_info.items() if k != "ssh-rsa"}
+            ok, why = service.legacy_ssh_support()
+            self.assertFalse(ok, "缺 ssh-rsa/SHA-1 kex 时必须判为不支持")
+            self.assertIn("3.5.1", why)
+            self.assertIn("ssh-rsa", why)
+        finally:
+            Transport._preferred_keys, Transport._preferred_kex = old_keys, old_kex
+            if old_key_info is not None:
+                Transport._key_info = old_key_info
 
 
 if __name__ == "__main__":
