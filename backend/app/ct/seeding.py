@@ -20,7 +20,10 @@ async def seed_default_templates() -> None:
             for tmpl_name, metric_cmds in drv.templates().items():
                 items = [
                     {"key": mc.key, "label": mc.label, "command": mc.command,
-                     "textfsm": mc.textfsm, "unit": mc.unit}
+                     "textfsm": mc.textfsm, "unit": mc.unit,
+                     # 候选命令（主命令被设备拒时依次尝试）；老库没有该字段，
+                     # service._resolve_template_cmds 会按 key+command 从驱动回填
+                     "alt_commands": list(mc.alt_commands or ())}
                     for mc in metric_cmds
                 ]
                 db.add(InspectionTemplate(

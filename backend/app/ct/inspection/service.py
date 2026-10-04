@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from dataclasses import replace as _dc_replace
 from typing import Callable, Optional
 
 from sqlalchemy import select
@@ -13,7 +14,7 @@ from app.config import settings
 from app.core import crud, models
 from app.ct.drivers import get_driver, infer_netmiko_device_type
 from app.ct.drivers.base import MetricCommand
-from app.ct.inspection.parser import parse_output
+from app.ct.inspection.parser import is_command_rejected, parse_output
 from app.core.timeutil import utcnow
 from app.database import async_session
 
@@ -278,11 +279,45 @@ def _build_connect_params(asset: models.Asset, cred_plain: dict) -> dict:
     return params
 
 
+def _run_metric_command(conn, mc: MetricCommand, on_line, timeout: float) -> tuple:
+    """执行单个指标命令；主命令被设备拒绝时**自动依次尝试候选命令**（alt_commands）。
+
+    "被拒绝"判定用 parser.is_command_rejected：整段输出很短（≤6 行）且命中
+    "Unrecognized command / Too many parameters / % Invalid input …" 特征串 ——
+    即设备 CLI 明确报了"不认识这条命令"，而不是命令执行成功但内容异常。
+
+    返回 (output, tried, rejected, used_cmd)：
+      · tried    —— 实际依次执行过的命令（含主命令与已尝试的候选）；
+      · rejected —— 全部候选都被拒绝（True ⇒ 上层标 unsupported）；
+      · used_cmd —— 最后实际执行的命令（回显属于它）。
+    """
+    candidates = [mc.command] + [c for c in (mc.alt_commands or ()) if c and c != mc.command]
+    out = ""
+    tried = []
+    rejected = False
+    used = candidates[0]
+    for idx, cand in enumerate(candidates):
+        tried.append(cand)
+        # on_line 事件带上"实际执行的命令"与"是否是候选命令"（is_alt），前端据此展示
+        on_line({"type": "cmd", "cmd": cand, "label": mc.label, "key": mc.key,
+                 "is_alt": idx > 0, "attempt": idx + 1, "attempts": len(candidates)})
+        out = conn.send_command(cand, read_timeout=timeout)
+        rejected = is_command_rejected(out)
+        if rejected and idx < len(candidates) - 1:
+            on_line({"type": "cmd_fallback", "cmd": cand, "next_cmd": candidates[idx + 1],
+                     "label": mc.label, "key": mc.key, "reason": "设备不识别该命令"})
+            continue
+        used = cand
+        break
+    return out, tried, rejected, used
+
+
 def _connect_and_run(params, key_text, metric_cmds, custom_cmds, disable_pager, on_line):
     """连接设备，执行巡检命令，收集输出。
 
     流程：创建 SSH 连接 → 进入 enable 模式（若配了 secret）
-    → 禁用分页 → 逐条执行指标命令 → 执行自定义命令
+    → 禁用分页 → 逐条执行指标命令（主命令被拒时自动试候选命令 alt_commands）
+    → 执行自定义命令
     → 收集所有输出并通过 on_line 回调通知上层。
     如果有 SSH 密钥，会写入临时文件并在 finally 中清理。
     """
@@ -312,10 +347,14 @@ def _connect_and_run(params, key_text, metric_cmds, custom_cmds, disable_pager, 
                     except Exception:
                         pass
             for mc in metric_cmds:
-                on_line({"type": "cmd", "cmd": mc.command, "label": mc.label})
-                out = conn.send_command(mc.command, read_timeout=settings.inspection_timeout)
-                outputs.append({"cmd": mc.command, "label": mc.label, "key": mc.key, "unit": mc.unit, "textfsm": mc.textfsm, "output": out})
-                on_line({"type": "output", "cmd": mc.command, "output": out})
+                out, tried, rejected, used = _run_metric_command(
+                    conn, mc, on_line, settings.inspection_timeout)
+                outputs.append({"cmd": used, "label": mc.label, "key": mc.key,
+                                "unit": mc.unit, "textfsm": mc.textfsm, "output": out,
+                                "tried": tried, "rejected": rejected,
+                                "is_alt": used != mc.command})
+                on_line({"type": "output", "cmd": used, "label": mc.label, "key": mc.key,
+                         "output": out, "is_alt": used != mc.command, "rejected": rejected})
             for c in custom_cmds:
                 on_line({"type": "cmd", "cmd": c, "label": c})
                 out = conn.send_command(c, read_timeout=settings.inspection_timeout)
@@ -325,6 +364,54 @@ def _connect_and_run(params, key_text, metric_cmds, custom_cmds, disable_pager, 
         if key_file and os.path.exists(key_file):
             os.remove(key_file)
     return outputs
+
+
+def _finalize_metric_parse(item: dict, device_type: str = "") -> dict:
+    """单条命令输出 → 解析结果 {parsed, summary, status}。
+
+    ★ 所有候选命令都被设备拒绝 ⇒ status="unsupported"，摘要写成人话：
+      "该机型不支持此指标（已尝试：display environment）" ——
+      明确区分"设备没有这个指标特性"与"命令支持但没解析出来（unknown）"。
+
+    注：`command` 这里保持与历史行为一致不传（旧代码 `item.get("command")` 是个
+    永远取到空串的笔误，等于 ntc-templates 在服务链路从未生效）。command 参数
+    只影响 ntc 模板选择，若现在把它接通，华为 version/device/temperature 等
+    指标会被 reroute 到未经真机验证的 ntc 模板（无法用基线证明不回归），故不动。
+    """
+    if item.get("rejected"):
+        tried = [c for c in (item.get("tried") or [item.get("cmd") or ""]) if c]
+        return {"parsed": None, "status": "unsupported",
+                "summary": "该机型不支持此指标（已尝试：%s）" % "、".join(tried)}
+    return parse_output(item.get("key", ""), item.get("output") or "",
+                        item.get("textfsm", ""), device_type=device_type)
+
+
+def _inherit_alt_commands(cmds: list, vendor: str) -> list:
+    """DB 模板项未配置 alt_commands 时，从内置驱动同 key+同命令的指标继承候选命令。
+
+    为什么必须做：存量部署的 DB 里已经种过系统模板（items 里没有 alt_commands
+    字段），seeding 只在"表里没有任何系统模板"时才写库 —— 只改驱动、不改这里，
+    候选回退对老库永远不会生效。按 (key, command) 精确匹配回填；用户显式配置过
+    alt_commands 的项不被覆盖。
+    """
+    if not cmds:
+        return cmds
+    try:
+        driver = get_driver(vendor)
+        fallback = {(m.key, m.command): tuple(m.alt_commands)
+                    for m in driver.standard_metrics() if m.alt_commands}
+    except Exception:  # noqa: BLE001 — 继承失败不阻塞巡检
+        return cmds
+    if not fallback:
+        return cmds
+    out = []
+    for mc in cmds:
+        if not mc.alt_commands:
+            alt = fallback.get((mc.key, mc.command))
+            if alt:
+                mc = _dc_replace(mc, alt_commands=alt)
+        out.append(mc)
+    return out
 
 
 async def _resolve_template_cmds(db, asset, template_name):
@@ -347,10 +434,14 @@ async def _resolve_template_cmds(db, asset, template_name):
     row = (await db.execute(stmt)).scalar_one_or_none()
 
     if row is not None and row.items:
-        return [MetricCommand(
-            it["key"], it["label"], it["command"],
-            it.get("textfsm", ""), it.get("unit", ""),
+        # ★ unit/textfsm/alt_commands 必须用关键字传参：此前按位置传会把 unit 落进
+        #   regex 字段（MetricCommand 第 5 个位置参数是 regex），unit 一直悄悄丢失。
+        cmds = [MetricCommand(
+            it.get("key", ""), it.get("label", ""), it.get("command", ""),
+            textfsm=it.get("textfsm", ""), unit=it.get("unit", ""),
+            alt_commands=tuple(it.get("alt_commands") or ()),
         ) for it in row.items]
+        return _inherit_alt_commands(cmds, vendor)
 
     # 回落：驱动内置
     driver = get_driver(vendor)
@@ -403,7 +494,7 @@ async def inspect_one(db: AsyncSession, asset: models.Asset, kind: str = "defaul
     metrics = {}
     raw = []
     for item in outputs:
-        pr = parse_output(item["key"], item["output"], item.get("textfsm", ""), device_type=params.get("device_type", ""), command=item.get("command", ""))
+        pr = _finalize_metric_parse(item, device_type=params.get("device_type", ""))
         entry = {"cmd": item["cmd"], "label": item["label"], "key": item["key"],
                  "output": item["output"], "parsed": pr["parsed"],
                  "summary": pr["summary"], "status": pr["status"]}

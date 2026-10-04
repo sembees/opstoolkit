@@ -12,6 +12,11 @@ class MetricCommand:
     textfsm: str = ""
     regex: list = field(default_factory=list)
     unit: str = ""
+    # ★ 候选命令回退（2026-10-05）：同一指标在不同机型/版本上的命令名不一致
+    #   （如 H3C 部分交换机不认 `display alarm urgent` 只认 `display alarm`）。
+    #   按优先级排列的替代命令；主命令被设备拒绝时依次尝试（见 inspection/service.py）。
+    #   全部候选都被拒绝 ⇒ 该指标标记为 unsupported（"该机型不支持此指标"）。
+    alt_commands: tuple = ()
 
 
 class BaseDriver:

@@ -1,8 +1,10 @@
-Value SLOT (\S+)
-Value SENSOR (\S+)
-Value TEMPERATURE (\d+)
+Value SLOT (\d+(?:/\d+){0,2})
+Value SENSOR (\S+(?:\s+\d+)?)
+Value Required TEMPERATURE (-?\d+(?:\.\d+)?)
+Value LOWER_LIMIT (-?\d+(?:\.\d+)?)
+Value WARNING_LIMIT (-?\d+(?:\.\d+)?)
+Value ALARM_LIMIT (-?\d+(?:\.\d+)?)
 
 Start
-  ^\s*${SLOT}\s+${SENSOR}\s+${TEMPERATURE}.* -> Record
-  ^.*hotspot.* -> Continue
+  ^\s*${SLOT}\s+${SENSOR}\s+${TEMPERATURE}\s+${LOWER_LIMIT}\s+${WARNING_LIMIT}\s+${ALARM_LIMIT}\s*$$ -> Record
   ^. -> Continue

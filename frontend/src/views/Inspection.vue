@@ -363,8 +363,10 @@ function vendorLabel(v) {
   return { h3c: 'H3C', huawei: '华为', cisco: '思科', generic: '通用' }[v] || v
 }
 
+// 指标状态 → 颜色。unsupported（该机型不支持此指标，所有候选命令都被设备拒绝）
+// 用中性灰，不当成功也不当故障 —— 文案由后端摘要给出（"该机型不支持此指标（已尝试：…）"）。
 function statusColor(s) {
-  return { ok: 'var(--ot-success)', warning: 'var(--ot-warning)', critical: 'var(--ot-danger)', unknown: 'var(--ot-text-3)' }[s] || 'var(--ot-text-3)'
+  return { ok: 'var(--ot-success)', warning: 'var(--ot-warning)', critical: 'var(--ot-danger)', unknown: 'var(--ot-text-3)', unsupported: 'var(--ot-text-3)' }[s] || 'var(--ot-text-3)'
 }
 
 // 「变化」列：后端 compare.py 在没有数值差时给的是英文枚举（same / changed），
@@ -531,7 +533,10 @@ async function startInspection() {
     // 任务落库确认：服务端建好任务后先回推 task_id，记下来供「下载结果」导出用
     if (msg.type === 'task') lastTaskId.value = msg.task_id || ''
     else if (msg.type === 'start') pushLine('\n--- ' + msg.asset_name + ' ---', 'info', msg.asset_id, msg.asset_name)
-    else if (msg.type === 'cmd') pushLine('> ' + msg.cmd, 'cmd', msg.asset_id, msg.asset_name)
+    // cmd 事件带 is_alt（是否候选命令）与 attempt/attempts：候选命令标注展示
+    else if (msg.type === 'cmd') pushLine('> ' + msg.cmd + (msg.is_alt ? '（候选命令 ' + (msg.attempt || '?') + '/' + (msg.attempts || '?') + '）' : ''), 'cmd', msg.asset_id, msg.asset_name)
+    // 主命令被设备拒绝、自动切候选命令的提示行
+    else if (msg.type === 'cmd_fallback') pushLine('[命令不支持，切换候选] ' + msg.cmd + ' → ' + msg.next_cmd, 'warn', msg.asset_id, msg.asset_name)
     else if (msg.type === 'output') msg.output.split('\n').forEach(l => { if (l.trim()) pushLine(l, 'info', msg.asset_id, msg.asset_name) })
     else if (msg.type === 'error') pushLine('[ERROR] ' + msg.error, 'err', msg.asset_id, msg.asset_name)
     else if (msg.type === 'done') pushLine('[完成] ' + msg.asset_name, 'ok', msg.asset_id, msg.asset_name)

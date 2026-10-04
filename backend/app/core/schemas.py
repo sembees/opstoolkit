@@ -433,6 +433,9 @@ class TemplateItemIn(BaseModel):
     command: str = ""
     textfsm: str = ""
     unit: str = ""
+    # 候选命令（按优先级）：主命令被设备拒绝时由 service 层依次尝试（可选字段，
+    # 老模板没有该字段时由 service 按内置驱动同 key+命令回填）
+    alt_commands: list[str] = []
 
 
 class InspectionTemplateIn(BaseModel):
