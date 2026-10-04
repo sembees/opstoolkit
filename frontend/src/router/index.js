@@ -14,7 +14,9 @@ export const HELP_TOPICS = {
   pxe: 'PXE 装机',
   ztp: 'ZTP 开局',
   deploy: '部署指南',
-  'netconfig-usage': '网络配置生成器使用指南',
+  // 原为「网络配置生成器使用指南」——主题列表里会被截断成与 netconfig 同名（都是「网络配置生成」），
+  // 用户分不清两个 tab；这里收短成能完整显示的区分名（slug 不变，旧链接 /help/netconfig-usage 仍有效）。
+  'netconfig-usage': '配置生成器用法',
   concept: '常见概念',
 }
 
