@@ -32,7 +32,9 @@
               <el-option v-for="t in tpls" :key="t.id" :value="t.id" :label="t.name + (t.is_system ? ' (系统)' : ' (自定义)') + ' - ' + t.items.length + '项'" />
             </el-option-group>
           </el-select>
-          <el-button type="info" plain size="small" @click="openTemplates">
+          <!-- 工具条里统一**默认 size**：同行两 个 el-select、「开始巡检」「清屏」都是默认（32px），
+               这里原先写死 size="small" 会矮一截、整行高矮不齐（审计实测 24/30/32 并存）。 -->
+          <el-button type="info" plain @click="openTemplates">
             <el-icon><Setting /></el-icon> 模板管理
           </el-button>
           <el-tag v-if="currentTemplate" size="small" :type="currentTemplate.is_system ? 'info' : 'warning'">

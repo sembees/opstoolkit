@@ -102,11 +102,15 @@ async function replayTask(row) {
 }
 
 
+// 四张指标卡图标必须**同一族**（都描边、笔画粗细相当）。
+// 原为 Monitor / Platform / DataAnalysis / List：其中 Platform 与 List 字形实心感很重，
+// 与另两个描边图标混在一起显得不齐（审计的"描边/实心混用"，已看图确认）。
+// 换成 Monitor / Cpu / DataAnalysis / Tickets —— 四个都是描边族、粗细相近。
 const statCards = ref([
   { label: "CT 设备", value: 0, icon: "Monitor", color: "var(--ot-accent-1)" },
-  { label: "IT 服务器", value: 0, icon: "Platform", color: "var(--ot-accent-2)" },
+  { label: "IT 服务器", value: 0, icon: "Cpu", color: "var(--ot-accent-2)" },
   { label: "巡检模板", value: 0, icon: "DataAnalysis", color: "var(--ot-accent-3)" },
-  { label: "巡检任务", value: 0, icon: "List", color: "var(--ot-accent-4)" },
+  { label: "巡检任务", value: 0, icon: "Tickets", color: "var(--ot-accent-4)" },
 ])
 
 const statusTag = (s) => ({ done: "success", running: "warning", failed: "danger", pending: "info" }[s] || "info")
