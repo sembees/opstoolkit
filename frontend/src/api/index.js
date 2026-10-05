@@ -37,7 +37,11 @@ export function flattenDetail(detail, fallback = '请求失败', sep = '；') {
 http.interceptors.response.use(
   (res) => res.data,
   (err) => {
-    if (err.response?.status === 401) {
+    // 401 默认当作「登录已失效」处理（清 token + 跳登录页）。例外：改口令接口
+    // POST /auth/password 用 401 表示「原口令不正确」这种业务校验失败（见
+    // backend/app/api/auth.py:39）—— 请求带 _keepAuth 时不触发登出，由调用方自己
+    // 弹后端 detail；否则用户输错一次原口令就被强制踢回登录页，改密码反而把人登出。
+    if (err.response?.status === 401 && !err.config?._keepAuth) {
       localStorage.removeItem('opstk_token')
       localStorage.removeItem('opstk_user')
       if (location.pathname !== '/login') location.href = '/login'

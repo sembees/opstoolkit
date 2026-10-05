@@ -1661,6 +1661,22 @@ class PxeDiskConfigApiTest(unittest.TestCase):
                 else:
                     self.assertIn(needle, detail, label)
 
+    def test_unparseable_data_disk_size_is_422_at_save(self):
+        """R2-L1：解析不了的 size 在**保存模板**（POST /profiles）时就 422，
+        detail 点名字段并给出可读写法 —— 不再等"生成配置"才炸。"""
+        client = self._client()
+        for bad in ("三十G", "30P"):
+            with self.subTest(size=bad):
+                r = client.post("/api/it/pxe/profiles", json={
+                    "name": "x", "os_type": "rhel", "admin_password": "Test@123",
+                    "disk_config": {"target": {"mode": "auto"}, "layout": "custom",
+                                    "partitions": [{"mount": "/", "size": "rest"}],
+                                    "data_disks": [{"size": bad}]}})
+                self.assertEqual(r.status_code, 422, r.text)
+                detail = json.dumps(r.json()["detail"], ensure_ascii=False)
+                self.assertIn("data_disks[0].size 解析不了", detail)
+                self.assertIn(bad, detail)
+
 
 class PxeDiskValidationTest(unittest.TestCase):
     """规格 §4/§6：非法输入必须被拒，且 detail 要点明是哪个字段（含第几个分区）。"""
@@ -1834,6 +1850,109 @@ class PxeDiskValidationTest(unittest.TestCase):
                                mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/",
                                disk_config=dc))["ks.cfg"]
         self.assertEqual(_ks_disk_block(ks), LEGACY_KS_LVM)
+
+
+class R2L1SizeSerialAtSaveTest(unittest.TestCase):
+    """R2-L1：data_disks 的 size/serial/wwid 校验**前移到保存期**，且复用生成器那份实现。
+
+    改前（实测）：schema 只有一道自抄的字形正则，与生成器 `_size_to_bytes` 是两套规则，
+    已经漂移 —— '30P' / '30i' / 全角'３０G' 字形合法、能保存进库，到"生成配置"时才报
+    "disk_config.data_disks[0].size 无法解析"。运维在保存时得不到反馈，以为存好了。
+    现在 schema 保存期直接调用 generator._size_to_bytes / _safe_matcher_value 复算
+    （import 同一份函数，不是第二套规则）。
+    """
+
+    PARTS = [{"mount": "/boot/efi", "size": "512M", "fstype": "fat32"},
+             {"mount": "/", "size": "rest", "fstype": "ext4"}]
+
+    def _save(self, dd):
+        """返回 None = 保存成功；否则返回报错文本（pydantic 的 ValidationError 是 ValueError 子类）。"""
+        from app.core.schemas import PxeProfileIn
+        try:
+            PxeProfileIn(
+                name="t", os_type="rhel", os_version="9", admin_password="Test@123",
+                disk_scheme="custom",
+                disk_config={"target": {"mode": "auto"}, "layout": "custom",
+                             "partitions": self.PARTS, "data_disks": [dd]})
+            return None
+        except ValueError as e:
+            return str(e)
+
+    def test_unparseable_size_rejected_at_save(self):
+        """非法 size 在保存期即报错（改前 '30P'/'30i'/'３０G' 能存进数据库）。"""
+        from app.it.pxe.generator import _size_to_bytes
+        for bad in ("三十G", "30P", "30i", "３０G", "0G", "1e3", "-30G", "100%FREE"):
+            with self.subTest(bad=bad):
+                self.assertEqual(_size_to_bytes(bad), 0, bad)   # 生成器本来解析不了
+                err = self._save({"size": bad})
+                self.assertIsNotNone(err, bad)                  # 保存期必须拒
+                self.assertIn("data_disks[0].size 解析不了", err, bad)
+                self.assertIn(repr(bad), err, bad)
+        # 极大纯数字：_size_to_bytes 会 OverflowError（今天要等生成接口才炸成 500），
+        # 保存期同样按"解析不了"拒（422），不把溢出漏成保存期 500。
+        huge = "9" * 400
+        err = self._save({"size": huge})
+        self.assertIsNotNone(err)
+        self.assertIn("data_disks[0].size 解析不了", err)
+        self.assertIn(huge[:20], err)
+
+    def test_parseable_sizes_pass_at_save(self):
+        """合法写法保存期照常通过（含二进制/十进制/纯字节数/小写单位/带空格 GiB）。"""
+        for good in ("500G", "1T", "512M", "32212254720", "30G", "30GB", "1.5G",
+                     "30 GiB", "30k", "2KB", "3.5G"):
+            with self.subTest(good=good):
+                self.assertIsNone(self._save({"size": good}), good)
+
+    def test_save_acceptance_never_exceeds_generator_parseability(self):
+        """防漂移性质：凡是保存期放行的 size，生成器那份解析必然解析得动。
+
+        这是 R2-L1 的本质断言 —— schema 不再有自己的"能不能用"标准，解析对错只认
+        `_size_to_bytes` 一份裁决；将来生成器解析规则怎么改，这里自动跟着收口。
+        """
+        from app.it.pxe.generator import _size_to_bytes
+        corpus = ["30G", "500M", "1T", "512M", "32212254720", "30GB", "1.5G",
+                  "30 GiB", "30k", "2KB", "3.5G", "0G", "30P", "30i", "３０G",
+                  "三十G", "abc", "30GB x", "30G G", "1e3", "-30G", "100%FREE"]
+        for v in corpus:
+            with self.subTest(size=v):
+                err = self._save({"size": v})
+                if err is None:
+                    self.assertGreater(_size_to_bytes(v), 0, v)  # 放行 ⇒ 生成器解析得动
+                else:
+                    self.assertIn("data_disks[0].size", err, v)  # 拒绝 ⇒ 点名字段
+
+    def test_serial_wwid_reuse_generator_whitelist(self):
+        """serial/wwid 字符白名单与生成器同源：同一个函数对象、同一句报错文案。"""
+        from app.core import schemas
+        from app.it.pxe import generator
+        # 单一实现：schema 里用的就是 generator 那份函数（不是复制粘贴的副本）
+        self.assertIs(schemas._size_to_bytes, generator._size_to_bytes)
+        self.assertIs(schemas._safe_matcher_value, generator._safe_matcher_value)
+        for key in ("serial", "wwid"):
+            with self.subTest(key=key):
+                err = self._save({"size": "30G", key: 'x"; rm -rf /'})
+                self.assertIsNotNone(err)
+                self.assertIn(key, err)                  # 点名到字段
+                self.assertIn("含非法字符", err)          # 文案来自生成器那份实现
+        # 合法值照旧放行
+        self.assertIsNone(self._save({"size": "30G", "serial": "S3Z1NB0K123456"}))
+        self.assertIsNone(self._save({"size": "30G", "wwid": "naa.6000c29a-1b2c-3d4e"}))
+        # schema 侧保留比生成器更严的 128 长度上限（生成器没有长度上限，删掉会放宽）
+        err = self._save({"size": "30G", "serial": "a" * 129})
+        self.assertIsNotNone(err)
+        self.assertIn("超过 128", err)
+
+    def test_generator_layer_still_rejects_unparseable_size(self):
+        """第 3 层兜底仍在（generator 行为未变）：绕过 HTTP 直接 generate_all，
+        无法解析的 size 照样报"无法解析" —— 保存期前移没有移走生成期的防线。"""
+        dc = {"target": {"mode": "auto"}, "layout": "custom",
+              "partitions": self.PARTS, "data_disks": [{"size": "30P"}]}
+        with self.assertRaises(ValueError) as cm:
+            generate_all(_cfg(os_type="rhel", os_version="9",
+                              mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/",
+                              disk_config=dc))
+        self.assertIn("data_disks[0].size 无法解析", str(cm.exception))
+        self.assertIn("'30P'", str(cm.exception))
 
 
 class DeployIsolationTest(unittest.TestCase):

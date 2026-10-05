@@ -8,14 +8,23 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_serializer, model_validator
 
-# 磁盘标识的两样东西**只在 generator 里实现一次**，这里直接用，不做第二份：
-#   · _raid_part_ref —— raid.devices 三种写法（part.NN 1 起 / partN 0 起 / sdaN 1 起）的换算
-#   · RHEL_FAMILY    —— RHEL 家族判定（Ubuntu 独有的拒绝规则要按它分岔）
+# 磁盘标识的这几样东西**只在 generator 里实现一次**，这里直接用，不做第二份：
+#   · _raid_part_ref      —— raid.devices 三种写法（part.NN 1 起 / partN 0 起 / sdaN 1 起）的换算
+#   · RHEL_FAMILY         —— RHEL 家族判定（Ubuntu 独有的拒绝规则要按它分岔）
+#   · _size_to_bytes      —— data_disks.size 的**解析**（"30G"/"500M"/纯字节数 → 字节数；R2-L1）
+#   · _safe_matcher_value —— data_disks 的 serial/wwid 字符白名单（拼进 %pre 的 shell 串前的那道闸）
 # 理由：白名单这类**常量**可以用漂移测试锁住（见 test_schema_and_generator_whitelists_
 # do_not_drift），而**函数**锁不住 —— 两层各抄一份换算，基准一旦漂移就会让同一个 RAID 成员
 # 在校验层与生成层指到不同的分区（校验放行、生成物却把另一块分区做成 RAID 成员并抹掉它）。
-# 这也是本模块唯一一次 it/ → core/ 的反向依赖，为"单一换算来源"让路。
-from app.it.pxe.generator import RHEL_FAMILY as _RHEL_FAMILY, _raid_part_ref
+# R2-L1 是第二例：schema 自抄的 size 字形正则放行了 '30P'/'30i'/全角'３０G'，
+# 保存进库后到生成期才报"无法解析"—— 所以解析必须**调用同一份函数**，而不是再抄一遍。
+# 这也是本模块 it/ → core/ 的反向依赖，为"单一规则来源"让路。
+from app.it.pxe.generator import (
+    RHEL_FAMILY as _RHEL_FAMILY,
+    _raid_part_ref,
+    _safe_matcher_value,
+    _size_to_bytes,
+)
 # 物理口形式的管理接口判定：**同一份正则**，从 ct/ztp/generator.py 导入（那边是它唯一的用处）。
 # 为什么不各抄一份：两层各写一份"什么样的接口名算物理口"，迟早漂移成
 # "保存能过、生成被拒"或者反过来 —— 本项目已经在 RAID 成员换算上吃过一次这种亏（见上）。
@@ -836,14 +845,41 @@ class PxeDiskConfigIn(BaseModel):
             #   产物文本，值里带引号/空白/换行即可破坏脚本；size 写错格式则**匹配不上任何盘**，
             #   第 1 个数据盘声明一条都没命中 ⇒ 装机中止（fail-closed，但纯属白跑一趟）。
             sz = str(d.get("size") or "").strip()
+            # ★ R2-L1：size 能不能解析，**只认生成器那份解析**（_size_to_bytes，文件顶部
+            #   import；它同时是生成期 %pre 匹配串 s<字节> 的唯一实现）。原来 schema 只有
+            #   下面那道自抄的字形正则，两套规则实测已漂移：'30P'/'30i'/全角'３０G' 字形
+            #   合法、保存进库，到生成期 `_size_to_bytes` 返回 0 才报"无法解析"——
+            #   运维保存时得不到任何反馈。现在保存期就用同一份函数复算，解析不出字节的
+            #   size 一律 422；生成期那条从此只剩"绕过 HTTP 的调用方"的兜底意义。
+            if sz:
+                try:
+                    szb = _size_to_bytes(sz)
+                except OverflowError:
+                    # 极大纯数字（超出 float 上限）在 _size_to_bytes 里会溢出，生成期同样
+                    # 在这一步炸（今天表现为生成接口 500）——按同一句"解析不了"提前给 422。
+                    szb = 0
+                if szb <= 0:
+                    raise ValueError(
+                        f"data_disks[{i}].size 解析不了：{sz!r} —— 支持 500G / 1T / 512M "
+                        "这类写法（裸 G/M/T 按二进制、GB/MB/TB 按十进制；"
+                        "纯字节数如 32212254720 也认）")
+            # U7-F1 的字形正则**保留在解析检查之后**：它比生成器更严（'30K B' 生成器解析
+            # 得动、它不放行），删掉它等于放宽既有校验；先解析后字形，两层只会更严不会更松。
             if sz and not re.fullmatch(r"\d+(\.\d+)?\s*[KMGTPkmgtp]?i?[Bb]?", sz):
                 raise ValueError(
                     f"data_disks[{i}].size 格式不对：{sz!r}（可写 30G / 500M / 32212254720）")
             for k in ("serial", "wwid"):
                 val = str(d.get(k) or "").strip()
-                if val and not re.fullmatch(r"[A-Za-z0-9._:+-]{1,128}", val):
+                if not val:
+                    continue
+                # ★ R2-L1：serial/wwid 的字符白名单只有一份 —— generator._safe_matcher_value
+                #   （生成期把它们拼进 %pre 的 shell/awk 串之前用的就是它，报错文案也同源）。
+                #   schema 侧只**额外**保留 128 长度上限：生成器没有长度上限，若删掉这道
+                #   上限就等于放宽既有校验，故保留（schema 比生成期更严是安全方向）。
+                if len(val) > 128:
                     raise ValueError(
-                        f"data_disks[{i}].{k} 含非法字符（只允许字母数字与 . _ : + -）：{val[:40]!r}")
+                        f"data_disks[{i}].{k} 超过 128 个字符（{len(val)}）：{val[:40]!r}…")
+                _safe_matcher_value(val, k, i)
             # wipe=true 时产物里要**显式写到这块盘**（clearpart/ignoredisk 那几行），
             # 只给 size/serial/wwid 表达不出来 → 盘名必填。
             # 与 generator._disk_plan 里的同名护栏成对：这里让界面保存时就 422，

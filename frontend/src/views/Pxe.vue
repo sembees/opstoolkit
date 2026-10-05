@@ -189,7 +189,9 @@
               <el-select v-model="form.disk_scheme">
                 <el-option label="LVM (推荐)" value="lvm" />
                 <el-option label="直通分区" value="direct" />
-                <el-option label="ZFS" value="zfs" />
+                <!-- ZFS 选项已移除：后端 disk_scheme 白名单只收 lvm/direct/custom
+                     （backend/app/core/schemas.py _check_scheme），保留此项则保存必然 422；
+                     后端实现 ZFS 后再恢复。 -->
                 <el-option label="自定义分区表" value="custom" />
               </el-select>
             </el-form-item>
