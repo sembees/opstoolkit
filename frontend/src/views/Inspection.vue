@@ -211,7 +211,12 @@
         <el-table-column prop="label" label="指标名" width="140" />
         <el-table-column prop="command" label="下发命令" min-width="220" />
         <el-table-column prop="key" label="标识" width="100" />
-        <el-table-column prop="textfsm" label="解析模板" width="160" />
+        <!-- 解析模板列：值形如 `cisco_interface_brief.textfsm`，160px 时内容区仅 144px、
+             装不下 143px 的整串 ⇒ 全局 break-all 把它断成两行（实测第 6 行只剩孤字 `m`，
+             行高 63px 而其余行 40px，同行首行文字也比别的列高约 13px）。
+             修法：加宽到 176px（内容区 160px > 143px）**并且**加 show-overflow-tooltip ——
+             宽度只能救当前这个名字，更长的模板名仍会折行；overflow-tooltip 让它优雅省略、不再改变行高。 -->
+        <el-table-column prop="textfsm" label="解析模板" width="176" show-overflow-tooltip />
       </el-table>
     </el-dialog>
 
