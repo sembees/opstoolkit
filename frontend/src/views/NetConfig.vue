@@ -67,7 +67,7 @@
           <el-table-column label="#" width="30">
             <template #default="{ $index }">{{ $index + 1 }}</template>
           </el-table-column>
-          <el-table-column label="类型" width="74">
+          <el-table-column label="类型" width="68">
             <template #default="{ row }">
               <el-select v-model="row._type" size="small" @change="preview" class="ctrl-type">
                 <el-option label="物理" value="iface" />
@@ -77,7 +77,7 @@
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="接口名" width="112">
+          <el-table-column label="接口名" width="106">
             <template #default="{ row }">
               <span v-if="row._type==='vlan'" class="vlan-tag">{{ row.parent }}.{{ row.vlanId }}</span>
               <el-input v-else v-model="row.name" size="small" placeholder="eth0 / bond0 / br0" @input="preview" />
@@ -95,25 +95,25 @@
               <span v-else class="cell-static">static</span>
             </template>
           </el-table-column>
-          <el-table-column label="IP/掩码" width="132">
+          <el-table-column label="IP/掩码" width="118">
             <template #default="{ row, $index }">
               <el-input v-model="row.ip" size="small" placeholder="10.0.0.1/24" @input="preview"
                         :disabled="row.mode==='dhcp'" :class="{ 'input-invalid': errorRows.has($index) }" />
             </template>
           </el-table-column>
-          <el-table-column label="网关" width="100">
+          <el-table-column label="网关" width="94">
             <template #default="{ row }">
               <el-input v-model="row.gateway" size="small" placeholder="网关" @input="preview" :disabled="row.mode==='dhcp'" />
             </template>
           </el-table-column>
-          <el-table-column label="DNS" width="110">
+          <el-table-column label="DNS" width="88">
             <template #default="{ row }">
               <el-input v-model="row.dnsStr" size="small"
                         :placeholder="dnsPlaceholder(row)"
                         @input="onDnsChange(row)" :disabled="dnsDisabled(row)" />
             </template>
           </el-table-column>
-          <el-table-column label="从接口/父接口" min-width="120">
+          <el-table-column label="从接口/父接口" min-width="112">
             <template #default="{ row }">
               <el-input v-if="row._type==='bond' || row._type==='bridge'" v-model="row.slavesStr" size="small" :placeholder="row._type==='bond'?'eth0,eth1':'网口名'" @input="onSlavesChange(row)" />
               <el-select v-else-if="row._type==='vlan'" v-model="row.parent" size="small" @change="onVlanParentChange(row)" class="ctrl-parent">
@@ -125,7 +125,7 @@
           <!-- Bond/VLAN 参数：改成"标签 + 控件"的两列网格。
                原先所有控件塞在一个 inline 容器里（模式/miimon/lacp/hash/primary 挤成一行再换行），
                190px 宽根本放不下，看起来一团；现在每个参数一行、标签右对齐，参数随 mode 增减也一目了然。 -->
-          <el-table-column label="Bond/VLAN 参数" width="250">
+          <el-table-column label="Bond/VLAN 参数" width="282">
             <template #default="{ row }">
               <template v-if="row._type==='bond'">
                 <div class="param-grid">
@@ -539,8 +539,11 @@ onMounted(async () => {
 }
 
 /* 表单控件定宽（原内联宽度原样收编；控件宽度不属于被审计的布局高度硬编码） */
-.ctrl-os { width: 100px; }
-.ctrl-format { width: 100px; }
+/* 工具栏两个下拉：定宽 100px 时被截断成「RHEL / Ro..」「nmcli 脚本 …」（用户反馈的"挤压"）。
+   150px 仍差一点（截图实测仍是「RHEL / Rocky / Alm...」）⇒ 按完整文案所需给到 200px。
+   工具栏右侧原本约 205px 空档（按钮右对齐），加宽后仍有余量；极窄窗口下 .toolbar 是 wrap 换行而非挤压按钮。 */
+.ctrl-os { width: 200px; }
+.ctrl-format { width: 130px; }
 .ctrl-host { width: 120px; }
 .ctrl-renderer { width: 130px; }
 .ctrl-type { width: 68px; }

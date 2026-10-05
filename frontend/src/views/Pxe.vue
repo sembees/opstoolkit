@@ -120,7 +120,7 @@
     </CardSection>
 
     <!-- 模板编辑弹窗 -->
-    <el-dialog v-model="profileDialog" :title="editingId ? '编辑装机模板' : '新建装机模板'" width="760px" :close-on-click-modal="false">
+    <el-dialog v-model="profileDialog" :title="editingId ? '编辑装机模板' : '新建装机模板'" width="920px" :close-on-click-modal="false">
       <el-form :model="form" label-width="90px" size="default">
         <el-divider content-position="left">基本信息</el-divider>
         <el-row :gutter="12">
@@ -229,7 +229,7 @@
               </div>
             </el-form-item>
           </el-col>
-          <el-col :span="8">
+          <el-col :span="16">
             <el-form-item label="清空目标盘">
               <el-switch v-model="form.disk_wipe" />
               <span class="switch-note">

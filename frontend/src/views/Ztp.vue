@@ -175,14 +175,26 @@
         <el-row :gutter="12">
           <el-col :span="6"><el-form-item label="管理VLAN"><el-input-number v-model="form.mgmt_vlan" :min="1" :max="4094" class="w-full" /></el-form-item></el-col>
           <el-col :span="9"><el-form-item label="管理SVI">
-            <el-input v-model="form.mgmt_interface" placeholder="Vlan-interface10 / Vlanif10" />
+            <!-- 原这段 14 行说明把整行撑成一大块：压成一行摘要，全文收进输入框右侧信息图标的
+                 tooltip（写法仿 Pxe.vue 的 inline-unit / tip-body / tip-icon，样式均走 token）。 -->
+            <div class="inline-unit">
+              <el-input v-model="form.mgmt_interface" placeholder="Vlan-interface10 / Vlanif10" />
+              <el-tooltip placement="right" effect="light">
+                <template #content>
+                  <div class="tip-body">
+                    也可以填<b>物理口</b>（例：<code>GE1/0/24</code> / <code>WGE1/0/4</code>）——
+                    生成时会在它上面配管理 IP，并按平台先切三层（Comware <code>port link-mode route</code>、
+                    VRP8 <code>undo portswitch</code>、IOS <code>no switchport</code>）。
+                    H3C 与华为 VRP8 这两条已<b>真机验证</b>；VRP5/思科本环境没有镜像，
+                    产物里会标注「未真机验证」。物理口上的数字<b>不是</b> VLAN 号（不会再凭空建 VLAN），
+                    接入/上联端口仍按上面的「管理VLAN」划分。留空 = 按厂商推导 SVI。
+                  </div>
+                </template>
+                <el-icon class="tip-icon"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </div>
             <div class="form-hint">
-              也可以填<b>物理口</b>（例：<code>GE1/0/24</code> / <code>WGE1/0/4</code>）——
-              生成时会在它上面配管理 IP，并按平台先切三层（Comware <code>port link-mode route</code>、
-              VRP8 <code>undo portswitch</code>、IOS <code>no switchport</code>）。
-              H3C 与华为 VRP8 这两条已<b>真机验证</b>；VRP5/思科本环境没有镜像，
-              产物里会标注「未真机验证」。物理口上的数字<b>不是</b> VLAN 号（不会再凭空建 VLAN），
-              接入/上联端口仍按上面的「管理VLAN」划分。留空 = 按厂商推导 SVI。
+              可填物理口（例：<code>GE1/0/24</code> / <code>WGE1/0/4</code>），详见 ⓘ
             </div>
           </el-form-item></el-col>
           <el-col :span="9"><el-form-item label="掩码"><el-input v-model="form.mgmt_netmask" /></el-form-item></el-col>
@@ -191,7 +203,7 @@
           <el-col :span="8"><el-form-item label="网关"><el-input v-model="form.mgmt_gateway" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="DNS"><el-input v-model="form.dns_servers" placeholder="逗号分隔" /></el-form-item></el-col>
           <el-col :span="8"><el-form-item label="NTP">
-            <el-input v-model="form.ntp_server" placeholder="各现场不同；留空 = 不下发 NTP" />
+            <el-input v-model="form.ntp_server" placeholder="留空 = 不下发 NTP" />
           </el-form-item></el-col>
         </el-row>
         <el-form-item label="VLAN规划">
@@ -201,7 +213,11 @@
         <el-divider content-position="left">账号与安全</el-divider>
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="管理员"><el-input v-model="form.admin_user" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="管理员密码"><el-input v-model="form.admin_password" type="password" show-password placeholder="新建必填；编辑时留空=不修改" /></el-form-item></el-col>
+          <!-- 占位文案必须短到能在 span=8 的输入框（约 130px）里显示完：截图实测
+               「新建必填，编辑留空不改」仍会被截掉尾字。不能靠加宽这一列解决 ——
+               同行第三列是「Enable 密码」(cisco 厂商时出现)，8+10+8=26>24 会让思科场景折行。
+               完整语义在校验提示（下方 ElMessage）与使用帮助里都已写明。 -->
+          <el-col :span="8"><el-form-item label="管理员密码"><el-input v-model="form.admin_password" type="password" show-password placeholder="新建必填，编辑留空" /></el-form-item></el-col>
           <el-col :span="8" v-if="form.vendor === 'cisco'"><el-form-item label="Enable 密码"><el-input v-model="form.enable_secret" type="password" show-password /></el-form-item></el-col>
         </el-row>
         <el-row :gutter="12">
@@ -284,10 +300,14 @@
             </el-form-item>
           </el-col>
           <el-col :span="8"><el-form-item label="ZTP服务IP"><el-input v-model="genForm.server_ip" /></el-form-item></el-col>
-          <el-col :span="8" class="text-right">
-            <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
-          <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
-          <el-button type="warning" size="small" @click="doDeploy" :loading="deploying" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Promotion /></el-icon> 部署到本机</el-button>
+          <el-col :span="24">
+            <!-- 三个按钮原挤在 span=8 里、「部署到本机」被挤到第二行：改独占一行（span=24），
+                 收进 .dlg-actions（flex + gap，同 .card-actions 做法），右对齐、间距统一、不折行。 -->
+            <div class="dlg-actions">
+              <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
+              <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
+              <el-button type="warning" size="small" @click="doDeploy" :loading="deploying" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Promotion /></el-icon> 部署到本机</el-button>
+            </div>
           </el-col>
         </el-row>
         <!-- 参数改过而没重新生成：预览是旧的、下载/部署却按新参数走 ⇒ 必须显式挡住 -->
@@ -858,6 +878,23 @@ onMounted(async () => {
   gap: var(--ot-space-2);
 }
 .card-actions :deep(.el-button + .el-button) { margin-left: 0; }
+
+/* 生成弹窗按钮组：三个按钮独占一行（原 span=8 挤掉行），右对齐、间距统一走 token、不折行；
+   EP 相邻按钮自带 12px margin 改由 gap 接管（同上面 .card-actions 的做法） */
+.dlg-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ot-space-2);
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+.dlg-actions :deep(.el-button + .el-button) { margin-left: 0; }
+
+/* 输入框 + 行内图标（管理SVI 全文说明收进 tooltip）：仿 Pxe.vue 的 .inline-unit 做法 */
+.inline-unit { display: flex; align-items: center; gap: var(--ot-space-1); width: 100%; white-space: nowrap; }
+/* 悬浮长说明：tooltip 气泡内容限宽（#content slot 带 scoped 属性，样式可达传送后的节点） */
+.tip-body { max-width: 420px; font-size: var(--ot-font-xs); line-height: 1.6; }
+.tip-icon { color: var(--ot-text-3); cursor: help; }
 
 /* 落位登记卡头的模板选择框（原内联 210px 定宽原样收编） */
 .pos-template-select { width: 210px; }
