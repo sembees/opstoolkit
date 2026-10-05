@@ -130,8 +130,10 @@ except Exception:  # noqa: BLE001
     pass
 
 # 装机镜像（ISO）单独挂一个静态路径。
-# 现有的 ISO 上传/列表/删除都作用于 /srv/opstk/iso，所以挂这一个目录就实现
-# "上传完即可用"，且支持任意多个不同系统的镜像。
+# ★ 更正（2026-10-05）：这里原来写"现有的 ISO 上传/列表/删除都作用于 /srv/opstk/iso"
+#   —— 前半句不成立：**应用没有 ISO 上传接口**（只有 list / extract / delete），
+#   镜像要靠 scp/共享目录**手工放进** /srv/opstk/iso。挂这个目录的真实意义是：
+#   放进去就**立即可用**（列表能看见、提取能取到、casper 能按 url= 取），不需要再重启服务。
 # casper 的 url=<iso> 会把这个文件取到内存并 loop 挂载，再从里面找 casper/*.squashfs——
 # 这是 live 介质能被找到的前提（只给一个裸 squashfs 是不行的）。
 class _IsoOnlyStatic(StaticFiles):

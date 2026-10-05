@@ -1616,7 +1616,9 @@ class NetVlanIn(BaseModel):
 class NetBridgeIn(BaseModel):
     name: str                       # br0
     interfaces: list[str]
-    # mode：前端网桥行有 static/dhcp 下拉，但模型没有该字段 → 选择被静默忽略。
+    # ★ 更正（2026-10-05）：这里原来写"前端网桥行有 static/dhcp 下拉，但模型没有该字段
+    #   → 选择被静默忽略"—— **不成立**：mode 字段就在下一行，前端也确实会发
+    #   （NetConfig.vue 的 buildPayload 对 bridges 传 `mode: row.mode || null`）。
     # None = 自动（有 ip 即静态，无 ip 即 L2/不配地址），保持老请求（不带 mode）的行为不变。
     mode: Optional[str] = None
     ip: Optional[str] = None
