@@ -505,10 +505,14 @@
             </el-form-item>
           </el-col>
           <el-col :span="6"><el-form-item label="主机名"><el-input v-model="genForm.hostname" /></el-form-item></el-col>
-          <el-col :span="6"><el-form-item label="PXE服务IP"><el-input v-model="genForm.server_ip" placeholder="PXE服务本机IP，如 10.128.118.113" /></el-form-item></el-col>
+          <!-- 占位文案要能在 span=6 的窄字段里显示完：原先「PXE服务本机IP，如 10.128.118.113」
+               被截断成「PXE服务本机 IP, …」（截图实测）。具体 IP 示例见使用帮助。 -->
+          <el-col :span="6"><el-form-item label="PXE服务IP"><el-input v-model="genForm.server_ip" placeholder="留空用本机 IP" /></el-form-item></el-col>
           <el-col :span="6"><el-form-item label="内核路径"><el-input v-model="genForm.kernel_path" placeholder="留空由后端按模板版本推导" /></el-form-item></el-col>
           <el-col :span="6"><el-form-item label="initrd"><el-input v-model="genForm.initrd_path" placeholder="留空由后端按模板版本推导" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="HTTP根地址"><el-input v-model="genForm.http_root" placeholder="留空由后端生成，格式 http://<IP>:8000/pxe/serve" /></el-form-item></el-col>
+          <!-- 同上：原「留空由后端生成，格式 http://<IP>:8000/pxe/serve」在 span=8 里被截断成
+               「留空由后端生成, 格式 http://<I…」；格式说明已在下方注释与帮助文档里写明。 -->
+          <el-col :span="8"><el-form-item label="HTTP根地址"><el-input v-model="genForm.http_root" placeholder="留空由后端生成" /></el-form-item></el-col>
         </el-row>
         <el-alert v-if="genMediaNote" type="warning" :closable="false" show-icon class="mb-2">
           {{ genMediaNote }}
