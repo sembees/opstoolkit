@@ -54,6 +54,27 @@ class Settings(BaseSettings):
     # 并打印到服务日志（docker logs opstoolkit）；要固定口令就设环境变量 ADMIN_PASSWORD。
     admin_password: str = ""
 
+    # ★ 飞书通知（自建应用：App ID + App Secret，**不是**自定义机器人 webhook）。
+    #   默认全关：不配置就**不发**任何消息 —— notify_enabled=False 是有意为之的默认值，
+    #   避免"代码一上线就把告警广播出去"。发送实现见 app/core/notify/feishu.py。
+    #   receive_id_type=chat_id 时 receive_id 填群 ID（oc_ 开头）；
+    #   不提供"按手机号反查 open_id"（应用缺 contact:user.id:readonly 权限）。
+    notify_enabled: bool = False
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    feishu_receive_id: str = ""
+    feishu_receive_id_type: str = "chat_id"
+    # ★ 为什么是逗号分隔的 str 而不是 list[str]：pydantic-settings 从环境变量读 list
+    #   必须写 JSON 数组（如 FEISHU_AT_OPEN_IDS='["ou_x","ou_y"]'），引号/转义在
+    #   .env 与 docker-compose.yml 里极易写错、报错又难懂；逗号分隔一眼可读，
+    #   且与上面 cors_origins 的既有写法一致。代码里自行 split（notify/feishu.py）。
+    feishu_at_open_ids: str = ""
+    feishu_at_all: bool = False
+    # 单次 HTTP 超时（秒）。notify_dedup_window（秒）是告警**集成单元**的去重窗口，
+    # 本发送单元只定义配置、不使用它。
+    feishu_timeout: float = 8.0
+    notify_dedup_window: int = 300
+
 
 @lru_cache
 def get_settings() -> Settings:

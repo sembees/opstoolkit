@@ -48,11 +48,20 @@ app.include_router(api_router, prefix=settings.api_prefix)
 @app.get("/health")
 async def health() -> dict:
     """健康检查。★ `legacy_ssh` 暴露"能否巡检老设备"：只有支持 ssh-rsa/SHA-1 kex 的 SSH 库
-    才能连上大量在用的老机型（详见 app/ct/inspection/service.py 里的自检说明）。"""
+    才能连上大量在用的老机型（详见 app/ct/inspection/service.py 里的自检说明）。
+    ★ `notify` 只做"这台机器配没配飞书通知"的静态判断（feishu_configured() 纯本地、
+    不发网络请求），供部署侧一眼确认；发送链路见 app/core/notify/feishu.py。"""
     from app.ct.inspection.service import legacy_ssh_support
 
     ok, why = legacy_ssh_support()
-    return {"status": "ok", "app": settings.app_name, "legacy_ssh": ok, "legacy_ssh_detail": why}
+    try:
+        from app.core.notify import feishu_configured
+
+        notify = bool(feishu_configured())
+    except Exception:  # noqa: BLE001 —— /health 是存活探针，旁路模块不能把它拖成 500
+        notify = False
+    return {"status": "ok", "app": settings.app_name, "legacy_ssh": ok,
+            "legacy_ssh_detail": why, "notify": notify}
 
 
 # PXE/ZTP HTTP 文件服务 (本机部署后生效，必须在根路径前注册)
