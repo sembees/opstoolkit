@@ -30,6 +30,42 @@ _ADDITIVE_UNIQUE_INDEXES = (
     ("uq_ztp_dev_template_mac", "ztp_devices", "template_id, mac"),
 )
 
+# 存量库的增量补列。同上：`create_all`（SQLite 亦然）**不会给已存在的表加列**，
+# 模型上新加的 Notification.oncall_lookup_failed / merged_count 对存量生产库无效，
+# 必须在启动时幂等补一次（先 PRAGMA 查列，缺了才 ALTER TABLE ADD COLUMN）。
+# 列定义与 models.Notification 上的声明对齐：NOT NULL + 默认值（ALTER 加列带 NOT NULL
+# 在 SQLite 里必须给非 NULL 默认值，存量行会直接取该默认值，不需要回填）。
+_ADDITIVE_COLUMNS = (
+    ("notifications", "oncall_lookup_failed", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("notifications", "merged_count", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+async def _ensure_additive_columns(conn) -> None:
+    """幂等地给存量表补列（create_all 不做这件事）。
+
+    · 表不存在 ⇒ 跳过（首次启动由 create_all 直接建出带全列的表）；
+    · 列已存在 ⇒ 跳过（幂等：重启多少次都只补缺的那几列）；
+    · 列缺失 ⇒ ALTER TABLE ADD COLUMN（SQLite 支持加列，存量行取 DEFAULT）。
+    """
+    from sqlalchemy import text
+
+    log = logging.getLogger(__name__)
+    for table, column, ddl in _ADDITIVE_COLUMNS:
+        exists = (await conn.execute(
+            text("SELECT 1 FROM sqlite_master WHERE type='table' AND name=:t"),
+            {"t": table},
+        )).first()
+        if not exists:
+            continue    # 首次启动时由 create_all 建表并带上全部列
+        # PRAGMA table_info 的第 2 列（下标 1）是列名
+        cols = {row[1] for row in (await conn.execute(
+            text(f"PRAGMA table_info({table})"))).all()}
+        if column in cols:
+            continue
+        await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+        log.info("存量表 %s 已补列 %s（%s）", table, column, ddl)
+
 
 async def _ensure_additive_indexes(conn) -> None:
     """幂等地补索引；库里有历史重复数据时**不**让应用起不来。
@@ -110,6 +146,7 @@ async def init_db() -> None:
 
     1. 创建所有表（若不存在）
     2. 给存量库补增量唯一索引（见 _ensure_additive_indexes）
+       并给存量表补增量列（见 _ensure_additive_columns —— create_all 不给已存在的表加列）
     3. 凭证密钥体检（外部审查 U4-F6）
     4. 写入各厂商默认巡检模板
     5. 创建默认管理员账号（若不存在）
@@ -119,6 +156,7 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _ensure_additive_indexes(conn)
+        await _ensure_additive_columns(conn)
 
     await _check_credential_key()
 

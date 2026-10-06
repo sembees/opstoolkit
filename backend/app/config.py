@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     oncall_base_url: str = ""
     oncall_token: str = ""
     oncall_team: str = ""
+    # 单次查询超时（秒）：平台不可用时要快速失败，不能让一条告警卡在外发前置查询上。
+    # 供 app/core/oncall.py 读取（不再硬编码 2 秒）；只给代码侧默认值，具体值运维走 .env。
+    oncall_timeout: float = 2.0
 
 
 @lru_cache

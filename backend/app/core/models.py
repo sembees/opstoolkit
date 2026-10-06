@@ -328,8 +328,10 @@ class Notification(Base):
     谁写入：app/core/notify/alerts.notify_alert（巡检命中告警 → 发飞书 → 落库）。
     用途：
       ① 去重 —— 同 event_key 在 settings.notify_dedup_window 秒内已有**成功**记录
-         （ok=True）就不再发第二条（失败的记录不算，允许下条告警重试）；
-      ② 审计 —— 发给谁 / @ 了谁 / 是否降级 / 失败原因，运维直接查表就能回答
+         （ok=True）就不再发第二条（失败的记录不算，允许下条告警重试）；窗口内的
+         重复触发把首条成功记录的 merged_count 原地 +1（不丢计数，下条消息带
+         "上一次同类告警之后又触发 N 次，已合并"）；
+      ② 审计 —— 发给谁 / @ 了谁 / 是否降级 / 平台查询是否失败 / 失败原因，运维直接查表就能回答
          "为什么没 @ 到人"。
 
     注意与 ONCALL-PLATFORM-PLAN.md §6 里"平台侧"的 Notification 是两张表：
@@ -339,7 +341,7 @@ class Notification(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
-    # 去重键："opstk:{asset_id}:{metric_key}"
+    # 去重键："opstk:{metric_key}:{asset_host}"（asset_host 为空回退 asset_id，见 alerts._event_key）
     event_key: Mapped[str] = mapped_column(String(255), default="", index=True)
     asset_id: Mapped[str] = mapped_column(String(32), default="", index=True)
     asset_name: Mapped[str] = mapped_column(String(128), default="")
@@ -361,6 +363,16 @@ class Notification(Base):
     at_targets: Mapped[Optional[str]] = mapped_column(Text, default="[]")
     # True = 走了降级路径（值班平台未配置/超时/报错/为空，回退到配置 @ / @all / 不 @）
     degraded: Mapped[bool] = mapped_column(default=False)
+    # True = 值班平台查询失败/无人无排班（no_shift / 401/403 / 404 / 400 / 5xx/超时 /
+    # 未配置）：当次告警没有 @ 到平台给的当班人。与 degraded 的分工：
+    #   degraded        —— "未走平台路径"（@ 路径降级了这个事实）；
+    #   oncall_lookup_failed —— 专指"值班平台这一环没成"（平台 ok 时恒为 False，
+    #                        即便未来重新启用配置 open_id 兜底，两字段也会各表其义）。
+    # 存量库由 app/database._ensure_additive_columns 幂等补列（create_all 不给已存在的表加列）。
+    oncall_lookup_failed: Mapped[bool] = mapped_column(default=False)
+    # 去重合并计数：同 event_key 在去重窗口内的第 2..N 次触发不再发消息，而是把首条
+    # 成功记录的 merged_count 原子 +1（UPDATE 自增，不读-改-写）。新记录恒为 0。
+    merged_count: Mapped[int] = mapped_column(Integer, default=0)
     # 预留：发送层 FeishuResult 目前不回传飞书 message_id，恒为 NULL
     message_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 

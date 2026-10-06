@@ -201,6 +201,9 @@ class FeishuConfiguredTest(NotifyTestBase):
             ("feishu_receive_id", ""), ("feishu_receive_id_type", "chat_id"),
             ("feishu_at_open_ids", ""), ("feishu_at_all", False),
             ("feishu_timeout", 8.0), ("notify_dedup_window", 300),
+            # 值班平台客户端（模式 A）同样默认全关；查询超时默认 2 秒（供 oncall.py 读取）
+            ("oncall_base_url", ""), ("oncall_token", ""), ("oncall_team", ""),
+            ("oncall_timeout", 2.0),
         ]:
             with self.subTest(field=name):
                 self.assertEqual(f[name].default, want)
