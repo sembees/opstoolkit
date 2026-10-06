@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core import crud, models
+from app.core.notify.alerts import notify_alert
 from app.ct.drivers import get_driver, infer_netmiko_device_type
 from app.ct.drivers.base import MetricCommand
 from app.ct.inspection.parser import is_command_rejected, parse_output
@@ -88,6 +89,21 @@ async def run_task_in_background(task_id: str, on_event=None) -> list:
                 select(models.AlertRule).where(models.AlertRule.enabled == True)
             )).scalars().all()
 
+            # 告警外发准备（通知集成单元）：命中消息要带"设备 IP"，这里一次性把资产
+            # host 查出来。★ 整段被 settings.notify_enabled 短路 —— 未启用通知时这条
+            # 路径零开销（连库都不查），下面告警判定逻辑本身一行没动。
+            asset_hosts: dict[str, str] = {}
+            if alert_rules and settings.notify_enabled and task.asset_ids:
+                try:
+                    asset_hosts = {
+                        a.id: (a.host or "")
+                        for a in (await db.execute(
+                            select(models.Asset).where(models.Asset.id.in_(task.asset_ids))
+                        )).scalars().all()
+                    }
+                except Exception:  # noqa: BLE001 —— host 拿不到就用空串，通知是旁路
+                    asset_hosts = {}
+
             for r in results:
                 # 告警检查
                 if r.get("status") == "success":
@@ -117,6 +133,16 @@ async def run_task_in_background(task_id: str, on_event=None) -> list:
                             if triggered:
                                 r["error"] = (r.get("error", "") + f"[告警] {rule.name}: {rule.metric_key}={val} {rule.operator} {rule.threshold}").strip()
                                 r["status"] = "failed"
+                                # ★ 告警外发（旁路）：发射后不管 —— create_task 不 await，
+                                #   通知成不成都不得阻塞/拖垮巡检；notify_enabled=False 时
+                                #   这行都不进（零开销）。实现在 app/core/notify/alerts.py。
+                                if settings.notify_enabled:
+                                    schedule_background(notify_alert(
+                                        rule=rule, metric_key=rule.metric_key, value=val,
+                                        asset_id=r["asset_id"], asset_name=r["asset_name"],
+                                        asset_host=asset_hosts.get(r["asset_id"], ""),
+                                        severity="critical",
+                                    ))
                 db.add(models.InspectionResult(
                     task_id=task.id,
                     asset_id=r["asset_id"],

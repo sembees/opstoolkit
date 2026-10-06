@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     feishu_timeout: float = 8.0
     notify_dedup_window: int = 300
 
+    # ★ 值班平台客户端（集成模式 A「被查询方」——发告警前先查"现在该 @ 谁"）。
+    #   契约（冻结）：GET {base}/api/oncall/current?team=…，Bearer 认证，
+    #   见 ONCALL-PLATFORM-PLAN.md §4.1。查询客户端在 app/core/oncall.py。
+    #   默认全空 = 未配置 ⇒ current_oncall() 直接返回 not_configured，**一个请求都不发**，
+    #   告警自动走降级（feishu_at_open_ids → @all → 不 @）。
+    #   token 只进 .env / 环境变量，不写进代码、不进仓库。
+    oncall_base_url: str = ""
+    oncall_token: str = ""
+    oncall_team: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -321,3 +321,46 @@ class ZtpPosition(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
+
+class Notification(Base):
+    """告警通知发送记录（一次外发尝试 = 一行）。
+
+    谁写入：app/core/notify/alerts.notify_alert（巡检命中告警 → 发飞书 → 落库）。
+    用途：
+      ① 去重 —— 同 event_key 在 settings.notify_dedup_window 秒内已有**成功**记录
+         （ok=True）就不再发第二条（失败的记录不算，允许下条告警重试）；
+      ② 审计 —— 发给谁 / @ 了谁 / 是否降级 / 失败原因，运维直接查表就能回答
+         "为什么没 @ 到人"。
+
+    注意与 ONCALL-PLATFORM-PLAN.md §6 里"平台侧"的 Notification 是两张表：
+    本表在 OpsToolkit 自己的库里，记录"发送侧"的事实（模式 A：OpsToolkit 自己发）。
+    """
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    # 去重键："opstk:{asset_id}:{metric_key}"
+    event_key: Mapped[str] = mapped_column(String(255), default="", index=True)
+    asset_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    asset_name: Mapped[str] = mapped_column(String(128), default="")
+    asset_host: Mapped[str] = mapped_column(String(255), default="")
+    metric_key: Mapped[str] = mapped_column(String(64), default="")
+    # value 存文本（str(value)）：巡检指标值可能是 int/float，审计场景字符串最稳；
+    # 不用数值列，避免个别指标给非数值时写库失败把通知旁路炸掉。
+    value: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    operator: Mapped[str] = mapped_column(String(8), default="")
+    threshold: Mapped[Optional[float]] = mapped_column(nullable=True)
+    rule_id: Mapped[str] = mapped_column(String(32), default="")
+    rule_name: Mapped[str] = mapped_column(String(128), default="")
+    severity: Mapped[str] = mapped_column(String(16), default="critical")
+    channel: Mapped[str] = mapped_column(String(16), default="feishu")
+    ok: Mapped[bool] = mapped_column(default=False)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # JSON 文本：当时实际 @ 的目标列表（"ou_xxx|显示名"），没有 @ 时为 "[]"。
+    at_targets: Mapped[Optional[str]] = mapped_column(Text, default="[]")
+    # True = 走了降级路径（值班平台未配置/超时/报错/为空，回退到配置 @ / @all / 不 @）
+    degraded: Mapped[bool] = mapped_column(default=False)
+    # 预留：发送层 FeishuResult 目前不回传飞书 message_id，恒为 NULL
+    message_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
