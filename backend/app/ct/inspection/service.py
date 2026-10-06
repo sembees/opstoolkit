@@ -538,17 +538,30 @@ async def inspect_one(db: AsyncSession, asset: models.Asset, kind: str = "defaul
 async def inspect_many(db: AsyncSession, asset_ids: list, kind: str = "default",
                        template: Optional[str] = None, commands: Optional[list] = None,
                        on_event: Optional[ProgressCb] = None) -> list:
+    # ★ 参数 db 仅为兼容外部签名而保留（调用方 run_task_in_background / API 不改），
+    #   并发分支**绝不能**再用它：同一 AsyncSession 不允许并发使用，≥2 台设备时
+    #   第二个并发 DB 操作会在 _connection_for_bind 抛 InvalidRequestError
+    #   （"This session is provisioning a new connection; concurrent operations are
+    #   not permitted"），会话关闭时再叠一个 IllegalStateChangeError，异常被调用方
+    #   except 吞掉 ⇒ 多设备任务 0 条结果、被标 failed（生产实测；回归护栏见
+    #   tests/test_inspection_concurrent_sessions.py）。因此本函数体不再触碰 db，
+    #   每个并发分支在下面自建会话，并沿 inspect_one 把会话传给该分支全部 DB 读取
+    #   （get_asset / get_credential_for_asset / _resolve_template_cmds）。
     # 通过 Semaphore 限制同时连接的设备数，避免压跨网络
     sem = asyncio.Semaphore(max(1, settings.inspection_concurrency))
     results = []
 
     async def _run(aid):
-        asset = await crud.get_asset(db, aid)
-        if not asset:
-            return {"asset_id": aid, "asset_name": "", "status": "failed",
-                    "error": "资产不存在", "metrics": {}, "raw": []}
+        # 会话在拿到并发名额后再开：同一时刻打开的分支会话数被 Semaphore 钉在
+        # inspection_concurrency 上，不随设备数量无限占用连接池；分支内的所有
+        # DB 读取都走这个自建会话，某台失败不影响其它台。
         async with sem:
-            return await inspect_one(db, asset, kind, template, commands, on_event)
+            async with async_session() as s:
+                asset = await crud.get_asset(s, aid)
+                if not asset:
+                    return {"asset_id": aid, "asset_name": "", "status": "failed",
+                            "error": "资产不存在", "metrics": {}, "raw": []}
+                return await inspect_one(s, asset, kind, template, commands, on_event)
 
     tasks = [asyncio.create_task(_run(aid)) for aid in asset_ids]
     for t in asyncio.as_completed(tasks):

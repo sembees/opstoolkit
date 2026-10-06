@@ -14,7 +14,10 @@ from app.core import crud, models
 from app.core.auth import decode_access_token, get_current_user
 from app.core.schemas import InspectionCreate, InspectionResultOut, InspectionTaskOut, InspectionTemplateIn, InspectionTemplateOut
 from app.ct.drivers import DRIVERS
-from app.ct.inspection.service import run_task_in_background, schedule_background
+# ★ 2026-10-05 修：这里原来只 import 了 run_task_in_background / schedule_background，
+#   而下面 POST /ct/inspection/run 调用了 inspect_many ⇒ 该端点一跑就 NameError
+#   （前端走 WebSocket 不碰它，所以一直没暴露；API 直连/脚本会踩）。补回 inspect_many。
+from app.ct.inspection.service import inspect_many, run_task_in_background, schedule_background
 from app.database import async_session, get_db
 
 router = APIRouter()
