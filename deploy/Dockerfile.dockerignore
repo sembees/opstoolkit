@@ -1,0 +1,31 @@
+# deploy/Dockerfile 专属的构建上下文裁剪（BuildKit 按 "Dockerfile名.dockerignore" 生效）。
+# 目的：构建出的应用镜像里**绝不包含**真实密钥与本地数据，且上下文尽量小。
+# 注意：若打包机的构建器不支持 per-Dockerfile ignore（很老的 Docker），
+#       请把下面这些规则合并进仓库根 .dockerignore 后再构建。
+# —— 密钥与数据，绝不进镜像 ——
+backend/.env
+.env
+backend/data
+data
+**/*.db
+**/*.db-journal
+# —— 前端：依赖现场 npm ci，dist 由 node 阶段现构建 ——
+**/node_modules
+frontend/dist
+# —— 版本管理 / 本地环境 ——
+.git
+.github
+.vscode
+.venv
+.pytest_cache
+**/__pycache__
+**/*.py[cod]
+# —— 大文件与本地杂项 ——
+**/*.pptx
+**/*.xlsx
+**/*.7z
+**/*.ndjson
+**/*.log
+netconfig_tests
+backend/scripts
+docs

@@ -1,0 +1,73 @@
+# =============================================================================
+# OpsToolkit 应用态部署描述（本文件进仓库、也进离线包）
+#
+# 和仓库根那份"开发态" docker-compose.yml（把 ./backend/app、./frontend/dist 等
+# 源码目录挂进容器）不同，这里是【应用态】：
+#   · 镜像里已经烤好前后端代码（用 deploy/Dockerfile 构建），运行时**不再挂源码**；
+#   · 只挂数据：PXE/ZTP 的文件根、TFTP 根、dnsmasq 配置/租约、SQLite 数据、应用 .env。
+#
+# 路径约定（换盘只改 .env，不改本文件）：
+#   所有宿主路径一律写成 ${OPSTK_XXX:-<默认值>}，默认值与当前生产机
+#   （/srv/opstk、/srv/tftp、8000 端口）**逐字一致** —— 什么都不改，行为与今天相同；
+#   换盘/换目录时只改安装目录下的 .env（模板见 deploy/.env.example）。
+#
+# 运行参数照抄宿主现役 compose，**一个都不能少**：
+#   · network_mode: host  —— PXE 的 DHCP 广播必须在真实网卡上收发，不能用桥接；
+#   · privileged: true    —— 挂载 ISO（loop 设备）需要特权；
+#   · restart: unless-stopped —— 开机自启、异常拉起。
+#
+# 由 packaging/install.sh 自动部署；手动操作时务必带 --project-directory 指向
+# "安装根目录"（里面有 ./data、./backend/.env、./deploy/ 这套相对结构）：
+#   docker compose --project-directory <安装根> -f <安装根>/deploy/docker-compose.yml up -d
+# =============================================================================
+name: ${OPSTK_PROJECT:-opstk}
+
+services:
+  opstoolkit:
+    # 应用态镜像：内含前端 dist + 后端代码 + dnsmasq + python3（deploy/Dockerfile 构建）。
+    # 版本由离线包写入安装目录 .env 的 OPSTK_IMAGE（如 opstk:v1.0.0），默认 opstk:latest。
+    image: ${OPSTK_IMAGE:-opstk:latest}
+    container_name: ${OPSTK_CONTAINER_NAME:-opstoolkit}
+    # PXE 需要: host 网络 (DHCP 广播) + privileged (mount ISO loop)
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    environment:
+      # Web 监听端口：入口脚本用它启动 uvicorn（默认 8000，与今天一致）。
+      # 注意：DHCP(67/udp)/TFTP(69/udp) 端口是协议固定的，不随此变量变。
+      - OPSTK_PORT=${OPSTK_PORT:-8000}
+    # 入口脚本从安装目录挂进来（:ro）：它是"容器是否自起 dnsmasq 兜底"的开关，
+    # 必须与仓库保持同一份，不能依赖镜像里烤进去的副本（与开发态 compose 同理）。
+    # 应用态副本 = deploy/container-entrypoint.sh：逻辑与 backend/docker-entrypoint.sh
+    # 一致，唯一差别是 uvicorn 端口读 OPSTK_PORT（backend 那份被在跑容器挂载着，不能改）。
+    entrypoint: ["/bin/bash", "/opstk-entrypoint.sh"]
+    volumes:
+      # ── 数据根 ${OPSTK_DATA_ROOT:-/srv/opstk}（默认路径与今天的部署逐字一致）──
+      # ISO 镜像仓库（浏览器上传/服务端拉取的 .iso 都落这里）
+      - ${OPSTK_DATA_ROOT:-/srv/opstk}/iso:/srv/opstk/iso
+      # PXE 的 HTTP 根（内核/固件/应答文件）
+      - ${OPSTK_DATA_ROOT:-/srv/opstk}/pxe-web:/srv/opstk/pxe-web
+      # ZTP 的 HTTP 根。**必须挂**：ZTP 部署同时写 TFTP 与 HTTP 两个根，且 app/main.py
+      # 只在"启动时目录存在"的前提下才注册 /ztp 静态服务；不挂则容器重建后文件全丢。
+      - ${OPSTK_DATA_ROOT:-/srv/opstk}/ztp-web:/srv/opstk/ztp-web
+      # 宿主机 dnsmasq 重载握手的状态目录（deploy/host 单元与应用侧靠它确认"配置已生效"）
+      - ${OPSTK_DATA_ROOT:-/srv/opstk}/state:/srv/opstk/state
+      # ISO 挂载点（loop 挂载的临时目录，privileged 容器在里面 mount）
+      - ${OPSTK_DATA_ROOT:-/srv/opstk}/mnt:/srv/opstk/mnt
+      # ── TFTP 根（PXE 引导文件；默认与今天一致）──
+      - ${OPSTK_TFTP_ROOT:-/srv/tftp}:/srv/tftp
+      # ── dnsmasq ──
+      # 应用往这里写 opstk-pxe.conf / opstk-ztp.conf；宿主机 deploy/host 单元负责重载
+      - /etc/dnsmasq.d:/etc/dnsmasq.d
+      # dnsmasq 租约目录（**ZTP 落位认领要读它**）。只读挂载，路径按宿主机原样。
+      # 换发行版租约位置不同时，改应用侧 OPS_DNSMASQ_LEASES，不用动本文件。
+      - /var/lib/dnsmasq:/var/lib/dnsmasq:ro
+      # ── 应用数据（SQLite 库等）与应用密钥 ──
+      # 数据库默认 sqlite+aiosqlite:///./data/ops.db，落在挂载里 ⇒ 重建容器不丢数据
+      - ./data:/app/backend/data
+      # ★ .env（credential_key / secret_key / pxe_serve_token / ztp_serve_token）**必须挂**：
+      #   不挂的话密钥活在容器可写层里，`docker compose up -d` 重建容器即丢，
+      #   用旧 key 加密的凭据会永久打不开。由 install.sh 自动生成（已存在则绝不覆盖）。
+      - ./backend/.env:/app/backend/.env:rw
+      # ── 入口脚本（与仓库同源，见上方 entrypoint 说明）──
+      - ./deploy/container-entrypoint.sh:/opstk-entrypoint.sh:ro
