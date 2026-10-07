@@ -11,8 +11,8 @@
      · 这里**只映射语义上等价的键**：不改 --el-text-color-placeholder 等我们并未统一的键，
        以免引入无谓的视觉漂移；
      · EP 的派生色阶（--el-color-primary/success/warning/danger 的 -light-3/5/7/8/9、-dark-2）：
-       当初 --ot-* 与 EP 取值相同、色阶天然一致，故未覆盖；本轮品牌换肤后主色已不同，
-       **必须在下面显式覆盖**。为什么必须补：EP 只在 :root（element-plus/dist/index.css）声明
+       主色已是自定义值（非 EP 出厂蓝，见 tokens.css 中性浅色系），EP 不会替我们重算
+       这些派生阶，**必须在下面显式覆盖**。为什么必须补：EP 只在 :root（element-plus/dist/index.css）声明
        这些派生阶，组件不会跟着主色重算 ⇒ 只改主色不覆盖色阶时，按钮 hover/active/禁用态、
        表格行选中/悬停底色等仍是旧主色派生的旧浅色（「新主色 + 旧浅蓝」脱节花色）。
        覆盖值按 EP 同款混色算法从新基色硬算（见下方注释），硬编码 hex——EP 期望具体色值，
@@ -30,39 +30,40 @@
   /* ── EP 派生色阶（必须显式覆盖，原因见文件头「注意」第三条） ──
      为什么必须补：EP 只在 :root（element-plus/dist/index.css）声明这些派生阶，不覆盖
      就会与自定义主色脱节——主色已指到新值，而按钮 hover/禁用、表格行选中底色用的
-     light-* 与 dark-2 还是旧主色派生的旧浅蓝。
+     light-* 与 dark-2 还是旧主色派生的旧浅色（上一版为品牌蓝的浅蓝）。
      算法与 EP 生成式一致（已对 EP 2.14.3 出厂 30 个派生阶逐一验证吻合）：
        light-N = 主色与白混合，白权重 = N/10；dark-2 = 主色与黑混合，黑权重 = 2/10；
        逐通道 sRGB 线性插值 round(a*(1-t) + b*t)，四舍五入（.5 进位）。
+       本轮中性浅色系 24 个值即按此式用脚本重算（样例见改动报告）。
      硬编码具体 hex：EP 期望具体色值，不用 color-mix()。 */
-  /* primary ← #106EBE */
-  --el-color-primary-light-3: #589AD2;
-  --el-color-primary-light-5: #88B7DF;
-  --el-color-primary-light-7: #B7D4EC;
-  --el-color-primary-light-8: #CFE2F2;
-  --el-color-primary-light-9: #E7F1F9;
-  --el-color-primary-dark-2: #0D5898;
-  /* success ← #009B4D */
-  --el-color-success-light-3: #4DB982;
-  --el-color-success-light-5: #80CDA6;
-  --el-color-success-light-7: #B3E1CA;
-  --el-color-success-light-8: #CCEBDB;
-  --el-color-success-light-9: #E6F5ED;
-  --el-color-success-dark-2: #007C3E;
-  /* warning ← #ECA427 */
-  --el-color-warning-light-3: #F2BF68;
-  --el-color-warning-light-5: #F6D293;
-  --el-color-warning-light-7: #F9E4BE;
-  --el-color-warning-light-8: #FBEDD4;
-  --el-color-warning-light-9: #FDF6E9;
-  --el-color-warning-dark-2: #BD831F;
-  /* danger ← #C72B32 */
-  --el-color-danger-light-3: #D86B70;
-  --el-color-danger-light-5: #E39599;
-  --el-color-danger-light-7: #EEBFC2;
-  --el-color-danger-light-8: #F4D5D6;
-  --el-color-danger-light-9: #F9EAEB;
-  --el-color-danger-dark-2: #9F2228;
+  /* primary ← #18181B（石墨近黑 = tokens.css --ot-primary） */
+  --el-color-primary-light-3: #5D5D5F;
+  --el-color-primary-light-5: #8C8C8D;
+  --el-color-primary-light-7: #BABABB;
+  --el-color-primary-light-8: #D1D1D1;
+  --el-color-primary-light-9: #E8E8E8;
+  --el-color-primary-dark-2: #131316;
+  /* success ← #15803D */
+  --el-color-success-light-3: #5BA677;
+  --el-color-success-light-5: #8AC09E;
+  --el-color-success-light-7: #B9D9C5;
+  --el-color-success-light-8: #D0E6D8;
+  --el-color-success-light-9: #E8F2EC;
+  --el-color-success-dark-2: #116631;
+  /* warning ← #B45309 */
+  --el-color-warning-light-3: #CB8753;
+  --el-color-warning-light-5: #DAA984;
+  --el-color-warning-light-7: #E9CBB5;
+  --el-color-warning-light-8: #F0DDCE;
+  --el-color-warning-light-9: #F8EEE6;
+  --el-color-warning-dark-2: #904207;
+  /* danger ← #B91C1C */
+  --el-color-danger-light-3: #CE6060;
+  --el-color-danger-light-5: #DC8E8E;
+  --el-color-danger-light-7: #EABBBB;
+  --el-color-danger-light-8: #F1D2D2;
+  --el-color-danger-light-9: #F8E8E8;
+  --el-color-danger-dark-2: #941616;
   /* error 在 EP 默认色板里与 danger 完全同值（alias），同样保持跟随，
      免得 el-message--error / 表单校验态等用 error 浅底的组件残留旧红浅色 */
   --el-color-error-light-3: var(--el-color-danger-light-3);
@@ -104,3 +105,14 @@
    想要更松/更紧：改这几处即可，都是单一数值。 */
 .el-main { --el-main-padding: var(--ot-space-5); }   /* 内容区与侧栏/视口留白 20 → 24px */
 .el-card { --el-card-padding: var(--ot-space-5); }   /* 卡片内边距 20 → 24px（卡头内边距随之自动跟随） */
+
+/* ── 交互过渡（层次感收口：统一节奏，只过渡底色与边框） ───────────────────
+   EP 各组件自带的过渡列表不一致（button 是 all .1s，menu-item 是 border/bg/color
+   各 .3s），这里统一成 tokens.css 的 --ot-transition（.15s ease）。
+   只列 background-color / border-color 两项：中性浅色系里文字色变化
+   （如 #57534E ↔ #18181B）肉眼几乎无感，不参与过渡也不突兀，色相过渡不扩散。
+   本文件在 main.js 里排在 dist/index.css 之后，同特异性规则后到者胜。 */
+.el-button,
+.el-menu-item {
+  transition: background-color var(--ot-transition), border-color var(--ot-transition);
+}

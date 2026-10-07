@@ -1,18 +1,17 @@
 /* ============================================================================
-   OpsToolkit 设计 token（方案 A：以 Element Plus 自身语义色为基座）
+   OpsToolkit 设计 token（中性浅色系：暖灰 stone 阶梯 + 石墨近黑主色）
 
-   为什么以组件库自己的色值为基座：
-     界面里的 el-card/el-table/el-tag/el-alert/按钮都由 Element Plus 渲染，它自带一套语义色。
-     如果我们的 token 另起一套色值，就会出现"组件是 A 色、页面是 B 色"的花色问题；
-     而且 EP 的组件依赖**派生色阶**（--el-color-primary-light-3/5/7/8/9、-dark-2 做浅底/边框/
-     hover/active），只改主色不改色阶会出现"主色变了、浅底还是旧色"的 bug。
-     所以：token 沿用 EP 的语义取值，再由 element-bridge.css 把 --el-* 映射到 --ot-*。
-     以后要换品牌色（方案 B）只需改本文件里的 --ot-primary 并重算色阶，页面一个字都不用动。
-      （本轮品牌换肤已落地：语义色/侧栏/终端/登录渐变改为下方指定的品牌色值；
-        EP 派生色阶同步改由 element-bridge.css 按新基色显式覆盖，两边必须一起改。）
-
-   取值来源（可复算）：frontend/node_modules/element-plus/dist/index.css 的 :root 段
-   （117 个 --el-* 键），由 mimo/extract_el_palette.py 抽出，非凭记忆。
+   本轮改版原则（取代早先「以 Element Plus 出厂色为基座」的品牌蓝方案）：
+     · 中性优先：界面层次靠明度阶梯（墨黑 → 暖灰 → 米白），不靠颜色层次；
+     · 主色取近黑石墨 #18181B（主按钮/激活项），彩色相全站只保留一个——
+       --ot-accent-1 深青蓝 #075985，仅用于链接/选中/焦点；
+     · 语义色全部去饱和加深，白字对比 ≥4.9:1（逐值复算见改动报告）；
+     · Element Plus 组件依赖**派生色阶**（--el-color-primary/success/warning/danger
+       的 -light-3/5/7/8/9、-dark-2 做浅底/边框/hover/active），EP 只在 :root 声明
+       出厂值、不会替我们重算 ⇒ 主色改了色阶必须跟着算，由 element-bridge.css
+       按本文件基色显式覆盖，**两个文件必须一起改**。
+   （历史注：再上一版的取值来源为 EP 出厂 :root 段 117 个 --el-* 键
+     （frontend/node_modules/element-plus/dist/index.css），该基座已被本轮中性化取代。）
 
    规则：**页面里只允许出现语义名（var(--ot-*)），不允许出现 #hex / rgb()。**
    ============================================================================ */
@@ -38,65 +37,73 @@
   --ot-font-xl: 20px;
   --ot-font-display: 28px;
 
-  /* ── 文字（--el-text-color-*） ── */
-  --ot-text-1: #303133;          /* 主要   ← 收编现状的 #333 */
-  --ot-text-2: #606266;          /* 常规   ← 收编现状的 #666 / #555 */
-  --ot-text-3: #909399;          /* 次要   ← 收编现状的 #999(26 处!) / #90a4ae */
-  --ot-text-4: #c0c4cc;          /* 禁用   ← 收编现状的 #ccc / #bbb */
-  --ot-text-inverse: #fff;       /* 深底上的白字（侧栏/终端） */
+  /* ── 文字（暖灰 stone 阶梯，替换原 EP 蓝灰 #303133 系） ── */
+  --ot-text-1: #1C1917;          /* 墨黑   stone-900：标题/主要文字 */
+  --ot-text-2: #57534E;          /* 常规   stone-600 */
+  --ot-text-3: #78716C;          /* 次要   stone-500 */
+  --ot-text-4: #A8A29E;          /* 禁用   stone-400 */
+  --ot-text-inverse: #FFFFFF;    /* 深底上的白字（终端/登录等深色场） */
 
   /* ── 背景 ── */
-  --ot-bg-page: #F8F8F9;         /* 页面底（品牌换肤指定值；EP --el-fill-color 经 bridge 跟随） */
-  --ot-bg-container: #fff;       /* 卡片/容器 */
-  --ot-bg-hover: #E9F1FA;        /* 悬停（品牌换肤指定值；EP --el-fill-color-light 经 bridge 跟随） */
-  --ot-bg-code: #0A1828;         /* 代码块底（Help 用；原 VS Code 深色，品牌换肤指定值） */
+  --ot-bg-page: #FAFAF9;         /* 页面底：暖米白 stone-50（原 #F8F8F9 冷白；EP --el-fill-color 经 bridge 跟随） */
+  --ot-bg-container: #FFFFFF;    /* 卡片/容器 */
+  --ot-bg-hover: #F5F5F4;        /* 悬停：stone-100（EP --el-fill-color-light 经 bridge 跟随） */
+  --ot-bg-code: #18181B;         /* 代码块底（Help 用）：石墨黑，与终端同底（浅底可读性差，保持深底） */
 
-  /* ── 边框/分隔 ── */
-  --ot-border: #dcdfe6;          /* ← 收编现状的 #dcdfe6 */
-  --ot-border-light: #e4e7ed;    /* ← 收编现状的 #e8e8e8 */
-  --ot-divide: #ebeef5;
+  /* ── 边框/分隔（暖灰细线，替换原蓝灰 #dcdfe6 系） ── */
+  --ot-border: #E7E5E4;          /* stone-200：常规边框（含侧栏分界线） */
+  --ot-border-light: #F5F5F4;    /* stone-100：弱分隔 */
+  --ot-divide: #F5F5F4;          /* stone-100：表格/列表分隔线 */
 
-  /* ── 语义色（品牌换肤指定值；EP 的同名派生色阶在 element-bridge.css 同步覆盖） ── */
-  --ot-primary: #106EBE;
-  --ot-success: #009B4D;
-  --ot-warning: #ECA427;
-  --ot-danger: #C72B32;
-  --ot-info: #909399;
+  /* ── 阴影 / 过渡（层次感收口；要求「极轻」，宁可更淡，不要浮起感） ── */
+  --ot-shadow-1: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);  /* 卡片默认 */
+  --ot-shadow-2: 0 4px 12px rgba(16,24,40,.08);                               /* 悬浮/弹窗（预留） */
+  --ot-transition: .15s ease;                                                 /* 交互过渡统一节奏 */
 
-  /* ── 分类强调色：**仅**用于"指标卡/状态分类"这类需要区分彼此的场合 ──
-        （不是语义色，不要用在成功/失败/警告上；所以这里**刻意不用**语义色的值，
-          否则"分类色"与"状态色"同色，等于把语义色当装饰 —— 与"语义色克制"原则冲突）
-        四个值都取自同一篇配色文章（品牌换肤依据），彼此可区分：
-          蓝 #106EBE（方案 8）、青 #178582（方案 21）、金 #957C3D（方案 23）、紫 #4F0341（方案 24） */
-  --ot-accent-1: #106EBE;
-  --ot-accent-2: #178582;
-  --ot-accent-3: #957C3D;
-  --ot-accent-4: #4F0341;
+  /* ── 语义色（全部去饱和加深；EP 的同名派生色阶在 element-bridge.css 按这些基色重算） ── */
+  --ot-primary: #18181B;         /* 近黑石墨：主按钮/激活项 —— 本轮「去 AI 味」的关键 */
+  --ot-success: #15803D;         /* green-700 */
+  --ot-warning: #B45309;         /* amber-700 */
+  --ot-danger: #B91C1C;          /* red-700 */
+  --ot-info: #78716C;            /* 与 text-3 同阶的中性灰 */
 
-  /* ── 侧栏（P2 布局改版前先把现状值等值收进 token，改版时只动这里） ── */
-  --ot-sider-bg: #111439;
-  --ot-sider-bg-hover: #0E102E;  /* = TinyColor('#111439').shade(20)，与老算法同式：与黑按 20% 混合，
-                                    逐通道 sRGB 线性插值 round(a*(1-t)+b*t)，a=基色通道、b=黑(0)：
-                                    17/20/57 → round(13.6)/round(16.0)/round(45.6) = 14/16/46 = #0E102E；
-                                    菜单 hover 底色原由 el-menu 的 background-color prop 经 JS 算出；
-                                    改走 CSS 变量后必须显式给出，否则 hover 会退回无色/黑色 */
-  --ot-sider-text: #96C2DB;
-  --ot-sider-active: #fff;
+  /* ── 强调色 / 分类色 ──
+        --ot-accent-1 深青蓝：全站唯一带彩色相的颜色，只用于链接/选中/焦点环，
+          不当装饰用（成功/失败/警告是状态语义，不是分类色）；
+        --ot-accent-2..4 改为墨色阶梯（石板灰/暖灰的深浅），用于「指标卡/状态分类」
+          这类需要区分彼此的场合 —— 取消原蓝/青/金/紫彩虹分类，靠明度区分。 */
+  --ot-accent-1: #075985;
+  --ot-accent-2: #334155;
+  --ot-accent-3: #57534E;
+  --ot-accent-4: #78716C;
 
-  /* ── 终端输出（原 main.css 是 Material 色，现并入同一套语义色） ── */
-  --ot-term-bg: #0A1828;
-  --ot-term-fg: #e0e0e0;
-  --ot-term-cmd: #00ABE4;        /* 命令      ← 原 Material #4fc3f7；品牌换肤指定值 */
-  --ot-term-ok: #0FFCBE;         /* 成功       ← 原 Material #81c784；品牌换肤指定值 */
-  --ot-term-warn: #ECA427;       /* 警告       ← 原 Material #ffb74d；与语义 warning 同值（深色底上够亮） */
-  --ot-term-err: #E7473C;        /* 错误       ← 原 Material #ef5350；品牌换肤指定值（方案 20 亮红，
-                                    比语义 danger #C72B32 亮 —— 深色终端底上深砖红对比不足） */
-  --ot-term-info: #96C2DB;       /* 普通输出   ← 原 Material #90a4ae；品牌换肤指定值 */
+  /* ── 侧栏（浅色系外壳：米白底 + 暖灰字 + 石墨激活） ──
+        --ot-sider-bg:       #FAFAF9 —— stone-50，与页面底同值；与白卡片同为浅底，
+                                分界靠 MainLayout.vue 里侧栏的右边框 --ot-border；
+        --ot-sider-bg-hover: #F5F5F4 —— stone-100，与全站悬停底同值。
+                                菜单 hover 底色由 MainLayout.vue 把 --el-menu-hover-bg-color
+                                指到这里显式给出，不走 el-menu 的 background-color prop
+                                （那条路会被 EP 的 TinyColor 现算逻辑接管，见 MainLayout 注释）；
+        --ot-sider-text:     #57534E —— = --ot-text-2（stone-600），米白底对比充裕；
+        --ot-sider-active:   #18181B —— 激活项文字 = 主色（石墨近黑），靠深浅区分、不靠彩相。 */
+  --ot-sider-bg: #FAFAF9;
+  --ot-sider-bg-hover: #F5F5F4;
+  --ot-sider-text: #57534E;
+  --ot-sider-active: #18181B;
+
+  /* ── 终端输出（保持深底：浅底终端可读性差；石墨黑 + 低饱和柔和前景） ── */
+  --ot-term-bg: #18181B;
+  --ot-term-fg: #E7E5E4;
+  --ot-term-cmd: #7DD3FC;        /* 命令：浅天蓝（深底上高亮） */
+  --ot-term-ok: #86EFAC;         /* 成功：浅绿 */
+  --ot-term-warn: #FCD34D;       /* 警告：浅琥珀 */
+  --ot-term-err: #FCA5A5;        /* 错误：浅红 */
+  --ot-term-info: #A8A29E;       /* 普通输出：stone-400 */
 
   /* ── 代码块前景（Help） ── */
-  --ot-code-fg: #d4d4d4;
+  --ot-code-fg: #E7E5E4;
 
-  /* ── 登录页渐变（P2 重做登录页时改这里） ── */
-  --ot-login-from: #01257D;
-  --ot-login-to: #111439;
+  /* ── 登录页渐变（全站唯一品牌暗场；单色石墨深浅，不再藏青+蓝） ── */
+  --ot-login-from: #18181B;
+  --ot-login-to: #27272A;
 }

@@ -231,8 +231,12 @@ async function submitPwd() {
    （node_modules/element-plus/es/components/menu/src/use-menu-color.mjs），
    往 prop 里传 `var(--x)` 会被 TinyColor 判成非法颜色，hover 底色会算成黑。
    改成 CSS 变量后完全不经过那段 JS；hover 底色由 tokens.css 的
-   --ot-sider-bg-hover 显式给出（等值搬自老算法 shade(20)）。 */
+   --ot-sider-bg-hover 显式给出（现为中性浅灰 stone-100，配合浅色侧栏）。 */
 .ot-sider-menu {
+  /* EP 的 .el-menu 自带 border-right: 1px solid var(--el-menu-border-color)，
+     但只覆盖到菜单自身高度（不到侧栏底）。分界线统一由 .ot-sider 的右边框给出，
+     这里关掉菜单自带边框，避免菜单区两条 1px 叠成 2px。 */
+  border-right: none;
   --el-menu-bg-color: var(--ot-sider-bg);
   --el-menu-text-color: var(--ot-sider-text);
   --el-menu-hover-text-color: var(--ot-sider-text);
@@ -242,6 +246,8 @@ async function submitPwd() {
 
 .ot-sider {
   background: var(--ot-sider-bg);
+  /* 浅色外壳后侧栏与白色卡片同为浅底，加一条暖灰细线做全高分界（含 logo 区） */
+  border-right: 1px solid var(--ot-border);
   transition: width 0.2s ease;
   overflow: hidden; /* 折叠动画期间避免文字挤出侧栏 */
 }
@@ -251,7 +257,7 @@ async function submitPwd() {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--ot-text-inverse);
+  color: var(--ot-text-1); /* 浅底侧栏：原深底白字（--ot-text-inverse）会看不见，改墨黑 */
   font-size: var(--ot-font-lg);
   font-weight: 700;
   letter-spacing: 1px;

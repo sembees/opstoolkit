@@ -21,6 +21,14 @@ defineProps({
 </script>
 
 <style scoped>
+.card-section {
+  /* 层次感收口：极轻投影（tokens.css --ot-shadow-1，位移 ≤3px、透明度 ≤.06），
+     只有「纸面贴着桌面」的一点点分层，没有浮起感；
+     EP shadow="never" 本身是零阴影，这里用样式补，比 shadow="always" 的
+     --el-box-shadow-light（0 0 12px 大半径）轻得多。 */
+  box-shadow: var(--ot-shadow-1);
+}
+
 .card-section__header {
   display: flex;
   align-items: center;
