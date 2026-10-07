@@ -5,6 +5,9 @@
 # 干什么：构建自包含镜像 → docker save → 连同部署描述/安装/体检脚本/宿主单元/
 #         文档一起打包成 opstk-offline-<版本>-<日期>.tar.zst（+ .sha256），
 #         最后打印包大小与目标机三步命令。目标机**全程不需要联网**。
+#         ★ 会把源码指纹写进包内 SOURCE-REVISION.txt（git 记 HEAD+脏标记；
+#           非 git 记 frontend/src/backend/app 的文件数与最近修改时间并醒目提醒），
+#         结尾也打印这行 —— 让人一眼核对"这个包是用哪一版源码打的"。
 #
 # 用法（在仓库根目录执行；也可用 --repo 指定仓库路径）：
 #   bash packaging/make-offline-bundle.sh                          # 构建镜像并打包（需联网）
@@ -47,7 +50,7 @@ while [ $# -gt 0 ]; do
         --skip-build) SKIP_BUILD=1;     shift   ;;
         --out)        OUT="${2:-}";     shift 2 ;;
         --out=*)      OUT="${1#*=}";    shift   ;;
-        -h|--help)    sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "未知参数：$1（用 -h 看用法）" ;;
     esac
 done
@@ -117,6 +120,70 @@ chmod 755 "$STAGE/install.sh" "$STAGE/doctor.sh" "$STAGE/deploy/container-entryp
 printf '%s\n' "$VERSION" > "$STAGE/VERSION"
 ok "部署描述/安装/体检/文档/宿主单元 已就位"
 
+# ---------- 2b. 源码指纹（★ 实测缺口④：证明这个包是用哪一版源码打的） ----------
+# 事故背景：镜像曾从应用机上的【旧前端源码】构建 ⇒ 包里前端没有向导、后端却是新的（混版）。
+# 这里把源码指纹写进包内 SOURCE-REVISION.txt，让"包是哪一版源码打的"可一眼核对：
+#   git 仓库 → git rev-parse HEAD + git status --porcelain（脏标记）；
+#   非 git   → frontend/src 与 backend/app 的文件数与最近修改时间（并醒目提醒打包方）。
+step "第 2b 步 / 写源码指纹（SOURCE-REVISION.txt，让人一眼看到打了哪版）"
+SRC_REV_FILE="$STAGE/SOURCE-REVISION.txt"
+SRC_REV_SUMMARY="（未生成）"
+SRC_REV_IS_GIT=0
+if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SRC_REV_IS_GIT=1
+    GIT_HEAD="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+    GIT_SHORT="$(git -C "$REPO" log -1 --format='%h' 2>/dev/null || true)"
+    GIT_SUBJ="$(git -C "$REPO" log -1 --format='%s (%ci)' 2>/dev/null || true)"
+    GIT_DESC="$(git -C "$REPO" describe --tags --always 2>/dev/null || true)"
+    GIT_DIRTY="$(git -C "$REPO" status --porcelain 2>/dev/null || true)"
+    if [ -n "$GIT_DIRTY" ]; then
+        DIRTY_N="$(printf '%s\n' "$GIT_DIRTY" | grep -c . || true)"
+        DIRTY_LABEL="有未提交改动（${DIRTY_N} 个路径）⇒ 镜像内容未必等于该 commit，发布前请先提交"
+        SRC_REV_SUMMARY="git ${GIT_SHORT}（脏：${DIRTY_N} 项未提交）"
+    else
+        DIRTY_LABEL="干净（工作区无未提交改动，镜像可追溯到该 commit）"
+        SRC_REV_SUMMARY="git ${GIT_SHORT}（干净）"
+    fi
+    {
+        echo "OpsToolkit 离线包 源码指纹"
+        echo "来源:         git 仓库（$REPO）"
+        echo "HEAD:         ${GIT_HEAD:-未知}"
+        echo "HEAD 摘要:    ${GIT_SHORT:-未知} ${GIT_SUBJ}"
+        [ -n "$GIT_DESC" ] && echo "git describe: $GIT_DESC"
+        echo "脏标记:       $DIRTY_LABEL"
+        if [ -n "$GIT_DIRTY" ]; then
+            echo "未提交改动（git status --porcelain，最多列 30 行）:"
+            printf '%s\n' "$GIT_DIRTY" | head -30 | sed 's/^/  /'
+        fi
+        echo "打包时间:     $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        echo "说明:         对照 SOURCE-REVISION 与 install.sh 结尾打印，可确认包里镜像由哪一版源码构建。"
+    } > "$SRC_REV_FILE"
+    ok "源码指纹：${SRC_REV_SUMMARY}（已写入包内 SOURCE-REVISION.txt）"
+else
+    FE_FILES="$( (find "$REPO/frontend/src" -type f 2>/dev/null || true) | wc -l | tr -d '[:space:]')"
+    BE_FILES="$( (find "$REPO/backend/app"  -type f 2>/dev/null || true) | wc -l | tr -d '[:space:]')"
+    FE_MTIME="$( (find "$REPO/frontend/src" -type f -printf '%TY-%Tm-%Td %TH:%TM\n' 2>/dev/null || true) | sort | tail -1)"
+    BE_MTIME="$( (find "$REPO/backend/app"  -type f -printf '%TY-%Tm-%Td %TH:%TM\n' 2>/dev/null || true) | sort | tail -1)"
+    [ -n "$FE_MTIME" ] || FE_MTIME="未知"
+    [ -n "$BE_MTIME" ] || BE_MTIME="未知"
+    {
+        echo "OpsToolkit 离线包 源码指纹"
+        echo "来源:          非 git 仓库（无法用 commit 证明源码版本）"
+        echo "frontend/src:  ${FE_FILES} 个文件，最近修改 ${FE_MTIME}"
+        echo "backend/app:   ${BE_FILES} 个文件，最近修改 ${BE_MTIME}"
+        echo "说明:          镜像曾实测从旧前端源码构建造成「前端没向导、后端是新的」混版镜像；"
+        echo "               请与打包方核对 frontend/src 是完整最新源码（含 Setup.vue 等向导源码）。"
+        echo "打包时间:      $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    } > "$SRC_REV_FILE"
+    SRC_REV_SUMMARY="非 git 仓库：frontend/src ${FE_FILES} 文件 / backend/app ${BE_FILES} 文件（最近修改 ${FE_MTIME%% *}）"
+    ok "源码指纹：${SRC_REV_SUMMARY}（已写入包内 SOURCE-REVISION.txt）"
+    say ""
+    say "${C_Y}  ⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠${C_N}"
+    say "${C_Y}  ⚠ 本次打包目录不是 git 仓库，无法证明源码版本。${C_N}"
+    say "${C_Y}  ⚠ 正式发布请在 git 检出目录打包（指纹才能指到具体 commit）。${C_N}"
+    say "${C_Y}  ⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠⚠${C_N}"
+fi
+
 # ---------- 3. docker save ----------
 step "第 3 步 / 导出镜像（docker save，约 400MB，需一两分钟）"
 docker save "$IMAGE" -o "$STAGE/$IMAGE_TAR_NAME"
@@ -127,11 +194,13 @@ cat > "$STAGE/MANIFEST.txt" <<EOF
 OpsToolkit 离线部署包
 版本:     $VERSION
 镜像:     $IMAGE ($IMAGE_ID)
+源码指纹: $SRC_REV_SUMMARY   （详见包内 SOURCE-REVISION.txt）
 打包时间: $(date '+%Y-%m-%d %H:%M:%S %Z')
 打包主机: $(hostname 2>/dev/null || echo unknown)
 内容:
   opstk-image-*.tar      应用镜像（docker load 导入）
   IMAGE_REF              镜像名:标签（install.sh 读取）
+  SOURCE-REVISION.txt    源码指纹（git commit+脏标记；非 git 则为目录统计）
   install.sh             目标机一键安装（目标机不需要联网）
   doctor.sh              只读环境体检
   docker-compose.yml     应用态部署描述（在 deploy/ 下）
@@ -139,7 +208,7 @@ OpsToolkit 离线部署包
   .env.example           部署变量说明（含默认值，均非密钥）
   deploy/host/           宿主机 dnsmasq 重载 systemd 单元 + 安装脚本 + README
   README-离线部署.md     小白向离线部署文档
-目标机前提: Docker 已安装；root；建议磁盘富余 >= 20 GB；**全程不需要联网**。
+目标机前提: Docker 已安装（真 Docker，不能是 Podman 伪装的 docker）；root；建议磁盘富余 >= 20 GB；**全程不需要联网**。
 EOF
 ok "清单已生成：MANIFEST.txt"
 
@@ -162,6 +231,12 @@ ok "离线包：$ARCHIVE"
 ok "校验和：$SHA_FILE"
 say "  包大小：$(du -h "$ARCHIVE" | awk '{print $1}')"
 say "  SHA256：$(awk '{print $1}' "$SHA_FILE")"
+say ""
+say "${C_B}本包源码指纹（一眼核对打了哪一版，详见包内 SOURCE-REVISION.txt）:${C_N}"
+say "  ${C_G}$(printf '%s' "$SRC_REV_SUMMARY")${C_N}"
+if [ "${SRC_REV_IS_GIT:-0}" != "1" ]; then
+    say "  ${C_Y}提醒：本次打包目录不是 git 仓库，无法证明源码版本；正式发布请在 git 检出目录打包。${C_N}"
+fi
 
 # ---------- 5. 打印目标机三步命令 ----------
 say ""

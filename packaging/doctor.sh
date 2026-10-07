@@ -9,6 +9,8 @@
 #
 # 结论标记：[正常] / [注意]（建议处理，不阻塞）/ [需处理]（不修就没法正常用）
 # 退出码：0 = 没有[需处理]；1 = 存在[需处理]。
+# 体检项（10 项）：①root ②Docker/compose（含"docker 是 Podman 假扮"与守护进程）
+# ③端口占用 ④数据目录 ⑤磁盘 ⑥ISO ⑦容器/镜像/健康 ⑧密钥 ⑨dnsmasq 重载单元 ⑩防火墙放行
 # =============================================================================
 set -uo pipefail
 
@@ -28,7 +30,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --port)   PORT_ARG="${2:-}"; shift 2 ;;
         --port=*) PORT_ARG="${1#*=}"; shift ;;
-        -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) say "未知参数：$1（用 -h 看用法）"; exit 2 ;;
     esac
 done
@@ -79,7 +81,7 @@ say "${C_B}==================== OpsToolkit 环境体检（只读） ============
 say "体检对象：安装目录=${INSTALL_DIR:-（未找到，按默认值检查）}  端口=${PORT}  数据根=${DATA_ROOT}"
 
 # ---------- 1. root ----------
-section "1/9 当前用户"
+section "1/10 当前用户"
 if [ "$IS_ROOT" = "1" ]; then
     good "当前是 root，可以做全部检查"
 else
@@ -87,14 +89,38 @@ else
 fi
 
 # ---------- 2. docker / compose ----------
-section "2 / Docker 与 compose"
+# ★ 实测缺口①（真新机 Rocky 9.4）：/usr/bin/docker 可能是 podman-docker 包提供的
+#   包装脚本（Podman 假扮）：docker --version 输出带 "Emulate Docker CLI using podman"，
+#   docker compose version 报 looking up compose provider failed。必须先揪出来再谈别的。
+FAKE_DOCKER=0
+section "2 / Docker 与 compose（真 Docker + 守护进程 + compose 插件）"
 if command -v docker >/dev/null 2>&1; then
-    good "docker 已安装：$(docker --version 2>/dev/null | sed 's/, version/ /;s/,.*//')"
-    if docker info >/dev/null 2>&1; then
-        good "docker 守护进程在运行，且当前用户有权访问"
+    if printf '%s' "$(docker --version 2>&1 || true)" | grep -qi 'podman'; then
+        FAKE_DOCKER=1
+        bad "/usr/bin/docker 不是真 Docker，而是 Podman 假扮的（podman-docker 包提供的包装脚本）"
+        say "        实测特征：docker --version 输出含 \"Emulate Docker CLI using podman\"；"
+        say "        docker compose 报 looking up compose provider failed；podman-compose/docker-compose 都没有。"
+        say "        本产品需要 Docker + compose 插件（Podman 不能替代）。怎么修（推荐①）："
+        say "        ① 装 真 Docker（Rocky/CentOS 9 可复制；若与 podman-docker 文件冲突先卸载它，podman 本体可保留）："
+        say "          sudo dnf remove -y podman-docker"
+        say "          sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo"
+        say "          sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+        say "          sudo systemctl enable --now docker"
+        say "        ② 或明确放弃在这台机器安装本产品。"
+        has_issue
     else
-        bad "docker 已安装但连不上守护进程（服务没起或无权限）"
-        say "        怎么修：sudo systemctl start docker && sudo systemctl enable docker"
+        good "docker 已安装：$(docker --version 2>/dev/null | sed 's/, version/ /;s/,.*//')"
+    fi
+    if [ "$FAKE_DOCKER" = "1" ]; then
+        :   # 假 docker 上做守护进程检查没有意义（podman 自己的守护进程会"通过"），根因已报
+    elif [ -n "$(docker info --format '{{.ServerVersion}}' 2>/dev/null || true)" ]; then
+        good "docker 守护进程在运行（Server $(docker info --format '{{.ServerVersion}}' 2>/dev/null)），且当前用户有权访问"
+    else
+        bad "Docker 已安装但守护进程未运行（或当前用户无权访问）—— 加载镜像/启动容器都会失败"
+        say "        请执行：sudo systemctl enable --now docker"
+        RAW_INFO="$(docker info 2>&1 | grep -iE 'cannot connect|failed to connect|permission denied|is the docker daemon' | head -n 2 || true)"
+        [ -z "$RAW_INFO" ] && RAW_INFO="$(docker info 2>&1 | tail -n 2 || true)"
+        [ -n "$RAW_INFO" ] && say "        Docker 原始报错（细节）：$(printf '%s' "$RAW_INFO" | head -n1)"
         has_issue
     fi
 else
@@ -104,7 +130,10 @@ else
     has_issue
 fi
 COMPOSE_OK=0
-if docker compose version >/dev/null 2>&1; then
+if [ "$FAKE_DOCKER" = "1" ]; then
+    bad "docker 是 Podman 假扮 ⇒ compose 检查无意义（装好真 Docker 后重跑体检）"
+    has_issue
+elif docker compose version >/dev/null 2>&1; then
     COMPOSE_OK=1
     good "docker compose（插件）可用：$(docker compose version 2>/dev/null | awk '{print $NF}')"
 elif command -v docker-compose >/dev/null 2>&1; then
@@ -222,7 +251,10 @@ if [ -n "$free_mb" ]; then
 else
     warn "取不到 $DATA_ROOT 的磁盘信息（目录不存在？跳过）"
 fi
-DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+DOCKER_ROOT=""
+if [ "${FAKE_DOCKER:-1}" = "0" ]; then
+    DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+fi
 if [ -n "$DOCKER_ROOT" ]; then
     dfree="$(disk_free_mb "$DOCKER_ROOT")"
     if [ -n "$dfree" ] && [ $((dfree/1024)) -lt 5 ]; then
@@ -249,7 +281,7 @@ fi
 
 # ---------- 7. 容器 / 镜像 / 服务 ----------
 section "7 / OpsToolkit 容器与镜像"
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+if [ "$FAKE_DOCKER" = "0" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     if docker image inspect "$OPSTK_IMAGE" >/dev/null 2>&1; then
         good "镜像存在：$OPSTK_IMAGE"
     else
@@ -319,6 +351,40 @@ if [ "$IS_ROOT" = "1" ] && command -v systemctl >/dev/null 2>&1; then
     fi
 else
     warn "非 root 或无 systemctl，跳过 systemd 检查；用 sudo 重跑可查"
+fi
+
+# ---------- 10. 防火墙放行（别的机器能不能打开网页） ----------
+# ★ 实测缺口③（真新机 Rocky 9.4）：firewalld active 且 8000 未放行 ⇒
+#   本机 /health 200、别的机器完全打不开；放行后立刻可达。本项只读不改。
+section "10 / 防火墙放行（网页端口 ${PORT}/tcp；防「本机能开、别机打不开」）"
+if [ "$IS_ROOT" = "1" ] && command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+    # 普通端口放行，或富规则里指名放行了该端口（常按来源网段限制，属机器主人有意的策略），都算已配置
+    if firewall-cmd --query-port="${PORT}/tcp" >/dev/null 2>&1 \
+       || firewall-cmd --list-rich-rules 2>/dev/null | grep -qE "port[= ]\"?${PORT}\"?[[:space:]]+protocol[= ]\"?tcp"; then
+        good "firewalld 已放行 ${PORT}/tcp（或已有指名放行的富规则）—— 别的机器可以打开网页"
+    else
+        bad "firewalld 在运行但没有放行 ${PORT}/tcp —— 别的机器打不开网页（本机访问是正常的，极具迷惑性）"
+        say "        怎么修（体检只读，请自己执行）："
+        say "          sudo firewall-cmd --permanent --add-port=${PORT}/tcp && sudo firewall-cmd --reload"
+        say "        或重跑安装脚本加参数自动放行：sudo bash install.sh --open-firewall"
+        has_issue
+    fi
+elif [ "$IS_ROOT" = "1" ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi 'Status: active'; then
+    if ufw status 2>/dev/null | grep -qE "(^|[[:space:]])${PORT}/tcp([[:space:]]|$)"; then
+        good "ufw 已放行 ${PORT}/tcp（别的机器可以打开网页）"
+    else
+        bad "ufw 在运行但没有放行 ${PORT}/tcp —— 别的机器打不开网页"
+        say "        怎么修（体检只读，请自己执行）：sudo ufw allow ${PORT}/tcp"
+        has_issue
+    fi
+elif command -v firewall-cmd >/dev/null 2>&1 || command -v ufw >/dev/null 2>&1; then
+    if [ "$IS_ROOT" = "1" ]; then
+        good "本机有防火墙工具，但 firewalld/ufw 都不在运行 —— 端口放行不受阻"
+    else
+        warn "检测到防火墙工具，但非 root 无法确认是否放行 ${PORT}/tcp；用 sudo 重跑可查：sudo bash doctor.sh"
+    fi
+else
+    good "本机没有 firewalld/ufw（或未运行）—— 端口放行不受阻"
 fi
 
 # ---------- 总结 ----------
