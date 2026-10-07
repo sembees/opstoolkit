@@ -322,6 +322,20 @@ class ZtpPosition(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class AppMeta(Base):
+    """极小的应用级键值表（安装引导向导等"系统状态"的落点）。
+
+    为什么不用文件/环境变量：向导的"是否已完成 / 管理员是否改过初始口令"必须**随库走**
+    （换容器、换机器时跟着数据目录迁移），而且要在接口里原子读写。键唯一 + updated_at
+    便于排查"什么时候完成/改的"。只允许应用自己写，没有对外批量写接口。
+    """
+    __tablename__ = "app_meta"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class Notification(Base):
     """告警通知发送记录（一次外发尝试 = 一行）。
 

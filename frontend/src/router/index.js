@@ -46,6 +46,10 @@ const layoutChildren = [
   { path: 'pxe', name: 'pxe', component: () => import('../views/Pxe.vue'), meta: { title: 'PXE 装机', icon: 'Cpu', group: '服务器交付' } },
   { path: 'ztp', name: 'ztp', component: () => import('../views/Ztp.vue'), meta: { title: 'ZTP 开局', icon: 'Share', group: '服务器交付' } },
   { path: 'alerts', name: 'alerts', component: () => import('../views/Alerts.vue'), meta: { title: '告警管理', icon: 'Bell', group: '网络设备' } },
+  // 首次访问引导向导：不带 meta.group ⇒ menuGroups 不会把它收进侧栏（它只在
+  // "安装未完成"时由登录跳转/顶栏横幅入口出现，不该常驻菜单）。完成后进入此页
+  // 只会看到"已完成"说明（后端 checks/complete 已 403 关闭）。
+  { path: 'setup', name: 'setup', component: () => import('../views/Setup.vue'), meta: { title: '安装引导', icon: 'Compass' } },
   // 使用帮助：左侧 9 个主题 tab 路由化为 /help/:topic（主题 key/标题见 HELP_TOPICS）
   {
     path: 'help',

@@ -59,6 +59,25 @@
           </template>
         </el-dropdown>
       </el-header>
+      <!-- 安装未完成横幅（任务书）：其它路由照常可用，不硬锁；点了就跳 /setup。
+           /setup 页面自身不显示（向导里已有更完整的步骤指示）。
+           "稍后"= 本会话（浏览器标签页）内不再打扰：sessionStorage，**不写后端、
+           不写 app_meta** —— 点"稍后"绝不是"完成安装"，它只压掉提醒，不产生任何
+           安装状态；刷新标签页还在（同会话），关掉标签页即失效。 -->
+      <el-alert
+        v-if="setup.isNeeded && route.path !== '/setup' && !bannerPostponed"
+        class="ot-setup-banner"
+        type="warning"
+        :closable="false"
+        show-icon
+      >
+        <template #title>
+          安装未完成：还有 5 步引导（改口令 → 环境体检 → 添加镜像 → 网络准备 → 完成），
+          完成后系统才能正式投入使用。
+        </template>
+        <el-button type="primary" size="small" @click="router.push('/setup')">去完成引导</el-button>
+        <el-button size="small" @click="postponeBanner">稍后</el-button>
+      </el-alert>
       <el-main class="ot-main">
         <router-view />
       </el-main>
@@ -99,10 +118,11 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
+import { useSetupStore } from '../stores/setup'
 import http, { flattenDetail } from '../api'
 // 菜单数据改由路由配置显式导出（见 router/index.js 的 menuGroups），
 // 不再按 routes[1].children 下标取 —— 路由数组以后怎么调整都不会静默错位。
@@ -111,6 +131,52 @@ import { menuGroups } from '../router'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const setup = useSetupStore()
+
+// ── 安装引导（顶栏横幅提醒；★ 绝不硬跳转） ────────────────────────────────
+// ★ 事故修正（2026-10-07）：这里原先在挂载时 `router.replace('/setup')`，于是**任何页面
+//   刷新都会被拽进向导** —— 对"人工配好但没有 app_meta 标记"的既有实例（比如本机）等于
+//   把整个应用锁死（实测 12 条路由全部只渲染向导、正文全变 513 字）。
+//   任务书要求是"**不硬锁**其它功能、只提示" ⇒ 这里只拉状态让横幅出现，**不动路由**；
+//   进入 /setup 一律由用户点横幅、或登录时后端判定 needs_setup 后分流。
+//
+// ★ 不变量（前端层面断言，本仓库说明）：本组件的 onMounted **只允许** `setup.refresh()`，
+//   不允许出现任何 router.push / router.replace / router.go —— "进入向导"的唯一合法入口
+//   是用户点击（横幅按钮）或登录分流（Login.vue）。本仓库没有前端测试框架（package.json
+//   无 vitest/jest，只有 vite build），所以用注释钉住约定 + 下面一行 dev 模式"绊线"：
+//   若将来有人把跳转加回这个钩子，开发模式控制台会立即报错（生产构建零开销）。
+//   引入 vitest 后应补一条用例：mount MainLayout → 刷新任意路由 → 路由不变、仅横幅出现。
+onMounted(async () => {
+  const routeBefore = route.fullPath
+  await setup.refresh()
+  if (import.meta.env.DEV && route.fullPath !== routeBefore) {
+    // eslint-disable-next-line no-console
+    console.error('[MainLayout] 违反不变量：onMounted 不得改变路由（安装引导只提示、不硬跳转，'
+      + '进入 /setup 只能由用户点击或登录分流触发）。见本文件 onMounted 上方注释。')
+  }
+})
+
+// ── 横幅"稍后"：本会话内不再显示 ──────────────────────────────────────────
+// 只用 sessionStorage（键：ot_setup_banner_postponed）：同一浏览器标签页内刷新不再弹，
+// 关掉标签页自然失效；**不写后端、不写 app_meta** —— "稍后"不是"完成安装"，
+// 后端的 needs_setup 完全不受它影响（后端口径见 app/core/setup.py 的 db_looks_fresh）。
+// sessionStorage 在隐私模式/嵌入式 webview 里可能被禁用 ⇒ 读写都包 try/catch，
+// 失败时退化为"本次页面内不再显示"（内存标志），横幅绝不会因此抛错。
+const BANNER_POSTPONE_KEY = 'ot_setup_banner_postponed'
+const bannerPostponed = ref(false)
+try {
+  bannerPostponed.value = window.sessionStorage.getItem(BANNER_POSTPONE_KEY) === '1'
+} catch {
+  bannerPostponed.value = false
+}
+function postponeBanner() {
+  bannerPostponed.value = true
+  try {
+    window.sessionStorage.setItem(BANNER_POSTPONE_KEY, '1')
+  } catch {
+    /* 隐私模式等场景拿不到 sessionStorage：内存标志已足够本页面生效 */
+  }
+}
 
 // 侧栏折叠状态（组件私有；刷新回到展开态，行为可预期）
 const collapsed = ref(false)
@@ -314,4 +380,12 @@ async function submitPwd() {
   background: var(--ot-bg-page);
   overflow-y: auto;
 }
+
+/* 安装未完成横幅：贴在页头下方、内容区上方，占一行不挡操作 */
+.ot-setup-banner {
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+}
+.ot-setup-banner :deep(.el-button) { margin-left: var(--ot-space-3); }
 </style>

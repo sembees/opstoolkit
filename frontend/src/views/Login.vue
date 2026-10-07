@@ -24,10 +24,12 @@ import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { User, Lock } from '@element-plus/icons-vue'
 import { useAuthStore } from '../stores/auth'
+import { useSetupStore } from '../stores/setup'
 import { ElMessage } from 'element-plus'
 
 const router = useRouter()
 const auth = useAuthStore()
+const setup = useSetupStore()
 const formRef = ref()
 const loading = ref(false)
 
@@ -44,7 +46,10 @@ async function handleLogin() {
     try {
       await auth.login(form.username, form.password)
       ElMessage.success('登录成功')
-      router.push('/dashboard')
+      // 登录后自动引导（任务书）：安装未完成 ⇒ 直接进 /setup 跟着 5 步走。
+      // 状态拉不到时按"不需要引导"处理，别把人钉在登录页。
+      const st = await setup.refresh()
+      router.push(st.needsSetup ? '/setup' : '/dashboard')
     } catch (e) {
       // error already handled by interceptor
     } finally {
