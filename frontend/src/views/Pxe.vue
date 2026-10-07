@@ -62,11 +62,17 @@
         <el-table-column prop="size_mb" label="大小 (MB)" width="110" />
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
-            <el-select v-model="row._osType" size="small" class="os-type-select">
-              <el-option label="Ubuntu" value="ubuntu" />
-              <el-option label="RHEL" value="rhel" />
+            <!-- 系统目录（catalog）从后端 /it/pxe/os-catalog 渲染（唯一来源 os_catalog.py），
+                 加新系统不再改前端；可搜索，识别不出的 ISO 允许手选 + 手填版本 -->
+            <el-select v-model="row._osType" size="small" class="os-type-select" filterable
+                       placeholder="系统" :loading="!catalogReady">
+              <el-option v-for="o in osCatalog" :key="o.id" :label="o.name" :value="o.id" />
             </el-select>
-            <el-input v-model="row._osVer" size="small" class="os-ver-input" placeholder="22.04" />
+            <!-- 版本：常见版本候选 + 从文件名自动识别 + 已提取介质版本；识别不出可手填 -->
+            <el-select v-model="row._osVer" size="small" class="os-ver-input" filterable allow-create
+                       default-first-option placeholder="22.04">
+              <el-option v-for="v in isoVersionOptions(row)" :key="v" :label="v" :value="v" />
+            </el-select>
             <el-button type="primary" link size="small" @click="askExtract(row)" :loading="row._extracting">提取</el-button>
             <el-popconfirm title="确定删除?" @confirm="delIso(row.name)">
               <template #reference><el-button type="danger" link size="small">删除</el-button></template>
@@ -176,8 +182,12 @@
           <el-col :span="8"><el-form-item label="模板名称"><el-input v-model="form.name" /></el-form-item></el-col>
           <el-col :span="8">
             <el-form-item label="系统">
-              <el-select v-model="form.os_type" @change="onOsChange">
-                <el-option label="Ubuntu 22.04+" value="ubuntu" /><el-option label="RHEL/Rocky/Alma 8+" value="rhel" />
+              <!-- 同一份系统目录：与提取下拉、后端 pick_iso/家族判断同源（os_catalog.py）；
+                   不支持自动安装的系统在选项里就地标注 -->
+              <el-select v-model="form.os_type" @change="onOsChange" filterable>
+                <el-option v-for="o in osCatalog" :key="o.id"
+                           :label="o.auto_install ? o.name : o.name + '（暂不支持自动安装）'"
+                           :value="o.id" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -224,7 +234,7 @@
               </div>
             </el-form-item>
           </el-col>
-          <el-col :span="8"><el-form-item label="root密码" v-if="form.os_type === 'rhel'"><el-input v-model="form.root_password" type="password" show-password /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="root密码" v-if="isKickstart(form.os_type)"><el-input v-model="form.root_password" type="password" show-password /></el-form-item></el-col>
         </el-row>
         <el-form-item label="SSH公钥">
           <el-input v-model="form.ssh_keys_text" type="textarea" :rows="2" placeholder="每行一个公钥" />
@@ -775,6 +785,121 @@ const isoList = ref({ supported: false, isos: [] })
 const mediaList = ref({ supported: true, media: [] })
 const extractLog = ref([])
 
+// ═══ 系统目录（catalog）：唯一来源 = 后端 GET /it/pxe/os-catalog ═══
+// 后端定义点：backend/app/it/pxe/os_catalog.py（pick_iso / 提取白名单 / 安装器家族判断
+// 全部派生自同一个模块）。前端**不维护第二份清单**：装机模板「系统」、ISO 卡片
+// 「系统/版本」下拉与"从文件名识别"都渲染这份载荷 —— 加新系统只改后端目录一处，
+// 不会再出现"加了镜像却选不到"。
+// 接口失败时的降级：从界面上已有的 os_type（模板 + 已提取介质 + 当前选中值）临时收集，
+// 不含硬编码的发行版列表；此时 family=unknown，isKickstart 按 RHEL 系口径兜底。
+const osCatalog = ref([])
+const catalogReady = ref(false)
+
+async function loadOsCatalog() {
+  try {
+    const r = await http.get("/it/pxe/os-catalog", { _silent: true })
+    osCatalog.value = (r && r.items) || []
+    catalogReady.value = true
+  } catch (e) {
+    osCatalog.value = fallbackCatalogFromData()
+    catalogReady.value = false
+  }
+  // 目录到得比 ISO 列表晚时，补一轮"从文件名识别"预填
+  prefillIsoDetect()
+}
+
+function fallbackCatalogFromData() {
+  const ids = new Set()
+  for (const p of (profiles.value || [])) if (p.os_type) ids.add(p.os_type)
+  for (const m of (mediaList.value.media || [])) if (m.os_type) ids.add(m.os_type)
+  for (const row of (isoList.value.isos || [])) if (row._osType) ids.add(row._osType)
+  if (form.os_type) ids.add(form.os_type)
+  if (!ids.size) ids.add("ubuntu")
+  return [...ids].map(id => ({
+    id, name: id, family: "unknown", auto_install: true, aliases: [],
+    filename_keywords: [id], version_hints: [], verified: false,
+    note: "目录接口失败时的降级项（非产品支持清单）",
+  }))
+}
+
+function catalogEntry(id) {
+  const t = String(id || "").trim().toLowerCase()
+  return osCatalog.value.find(e => e.id === t
+    || (e.aliases || []).map(a => String(a).toLowerCase()).includes(t))
+}
+function isKickstart(id) {
+  const e = catalogEntry(id)
+  if (!e) return false
+  // family=unknown 只出现在"目录接口失败"的降级目录里：按 kickstart 家族口径兜底
+  return e.family === "kickstart" || e.family === "unknown"
+}
+function supportsAutoInstall(id) {
+  const e = catalogEntry(id)
+  return e ? !!e.auto_install : true
+}
+function catalogName(id) {
+  const e = catalogEntry(id)
+  return e ? e.name : String(id || "")
+}
+
+// 版本抽取：与后端 _ISO_VER_RE 同一语义（数字段边界）—— "24.03" 不命中 "122.04"，
+// "sp4" 里的 4 会被抽出来但排在真正的版本段之后（我们只取第一个候选）。
+function isoVersionTokens(low) {
+  const out = []
+  const re = /(\d+(?:\.\d+)*)(?![0-9])/g
+  let m
+  while ((m = re.exec(low)) !== null) {
+    if (m.index > 0 && /[0-9]/.test(low[m.index - 1])) continue
+    out.push(m[1])
+  }
+  return out
+}
+
+// 从 ISO 文件名识别 (os_type, os_version)，与后端 transfers.detect_os_from_label /
+// os_catalog.detect_os_from_name 同一套规则：关键字按"最长命中"挑（ubuntukylin 同时
+// 命中 ubuntu/kylin 时判给 ubuntu），版本取第一个候选。
+// 例：openEuler-24.03-LTS-SP4.iso → { os_type: "openeuler", os_version: "24.03" }。
+function detectOsFromIsoName(name) {
+  const low = String(name || "").toLowerCase()
+  const norm = low.replace(/-/g, ".").replace(/_/g, ".")
+  let best = null
+  let bestLen = 0
+  for (const e of osCatalog.value) {
+    for (const k of [e.id, ...(e.aliases || []), ...(e.filename_keywords || [])]) {
+      if (k && norm.includes(k) && k.length > bestLen) { best = e; bestLen = k.length }
+    }
+  }
+  const toks = isoVersionTokens(low)
+  return { os_type: best ? best.id : "", os_version: toks.length ? toks[0] : "" }
+}
+
+// ISO 列表加载后预填：识别得出的系统/版本自动填进行内下拉（用户可改）；
+// 已有值的行不动。
+function prefillIsoDetect() {
+  for (const row of (isoList.value.isos || [])) {
+    if (String(row._osType || "").trim()) continue
+    const det = detectOsFromIsoName(row.name)
+    if (det.os_type) {
+      row._osType = det.os_type
+      if (!String(row._osVer || "").trim()) row._osVer = det.os_version
+    }
+  }
+}
+
+// 提取行的"版本"候选：① 从文件名自动识别 ② 该系统已提取介质的版本
+// ③ 目录里的常见版本候选 ④ 当前已填的值（allow-create 下手填不被冲掉）
+function isoVersionOptions(row) {
+  const out = []
+  const push = v => { if (v && !out.includes(v)) out.push(v) }
+  const det = detectOsFromIsoName(row.name)
+  if (!String(row._osType || "").trim() || det.os_type === row._osType) push(det.os_version)
+  for (const m of (mediaList.value.media || [])) if (m.os_type === row._osType) push(m.os_version)
+  const e = catalogEntry(row._osType)
+  for (const h of ((e && e.version_hints) || [])) push(h)
+  push(String(row._osVer || "").trim())
+  return out
+}
+
 async function loadServerStatus() {
   // ★ 外部审查 U5-F5：轮询链只能有一条。本函数末尾会重新排一个定时器，而
   //   controlService/extractIso 也会调用它 —— 不先清掉待执行的那个，每点一次服务
@@ -826,6 +951,7 @@ async function confirmDeploy() {
 
 async function loadIsos() {
   try { isoList.value = await http.get("/it/pxe/iso/list") } catch(e) {}
+  prefillIsoDetect()   // 新加载的行：能从文件名识别出系统/版本的自动预填（可改）
 }
 async function loadMedia() {
   try { mediaList.value = await http.get("/it/pxe/media/list") } catch(e) {}
@@ -838,7 +964,7 @@ const extractConfirm = ref({ visible: false, row: null })
 function askExtract(row) {
   const osType = (row._osType || "").trim()
   const osVer = (row._osVer || "").trim()
-  if (!osType) { ElMessage.warning("请先选择这个 ISO 的系统类型（Ubuntu / RHEL）"); return }
+  if (!osType) { ElMessage.warning("请先选择这个 ISO 的系统类型（下拉可搜索，openEuler / 麒麟 / UOS 等都在列）"); return }
   if (!osVer) { ElMessage.warning("请先填写版本号（必须与模板里的版本完全一致，否则装机 404）"); return }
   extractConfirm.value = { visible: true, row }
 }
@@ -1232,10 +1358,19 @@ const mediaReady = computed(() => (mediaList.value.media || []).some(
 function defaultVersion(osType) {
   const ready = (mediaList.value.media || []).filter(m => m.os_type === osType && m.complete)
   if (ready.length) return ready[0].os_version
+  const e = catalogEntry(osType)
+  if (e && (e.version_hints || []).length) return e.version_hints[0]
   return osType === "ubuntu" ? "22.04" : "9.3"   // 没有介质时的历史占位值
 }
 
 function onOsChange() {
+  // 目录里 auto_install=false 的系统（debian/openSUSE）：切换时就地说清边界，
+  // 不让运维填完整个模板才在「生成配置」时撞一个 422。
+  if (form.os_type && !supportsAutoInstall(form.os_type)) {
+    ElMessage.warning(
+      catalogName(form.os_type) + " 目前不支持自动安装：只支持识别 ISO 与提取引导介质；"
+      + "保存模板可以，点「生成配置 / 部署」时后端会明确拒绝。")
+  }
   form.os_version = defaultVersion(form.os_type)
 }
 
@@ -1310,11 +1445,11 @@ function buildDiskConfig() {
       if (!v) {
         throw new Error("有数据盘选了「挂已有文件系统」但没填 UUID/卷标：请填上，或把这一列清空。")
       }
-      if (form.os_type !== "rhel") {
+      if (!isKickstart(form.os_type)) {
         throw new Error(
-          "「挂已有文件系统」目前只在 RHEL 系模板实现（kickstart 的 " +
+          "「挂已有文件系统」目前只在 kickstart 家族（RHEL 系/RHEL 克隆/openEuler/Kylin 等）模板实现（kickstart 的 " +
           "part <挂载点> --onpart=UUID=… --noformat）；Ubuntu 侧的等价写法尚未验证，" +
-          "后端会按 fail-closed 拒绝。请改用 RHEL 系模板，或先手工挂载。")
+          "后端会按 fail-closed 拒绝。请改用 kickstart 家族模板，或先手工挂载。")
       }
       if (d.existing_kind === "uuid") o.existing_uuid = v
       else o.existing_label = v
@@ -1571,6 +1706,7 @@ onBeforeUnmount(() => { clearTimeout(installTimer); clearTimeout(serverPollTimer
 onMounted(() => {
   loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); loadMedia(); startInstallPolling()
   loadIsoSpace(); refreshTransfersNow()   // ISO 镜像传输：空间 + 1.5s 轮询
+  loadOsCatalog()   // 系统目录：三个下拉与识别的唯一来源（后端 os_catalog.py）
 })
 </script>
 
@@ -1595,8 +1731,9 @@ onMounted(() => {
 .terminal-output.log-200 { max-height: 200px; }
 .terminal-output.log-420 { max-height: 420px; }
 
-/* 表格行内控件宽度（保留原像素，不做刻度改写） */
-.os-type-select { width: 90px; margin-right: 6px; }
+/* 表格行内控件宽度（保留原像素，不做刻度改写；系统目录条目多，类型下拉加宽 20px，
+   可搜索（filterable）补足长显示名如 "Red Hat Enterprise Linux" 的截断） */
+.os-type-select { width: 110px; margin-right: 6px; }
 .os-ver-input { width: 80px; margin-right: 6px; }
 .w-full { width: 100%; }
 /* 输入框 + 行内单位（如 GB）：不换行、垂直居中，单位贴输入框右侧 */

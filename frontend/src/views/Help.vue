@@ -52,7 +52,7 @@
             <el-collapse-item title="我要裸机装系统，从头怎么操作？" name="b3">
               <el-steps direction="vertical" :active="6">
                 <el-step title="第 1 步：放置 ISO" description="把 Ubuntu live-server 或 RHEL/Rocky 的 ISO 放到服务器 /srv/opstk/iso/ 目录（应用内没有上传接口，用 scp/共享目录放进去即可）" />
-                <el-step title="第 2 步：提取内核" description="打开「PXE 装机」→ ISO 镜像管理面板，为该 ISO 选择系统类型（Ubuntu/RHEL）和版本号，点「提取」。系统自动挂载 ISO 提取 vmlinuz/initrd（Ubuntu 还有 installer.squashfs）" />
+                <el-step title="第 2 步：提取内核" description="打开「PXE 装机」→ ISO 镜像管理面板，为该 ISO 选择系统类型（下拉可搜索，完整清单来自系统目录，含 openEuler/麒麟/UOS 等）和版本号（常见候选 + 从文件名自动识别），点「提取」。系统自动挂载 ISO 提取 vmlinuz/initrd（Ubuntu 还有 installer.squashfs）" />
                 <el-step title="第 3 步：建装机模板" description="点「新建装机模板」，填系统类型/版本、管理员账号密码、磁盘方案与目标磁盘（自动选最大盘 / 按盘名 / 按序列号或型号）。这些就是装好后的系统配置" />
                 <el-step title="第 4 步：一键部署" description="点模板旁的「部署」，确认弹窗里选部署模式（默认 ProxyDHCP，与现有 DHCP 并存更安全）。系统生成配置、写盘、重启 dnsmasq，下方显示部署日志，并列出实际写入的文件" />
                 <el-step title="第 5 步：设置裸机" description="裸机接上与服务器同网段的网线，开机进 BIOS/UEFI 把 Network Boot 设为第一位。部分服务器可按 F12 临时选网络启动" />
@@ -465,7 +465,7 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
         <!-- ===== PXE ===== -->
         <el-tab-pane label="PXE 装机" name="pxe">
           <h3>PXE 装机手册</h3>
-          <p>全自动网络安装 Ubuntu / RHEL 系系统。裸机接上网线，开机即可自动安装操作系统，全程无人值守。OpsToolkit 本机可直接作为完整 PXE 服务器。</p>
+          <p>全自动网络安装 Ubuntu 与 RHEL 系系统（含 RHEL 克隆/近亲：openEuler、银河麒麟、统信 UOS、Anolis、Fedora、Oracle Linux 等，完整清单以「系统目录」为准；debian/openSUSE 目前仅支持识别 ISO 与提取引导介质，生成配置时明确拒绝自动装机）。裸机接上网线，开机即可自动安装操作系统，全程无人值守。OpsToolkit 本机可直接作为完整 PXE 服务器。</p>
 
           <el-collapse v-model="pxeActive" class="mt-3">
 
@@ -542,7 +542,7 @@ scp Rocky-9.5-x86_64-dvd.iso yang@服务器IP:/srv/opstk/iso/</pre>
               <p>进入「PXE 装机」页面的「ISO 镜像管理」面板：</p>
               <ol class="indent-ol">
                 <li>列表中会显示已放置的 ISO 文件名称和大小</li>
-                <li>为该 ISO 选择 OS 类型（Ubuntu / RHEL）和版本号 —— 提取前有确认弹窗，明确目标目录</li>
+                <li>为该 ISO 选择 OS 类型和版本号 —— 类型下拉来自系统目录（可搜索），版本有常见候选并支持从文件名自动识别；提取前有确认弹窗，明确目标目录</li>
                 <li>点「提取」，系统自动挂载 ISO 并提取引导文件（Ubuntu: vmlinuz/initrd/installer.squashfs；RHEL: vmlinuz/initrd）</li>
               </ol>
               <p class="muted-sm mt-1">提取目录是 /srv/opstk/pxe-web/&lt;系统&gt;/&lt;版本&gt;/，必须与模板里的「系统 + 版本」完全一致，否则生成的内核 URL 是 404，机器端只报 "Could not boot image"。</p>
@@ -1096,11 +1096,11 @@ const netValidation = [
 ]
 const pxeFields = [
   { field: "名称", required: "是", desc: "自定义模板名，方便区分" },
-  { field: "系统类型", required: "是", desc: "ubuntu 生成 autoinstall，RHEL 家族（rhel/centos/rocky/alma）生成 Kickstart" },
+  { field: "系统类型", required: "是", desc: "按安装器家族分岔：kickstart 家族（rhel/centos/rocky/almalinux/oraclelinux/openeuler/kylin/uos/anolis/fedora）生成 Kickstart；ubuntu 生成 autoinstall；debian/openSUSE 保存允许但生成时明确拒绝（暂不支持自动装机，仅识别与提取）" },
   { field: "系统版本", required: "是", desc: "需与 ISO 提取目录一致（ubuntu/22.04），决定内核/应答文件 URL" },
   { field: "管理员", required: "是", desc: "安装后的管理用户名（字母/数字/下划线，不以 - 开头），已加入 sudo" },
   { field: "管理员密码", required: "新建必填", desc: "加密存储，生成 shadow 哈希；编辑时留空 = 不修改；绝不代填默认口令" },
-  { field: "root 密码", required: "否", desc: "仅 RHEL 系显示；生成 rootpw --iscrypted 哈希" },
+  { field: "root 密码", required: "否", desc: "仅 kickstart 家族（RHEL 系/RHEL 克隆/openEuler/麒麟/UOS 等）显示；生成 rootpw --iscrypted 哈希" },
   { field: "时区/语言/键盘", required: "否", desc: "默认 Asia/Shanghai / en_US.UTF-8 / us" },
   { field: "SSH 公钥", required: "否", desc: "每行一个公钥，写入 authorized_keys 免密登录" },
   { field: "分区方案", required: "是", desc: "LVM（推荐）/ 直通分区 / 自定义分区表（ZFS 暂未支持：后端未实现，选项已移除）" },

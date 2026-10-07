@@ -25,6 +25,9 @@ from app.it.pxe.generator import (
     _safe_matcher_value,
     _size_to_bytes,
 )
+# 系统目录（catalog）：os_type 白名单的唯一来源（ids + 别名，如 alma = almalinux）。
+# 与 os_catalog 的关系同上：**常量用 import 而不是再抄一份**，加新系统只改目录一处。
+from app.it.pxe.os_catalog import all_os_types as _os_catalog_all_types
 # 物理口形式的管理接口判定：**同一份正则**，从 ct/ztp/generator.py 导入（那边是它唯一的用处）。
 # 为什么不各抄一份：两层各写一份"什么样的接口名算物理口"，迟早漂移成
 # "保存能过、生成被拒"或者反过来 —— 本项目已经在 RAID 成员换算上吃过一次这种亏（见上）。
@@ -35,12 +38,15 @@ class ORMBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# 装机流程只分两条：ubuntu（casper/autoinstall）与 RHEL 家族（anaconda/kickstart）。
-# 这一组必须与 generator.RHEL_FAMILY 保持一致 —— 有测试锁住，避免两边漂移。
-# 之所以要在入口白名单化：生成器按 `== "ubuntu"` 分岔（其余全走 RHEL 分支），而
-# 介质路径只对 RHEL 家族特判；一个 "RHEL"（大写）或拼错的类型，会一边走 anaconda、
-# 一边拿到 Ubuntu 风格的介质名（initrd 而非 initrd.img），生成的地址必然是 404。
-_OS_TYPE_ALLOWED = ("ubuntu", "rhel", "centos", "rocky", "alma", "almalinux", "redhat")
+# 装机流程按**安装器家族**分岔（kickstart 家族 vs ubuntu autoinstall）；
+# debian(preseed)/opensuse(autoyast) 也进白名单 —— 保存模板允许，但生成配置时
+# 生成器会给出"暂不支持自动安装"的明确拒绝（os_catalog.auto_install=False）。
+# 白名单**派生**自 os_catalog（ids + 别名），与 generator/server 共用同一个来源，
+# 有测试锁住三方不漂移。
+# 之所以要在入口白名单化：生成器按目录条目分岔，介质路径按家族特判；
+# 一个 "RHEL"（大写）或拼错的类型，会一边走 anaconda、一边拿到 Ubuntu 风格的
+# 介质名（initrd 而非 initrd.img），生成的地址必然是 404。
+_OS_TYPE_ALLOWED = tuple(_os_catalog_all_types())
 
 
 # ---------- IT 网络配置：输入侧校验辅助（NC2） ----------

@@ -567,13 +567,28 @@ class RhelMediaDetectTest(unittest.TestCase):
 
 
 class OsTypeFamilyTest(unittest.TestCase):
-    """os_type 家族：RHEL 系（rhel/centos/rocky/alma/…）与 rhel 必须完全同构。"""
+    """os_type 家族：白名单/家族判定/目录三方必须同源（os_catalog 是唯一定义点）。"""
 
     def test_allowlist_matches_generator_family(self):
-        """校验层白名单与 generator.RHEL_FAMILY 必须一致，否则两边会漂移。"""
+        """校验层白名单与 generator.RHEL_FAMILY 都派生自 os_catalog，不得漂移。
+
+        语义（catalog 化后）：_OS_TYPE_ALLOWED = 目录全部 ids+别名（含 debian/
+        opensuse —— 保存允许，生成时明确拒绝）；RHEL_FAMILY = kickstart 家族的
+        ids+别名。旧的"白名单 - ubuntu == RHEL_FAMILY"断言随目录化更新。
+        """
         from app.core.schemas import _OS_TYPE_ALLOWED
+        from app.it.pxe import os_catalog
         from app.it.pxe.generator import RHEL_FAMILY
-        self.assertEqual(set(_OS_TYPE_ALLOWED) - {"ubuntu"}, set(RHEL_FAMILY))
+        kick = set(os_catalog.kickstart_family()) | {
+            a for e in os_catalog.entries()
+            if e.installer == os_catalog.KICKSTART for a in e.aliases}
+        self.assertEqual(set(RHEL_FAMILY), kick)
+        self.assertEqual(set(_OS_TYPE_ALLOWED), set(os_catalog.all_os_types()))
+        # kickstart 家族必须覆盖用户实测要装的新系统
+        for t in ("openeuler", "kylin", "uos", "anolis", "fedora",
+                  "oraclelinux", "centos-stream"):
+            self.assertIn(t, set(_OS_TYPE_ALLOWED), t)
+            self.assertIn(t, kick, t)
 
     def test_rhel_family_gets_initrd_img_media(self):
         """填 rocky/centos/alma 时媒体必须与 rhel 一致（initrd.img）。

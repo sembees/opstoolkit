@@ -17,6 +17,7 @@ from app.database import get_db
 from app.core.ziputil import files_to_zip_response
 from app.it.pxe import server as pxe_server
 from app.it.pxe import transfers as iso_transfers
+from app.it.pxe import os_catalog
 from app.it.pxe.generator import (
     DEFAULT_KERNEL_CONSOLE,
     PxeConfig,
@@ -80,17 +81,23 @@ def _safe_decrypt(enc):
 def _default_media(p):
     """根据 OS 类型/版本计算默认的 kernel/initrd/squashfs 路径。
 
-    注意 RHEL 家族（rhel/centos/rocky/alma/almalinux/redhat）与 rhel 完全一致，
-    媒体文件名都是 `initrd.img`；只有 Ubuntu 用 `initrd`。
+    媒体文件名按**目录条目**取（唯一定义点 os_catalog）：
+      · kickstart 家族（rhel/centos/rocky/alma/almalinux/oraclelinux/openeuler/
+        kylin/uos/anolis/fedora）与 rhel 完全一致，都是 `initrd.img`；
+      · ubuntu 用 `initrd` + `installer.squashfs`；
+      · debian 沿用 `initrd`（提取落盘名与目录条目一致）。
     曾经只特判 `ost == "rhel"`，于是 os_type 填 "rocky" 会走 anaconda 分支却拿到
     Ubuntu 风格的 `rocky/9/initrd`（ISO 里实际是 images/pxeboot/initrd.img）→ 必然 404。
     """
     ost = (p.os_type or "ubuntu").strip().lower()
     ver = (p.os_version or "22.04").strip()
     base = ost + "/" + ver + "/"
-    if is_rhel_family(ost):
+    entry = os_catalog.entry(ost)
+    if entry is not None and entry.installer == os_catalog.KICKSTART:
         return base + "vmlinuz", base + "initrd.img", ""
-    return base + "vmlinuz", base + "initrd", base + "installer.squashfs"
+    initrd_name = entry.dest_initrd if entry is not None else "initrd"
+    squashfs = (base + entry.dest_squashfs) if (entry is not None and entry.dest_squashfs) else ""
+    return base + "vmlinuz", base + initrd_name, squashfs
 
 
 def _iso_url_for(p, server_ip, iso_url=""):
@@ -582,6 +589,18 @@ async def list_media(_user=Depends(get_current_user)):
     生成出来的 kernel URL 必然是 404（iPXE 只报 Could not boot image）。
     """
     return pxe_server.media_list()
+
+
+@router.get("/os-catalog")
+async def os_catalog_catalog(_user=Depends(get_current_user)):
+    """GET /api/it/pxe/os-catalog — 支持的系统目录（唯一来源 os_catalog.py）。
+
+    前端三个下拉（装机模板「系统」、ISO 卡片「系统/版本」）与"从文件名识别"
+    都渲染这份载荷；后端的 pick_iso / 提取白名单 / 安装器家族判断同样派生自
+    这同一个模块 —— 加新系统只改 os_catalog.py 一处，不会再出现
+    "加了镜像却选不到"。
+    """
+    return os_catalog.api_payload()
 
 
 @router.post("/iso/{iso_name}/extract")

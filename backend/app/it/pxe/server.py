@@ -23,6 +23,7 @@ from app.core import filestore as _filestore
 # 路径/标识净化复用生成器里那套已经过审的白名单（_safe_line / _safe_ident），
 # 不另写一套更弱的检查：server.py 这边多一个入口，注入面就多一个，标准必须一致。
 from app.it.pxe.generator import _safe_ident, _safe_line
+from app.it.pxe import os_catalog
 
 TFTP_ROOT = "/srv/tftp"
 WEB_ROOT = "/srv/opstk/pxe-web"
@@ -923,10 +924,11 @@ ISO_DIR = "/srv/opstk/iso"
 MOUNT_BASE = "/srv/opstk/mnt"
 
 # ── U9: extract_from_iso 路径安全（先于任何目录创建校验）──
-# 白名单：os_type 归一化小写后必须命中其一
-_ALLOWED_OS_TYPES = ("ubuntu", "debian", "rhel", "centos", "rocky", "alma", "almalinux")
+# 白名单：os_type 归一化小写后必须命中其一。
+# 旧实现是手抄的 7 元组；现在派生自 os_catalog（ids + 别名），加新系统只改目录一处。
+_ALLOWED_OS_TYPES = os_catalog.all_os_types()
 # os_version 仅允许 [A-Za-z0-9._-]+（且显式拒绝 "." 与 ".."）
-_VERSION_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_VERSION_RE = os_catalog.VERSION_RE
 
 
 def _iso_path(iso_name) -> str | None:
@@ -1086,40 +1088,60 @@ def extract_from_iso(iso_name, os_type="ubuntu", os_version="22.04") -> dict:
 def _extract_after_mount(mountpoint, dest, ost, log) -> dict:
     """ISO 已挂载在 mountpoint，提取引导文件到 dest。
 
+    提取计划（候选目录 / 内核与 initrd 的文件名候选 / 落盘名）来自 os_catalog
+    —— 旧实现是两段手抄 if（casper/install vs images/pxeboot），加新系统要再抄一段；
+    现在按目录条目的候选列表按序尝试，找不到就如实报日志，绝不误拷别的文件。
+
     调用方 extract_from_iso() 用 try/finally 保证无论本函数如何返回/抛错都会 umount，
     因此本函数内部**不再**自行卸载。返回值结构与本函数拆分前完全一致。
     """
+    entry = os_catalog.entry(ost)
+    if entry is None:
+        # extract_from_iso 的白名单校验（_ALLOWED_OS_TYPES）已拦截未知类型；
+        # 这里再兜一次底（defense-in-depth，与生成器 fail-closed 的口径一致）。
+        return {"ok": False, "log": log + ["Illegal os_type: " + str(ost)],
+                "dest": dest, "extracted": []}
     os.makedirs(dest, exist_ok=True)
     _dhcp._run(["semanage", "fcontext", "-a", "-t", "tftpdir_t", WEB_ROOT + "(/.*)?"], sudo=True)
     _dhcp._run(["restorecon", "-R", WEB_ROOT], sudo=True)
 
     extracted = []
-    if ost in ("ubuntu", "debian"):
-        src_dir = os.path.join(mountpoint, "casper")
-        if not os.path.isdir(src_dir):
-            src_dir = os.path.join(mountpoint, "install")
-        for fname, targets in [("vmlinuz", ["vmlinuz"]), ("initrd", ["initrd"])]:
-            for t in targets:
-                src = os.path.join(src_dir, t)
+    # 落盘名：内核恒为 vmlinuz；initrd 按目录条目（kickstart 系 initrd.img，
+    # ubuntu/debian 沿用 initrd —— 与 _default_media / media_list 的识别一致）。
+    wanted = [("vmlinuz", "vmlinuz", entry.kernel_names),
+              (entry.dest_initrd, entry.dest_initrd, entry.initrd_names)]
+    for dest_name, _unused, candidates in wanted:
+        if dest_name in extracted:
+            continue
+        for d in entry.kernel_dirs:
+            src_dir = os.path.join(mountpoint, *d.split("/"))
+            for cand in candidates:
+                src = os.path.join(src_dir, cand)
                 if os.path.isfile(src):
-                    shutil.copy2(src, os.path.join(dest, fname))
-                    extracted.append(fname)
+                    shutil.copy2(src, os.path.join(dest, dest_name))
+                    if dest_name not in extracted:
+                        extracted.append(dest_name)
                     break
-        sq_files = [f for f in os.listdir(src_dir) if f.endswith(".squashfs")] if os.path.isdir(src_dir) else []
-        if sq_files:
-            sq_files.sort(key=lambda f: os.path.getsize(os.path.join(src_dir, f)), reverse=True)
-            shutil.copy2(os.path.join(src_dir, sq_files[0]), os.path.join(dest, "installer.squashfs"))
-            extracted.append("installer.squashfs (" + sq_files[0] + ")")
-    elif ost in ("rhel", "centos", "rocky", "alma", "almalinux"):
-        src_dir = os.path.join(mountpoint, "images", "pxeboot")
-        for fname, tname in [("vmlinuz", "vmlinuz"), ("initrd.img", "initrd.img")]:
-            src = os.path.join(src_dir, tname)
-            if os.path.isfile(src):
-                shutil.copy2(src, os.path.join(dest, fname))
-                extracted.append(fname)
+            if dest_name in extracted:
+                break
+    # casper 的 squashfs：只有 ubuntu 的提取要带（debian 的 install 目录没有
+    # squashfs，旧实现的 isdir 判定天然落空 —— 这里显式按目录条目收敛为 ubuntu）。
+    if entry.dest_squashfs:
+        for d in entry.kernel_dirs:
+            src_dir = os.path.join(mountpoint, *d.split("/"))
+            if not os.path.isdir(src_dir):
+                continue
+            sq_files = [f for f in os.listdir(src_dir) if f.endswith(".squashfs")]
+            if sq_files:
+                sq_files.sort(key=lambda f: os.path.getsize(os.path.join(src_dir, f)), reverse=True)
+                shutil.copy2(os.path.join(src_dir, sq_files[0]), os.path.join(dest, entry.dest_squashfs))
+                extracted.append(entry.dest_squashfs + " (" + sq_files[0] + ")")
+                break
 
     if not extracted:
-        log.append("No boot files found in ISO (expected casper/ or images/pxeboot/ boot files); nothing was extracted")
+        expected = " or ".join(d + "/" for d in entry.kernel_dirs) or "(no candidate dirs)"
+        log.append("No boot files found in ISO (expected " + expected
+                   + " boot files); nothing was extracted")
         return {"ok": False, "log": log, "dest": dest, "extracted": extracted}
     log.append("Extracted: " + ", ".join(extracted))
     log.append("Dest: " + dest)

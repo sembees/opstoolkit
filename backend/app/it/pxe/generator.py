@@ -15,6 +15,8 @@ from passlib.hash import sha512_crypt
 import shlex
 from dataclasses import dataclass, replace
 
+from app.it.pxe import os_catalog
+
 
 # ── D7 第 3 层：输出侧兜底 ──
 # 输入侧已在 schemas.py / api/pxe.py 校验，但生成器必须自己也不信任入参：
@@ -133,22 +135,35 @@ class PxeConfig:
     deploy_mode: str = "standalone"  # standalone(独立DHCP) / proxy(ProxyDHCP) / relay(中继模式)
 
 
-# 装机流程只有两条：ubuntu（casper/autoinstall）与 RHEL 家族（anaconda/kickstart）。
-# RHEL 家族与 rhel 完全同构 —— 同一套 inst.* 参数、同一个 kickstart 生成器，
-# 介质文件名也一样是 initrd.img（不是 Ubuntu 的 initrd）。
-# 校验层 schemas._OS_TYPE_ALLOWED 必须与此一致，有测试锁住两者不漂移。
-RHEL_FAMILY = ("rhel", "centos", "rocky", "alma", "almalinux", "redhat")
+# 装机流程按**安装器家族**分岔（不再是"ubuntu vs 其余"）：
+#   · kickstart(anaconda) 家族 —— rhel/rocky/alma/centos(含 Stream)/oraclelinux/
+#     openeuler/kylin/uos/anolis/fedora，复用同一套 inst.* 参数与 kickstart 生成器，
+#     介质文件名也一样是 initrd.img（不是 Ubuntu 的 initrd）；
+#   · ubuntu —— autoinstall(subiquity)/casper 分支（既有实现不变）；
+#   · debian(preseed)/opensuse(autoyast) —— auto_install=False：只支持识别 ISO 与
+#     提取引导介质，生成配置时给出明确拒绝提示（见 _unsupported_auto_install_msg）。
+# 家族成员的**唯一**定义点在 os_catalog.py；这里的常量都从目录派生，绝不再手抄一份。
+# 校验层 schemas._OS_TYPE_ALLOWED 必须与 os_catalog 派生的白名单一致，有测试锁住两者不漂移。
+RHEL_FAMILY = os_catalog.kickstart_family() + tuple(
+    a for e in os_catalog.entries() if e.installer == os_catalog.KICKSTART for a in e.aliases
+)
 
 
 def is_rhel_family(os_type) -> bool:
-    """是否属于 RHEL 家族（决定走 anaconda 分支与 initrd.img 介质路径）。"""
-    return (os_type or "").strip().lower() in RHEL_FAMILY
+    """是否属于 kickstart(anaconda) 家族（决定走 anaconda 分支与 initrd.img 介质路径）。
+
+    兼容历史调用方：入参可能是 "RHEL " 这类带空白/大小写的值（DB 归一化只发生在
+    保存入口），这里先归一化再查目录 —— 与旧行为相比只多不少（旧表查不到就 False）。
+    """
+    return os_catalog.is_kickstart(os_type)
 
 
-# Ubuntu ISO 文件名里 OS 类型的关键字（用于自动挑选镜像）
+# Ubuntu ISO 文件名里 OS 类型的关键字（用于自动挑选镜像）。
+# 旧实现是一张手抄的两键表（"ubuntu" / "rhel 家族联合"）；现在派生自 os_catalog：
+# 每个系统用自己的文件名关键字，只有 rhel 保留"家族联合关键字"的伞语义
+# （pick_iso(rhel) 在 RHEL 家族内按版本挑 —— 既有行为，有测试锁住）。
 _ISO_TYPE_KEYS = {
-    "ubuntu": ("ubuntu",),
-    "rhel": ("rhel", "redhat", "centos", "rocky", "almalinux", "oraclelinux"),
+    e.key: (e.pick_keywords or e.filename_keywords) for e in os_catalog.entries()
 }
 
 
@@ -1816,6 +1831,28 @@ def _unregistered_default_menu() -> str:
     ])
 
 
+def _unsupported_auto_install_msg(os_type) -> str:
+    """debian/openSUSE 等 auto_install=False 的系统：生成配置时的明确拒绝提示。
+
+    要求（用户反馈语境）：能识别、能提取引导介质，但**不能硬凑**一套假应答文件 ——
+    明确说清"只支持识别 + 提取"，并给出可行出路。
+    """
+    e = os_catalog.entry(os_type)
+    display = e.display if e else str(os_type or "")
+    family_hint = ""
+    if e is not None and e.installer == os_catalog.AUTOYAST:
+        family_hint = "（该家族的自动装机机制是 AutoYaST，本项目未实现）"
+    elif e is not None and e.installer == os_catalog.PRESEED:
+        family_hint = ("（debian-installer 的 preseed 与 Ubuntu autoinstall 不是同一套语法，"
+                       "本项目未实现）")
+    return (
+        "暂不支持 " + display + " 的自动安装：本项目目前只实现了 kickstart 家族"
+        "（RHEL/Rocky/Alma/CentOS/Oracle Linux/openEuler/Kylin/UOS/Anolis/Fedora）"
+        "与 Ubuntu autoinstall 的自动装机生成" + family_hint + "；" + display +
+        " 目前支持识别 ISO 与提取引导介质，自动装机请改用已支持的系统或手工安装。"
+    )
+
+
 def _ipxe_menu(c, mac="", answer_url=""):
     # 第 3 层兜底：统一先净化再拼接（见 _safe_line 的说明）
     http_root = _safe_line(c.http_root, "http_root")
@@ -1843,7 +1880,16 @@ def _ipxe_menu(c, mac="", answer_url=""):
     # D7 第 3 层：主机名/mac 会落进 iPXE 脚本的注释行，先做字符白名单
     hn = _safe_hostname(c.hostname)
     mac_s = _safe_mac(mac) or "auto"
-    if (c.os_type or "").strip().lower() == "ubuntu":
+    # 按目录条目分岔（不是按散落的字符串比较）：unknown / auto_install=False 一律
+    # 显式失败，绝不生成一份必然失败的装机菜单。
+    entry = os_catalog.entry(c.os_type)
+    if entry is None:
+        raise ValueError(
+            "未知的系统类型 " + repr(c.os_type or "") + "：请从系统目录中选择"
+        )
+    if not entry.auto_install:
+        raise ValueError(_unsupported_auto_install_msg(entry.key))
+    if entry.key == "ubuntu":
         seed = _safe_line(answer_url, "answer_url") or (answer_base + "/")
         if not seed.endswith("/"):
             seed += "/"
@@ -2166,7 +2212,20 @@ def generate_all(c, installs=None):
     _validate_lines(c)
     answer_base = _answer_base(c)
     files = {}
-    if (c.os_type or "").strip().lower() == "ubuntu":
+    # 按**目录条目**分岔（唯一定义点 os_catalog）：
+    #   · kickstart 家族（rhel/rocky/alma/centos/oraclelinux/openeuler/kylin/uos/
+    #     anolis/fedora）复用同一份 ks 生成器 —— 按"安装器家族"而不是按发行版复制逻辑；
+    #   · ubuntu 保持 autoinstall(subiquity) 既有生成（字节级 golden 锁住）；
+    #   · debian(preseed)/opensuse(autoyast) 目前只支持识别 + 提取引导介质，
+    #     在这里就明确拒绝，绝不硬凑一份假应答文件。
+    entry = os_catalog.entry(c.os_type)
+    if entry is None:
+        raise ValueError(
+            "未知的系统类型 " + repr(c.os_type or "") + "：请从系统目录中选择"
+        )
+    if not entry.auto_install:
+        raise ValueError(_unsupported_auto_install_msg(entry.key))
+    if entry.key == "ubuntu":
         files["user-data"] = _ubuntu_user_data(c)
         files["meta-data"] = "local-hostname: " + _safe_hostname(c.hostname) + "\n"
     else:
@@ -2192,7 +2251,7 @@ def generate_all(c, installs=None):
         tag = _mac_tag(mac)
         hostname = _safe_hostname(inst.get("hostname"), "") or _safe_hostname(c.hostname)
         ic = replace(c, hostname=hostname)
-        if (c.os_type or "").strip().lower() == "ubuntu":
+        if entry.key == "ubuntu":
             seed = answer_base + "/user-data/" + tag + "/"
             files["user-data/" + tag + "/user-data"] = _ubuntu_user_data(ic)
             files["user-data/" + tag + "/meta-data"] = "local-hostname: " + hostname + "\n"
