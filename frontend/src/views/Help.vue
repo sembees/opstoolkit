@@ -517,9 +517,21 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
               <p>本工具完全不跑 DHCP，只提供 TFTP + HTTP 文件服务，靠交换机的 ip helper-address 把 DHCP 请求中继过来。适合大规模、集中式 PXE。</p>
             </el-collapse-item>
 
+            <el-collapse-item title="三种添加镜像的方式" name="p2b">
+              <p>ISO 镜像有三种方式进入服务器的 /srv/opstk/iso/ 目录，按文件大小与现场网络条件选择：</p>
+              <p class="section-title">方式一：页面内「从 URL 拉取」（服务器可直连镜像源时）</p>
+              <p>「ISO 镜像管理」卡片右上角点「添加镜像」→「从 URL 拉取」：填<b>镜像 URL</b>（支持 http/https）、<b>保存文件名</b>（可留空，从 URL 末尾推导，必须以 .iso 结尾）、<b>校验 SHA256</b>（可选）。提交后由服务器后台下载（串行执行），进度在「进行中 / 最近传输」列表实时可见，可取消；完成后回到 ISO 列表点「提取」。</p>
+              <p class="section-title">方式二：页面内「本机上传」（小镜像、服务器无外网）</p>
+              <p>「添加镜像」→「本机上传」：选择本地 ISO 后，前端按后端下发的分块大小（默认 8 MB）用 File.slice 分块顺序上传，界面显示进度条、已传/总量与速度，可随时取消；分块失败自动重试 3 次，仍失败可点「重试当前块」续传。单文件受 max_upload 上限与 ISO 目录剩余空间约束，超限会在提交前禁用按钮并提示改用方式三。</p>
+              <p class="section-title">方式三：零代码 —— scp / SFTP 直放宿主目录（大文件推荐）</p>
+              <p>大文件也可以用 <b>scp / SFTP 直接放到宿主 /srv/opstk/iso</b>，回到本页点「刷新」即可看到，<b>无需走浏览器上传</b>：</p>
+              <pre class="code-block">scp Rocky-9.4-x86_64-dvd.iso root@10.128.118.113:/srv/opstk/iso/</pre>
+              <el-alert type="warning" :closable="false" class="mv-2" title="空间提醒" description="根盘可用空间有限：放之前先看页面/弹窗顶部的可用量，传完记得删除不用的镜像。" />
+            </el-collapse-item>
+
             <el-collapse-item title="操作步骤：从 ISO 到裸机装好" name="p3">
               <p class="section-title">第 1 步：获取并放置 ISO 镜像</p>
-              <p>把 ISO 放到服务器 /srv/opstk/iso/ 目录（应用内无上传接口，用 scp/共享目录放置；该目录同时通过 /pxe/iso 提供只读下载，且只放行 .iso 文件）：</p>
+              <p>把 ISO 放到服务器 /srv/opstk/iso/ 目录（三种放法见上方「三种添加镜像的方式」：页面内 URL 拉取 / 本机分块上传 / scp·SFTP 直放；该目录同时通过 /pxe/iso 提供只读下载，且只放行 .iso 文件）：</p>
               <pre class="code-block"># Ubuntu 22.04 live-server（Ubuntu 必须是 live-server，mini.iso 不含 casper 无法用）
 scp ubuntu-22.04.5-live-server-amd64.iso yang@服务器IP:/srv/opstk/iso/
 

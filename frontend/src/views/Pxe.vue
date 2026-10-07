@@ -41,8 +41,21 @@
     <!-- ISO 管理 -->
     <CardSection title="ISO 镜像管理" icon="Files">
       <template #extra>
-        <el-button size="small" @click="loadIsos"><el-icon><Refresh /></el-icon> 刷新</el-button>
+        <div class="head-actions">
+          <el-button size="small" type="primary" @click="openIsoDialog"><el-icon><Plus /></el-icon> 添加镜像</el-button>
+          <el-button size="small" @click="loadIsos"><el-icon><Refresh /></el-icon> 刷新</el-button>
+        </div>
       </template>
+      <!-- 方式三（零代码路径）说明：大文件走 scp/SFTP，不必经过浏览器。
+           放在卡片最上方，让"先看上面的可用量"指向紧挨着它的这一行空间信息。 -->
+      <div v-if="isoSpaceLine" class="iso-space-line">{{ isoSpaceLine }}</div>
+      <el-alert type="info" :closable="false" class="mb-2" title="大文件推荐：scp / SFTP 直接放到宿主，无需浏览器上传">
+        <div class="iso-alert-body">
+          <div>① 大文件也可以用 <b>scp / SFTP 直接放到宿主 /srv/opstk/iso</b>，回到本页点「刷新」即可看到，无需走浏览器上传；</div>
+          <div>② 可直接复制的例子：<code class="iso-scp-cmd">scp Rocky-9.4-x86_64-dvd.iso root@10.128.118.113:/srv/opstk/iso/</code></div>
+          <div>③ 根盘可用空间有限：放之前先看上面的可用量，传完记得删除不用的镜像。</div>
+        </div>
+      </el-alert>
       <el-alert v-if="isoList.supported === false" type="warning" :closable="false" class="mb-2">需 Linux 环境</el-alert>
       <el-table v-else :data="isoList.isos || []" size="small" empty-text="尚无 ISO 文件，请将 ISO 上传到服务器 /srv/opstk/iso/ 目录">
         <el-table-column prop="name" label="ISO 文件" min-width="280" />
@@ -61,6 +74,42 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- 进行中 / 最近传输（URL 拉取 + 本机上传共用；每 1.5s 轮询 /pxe/iso/transfers） -->
+      <div class="mt-2">
+        <div class="group-label">进行中 / 最近传输（每 1.5 秒自动刷新；服务器串行执行<template v-if="isoTransfers.concurrency">，并发 {{ isoTransfers.concurrency }}</template><template v-if="isoTransfers.busy">，当前有任务占用，新任务会排队</template>）</div>
+        <el-table :data="isoTransfers.items || []" size="small" empty-text="暂无传输任务">
+          <el-table-column prop="name" label="名称" min-width="200" show-overflow-tooltip />
+          <el-table-column label="类型" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.kind === 'fetch' ? 'info' : 'warning'">{{ row.kind === 'fetch' ? 'URL 拉取' : '本机上传' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="进度" min-width="200">
+            <template #default="{ row }">
+              <span class="iso-progress-cell">{{ transferPct(row) }}% · {{ fmtBytes(row.received) }} / {{ row.total ? fmtBytes(row.total) : '?' }}</span>
+              <el-progress v-if="row.state === 'running'" :percentage="transferPct(row)" :stroke-width="6" :show-text="false" class="iso-progress-bar" />
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag size="small" :type="transferStateType(row.state)">{{ transferStateLabel(row.state) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="错误" min-width="160" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.error || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="70" fixed="right">
+            <template #default="{ row }">
+              <el-popconfirm v-if="row.state === 'running'" title="确定取消该传输?" @confirm="cancelTransfer(row)">
+                <template #reference><el-button type="danger" link size="small" :loading="cancelingId === row.id">取消</el-button></template>
+              </el-popconfirm>
+              <span v-else class="list-empty">—</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
       <div v-if="extractLog.length" class="mt-2">
         <div class="group-label">提取日志</div>
         <div class="terminal-output log-pre log-200">{{ extractLog.join('\n') }}</div>
@@ -614,12 +663,86 @@
                    @click="extractConfirm.visible = false; extractIso(extractConfirm.row)">开始提取</el-button>
       </template>
     </el-dialog>
+
+    <!-- 添加镜像弹窗：页签① 从 URL 拉取（后端 202 后台任务）；页签② 本机分块上传
+         （File.slice 按 /pxe/iso/upload/init 下发的 chunk_size 顺序 POST）。
+         第三种方式（scp/SFTP 直放宿主）不在此弹窗 —— 见卡片内蓝色说明与 Help 的
+         「三种添加镜像的方式」小节。 -->
+    <el-dialog v-model="isoDialog" title="添加 ISO 镜像" width="640px" :close-on-click-modal="false">
+      <el-tabs v-model="isoTab">
+        <!-- 页签① 从 URL 拉取 -->
+        <el-tab-pane label="从 URL 拉取" name="fetch">
+          <div class="iso-space-line">{{ isoSpaceLine }}</div>
+          <el-alert v-for="(m, i) in fetchPre.msgs" :key="'f' + i" type="warning" :closable="false" class="mb-2" :title="m" />
+          <el-form label-width="100px" size="default">
+            <el-form-item label="镜像 URL" required>
+              <el-input v-model="fetchForm.url" placeholder="以 http:// 或 https:// 开头的 ISO 直链" clearable :disabled="fetchLoading" />
+            </el-form-item>
+            <el-form-item label="保存文件名">
+              <el-input v-model="fetchForm.filename" placeholder="留空 = 从 URL 末尾推导；必须以 .iso 结尾" clearable :disabled="fetchLoading" />
+            </el-form-item>
+            <el-form-item label="校验 SHA256">
+              <el-input v-model="fetchForm.sha256" placeholder="可选：64 位十六进制，下载完成后核对" clearable :disabled="fetchLoading" />
+            </el-form-item>
+          </el-form>
+          <div class="form-hint">
+            提交后由服务器后台下载（走下方「进行中 / 最近传输」列表），远端文件大小事先未知：
+            超过单文件上限（{{ fmtBytes(isoMaxUpload) }}）或可用空间不足时任务会失败并显示原因；完成后请回列表点「提取」。
+          </div>
+          <div class="mt-2">
+            <el-button type="primary" :loading="fetchLoading" :disabled="fetchPre.blocked" @click="submitFetch">开始拉取</el-button>
+          </div>
+        </el-tab-pane>
+
+        <!-- 页签② 本机上传：el-upload 只负责选文件（auto-upload=false），
+             分块用 File.slice() 按 chunk_size 顺序 POST，见 startManualUpload/runUploadChunks -->
+        <el-tab-pane label="本机上传" name="upload">
+          <div class="iso-space-line">{{ isoSpaceLine }}</div>
+          <el-alert v-for="(m, i) in uploadPre.msgs" :key="'u' + i" type="warning" :closable="false" class="mb-2" :title="m" />
+          <el-upload
+            ref="uploadRef"
+            drag
+            action="#"
+            :auto-upload="false"
+            :limit="1"
+            :disabled="uploading"
+            :on-change="onPickFile"
+            :on-exceed="onExceedFile"
+            :on-remove="onRemoveFile"
+          >
+            <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+            <div class="el-upload__text">拖拽 ISO 文件到此处，或<em>点击选择</em></div>
+            <template #tip>
+              <div class="el-upload__tip">仅支持 .iso（服务器目录只放行 .iso）；单文件上限 {{ fmtBytes(isoMaxUpload) }}，超过请用方式三（scp/SFTP 直放）</div>
+            </template>
+          </el-upload>
+          <el-form label-width="100px" size="default" class="mt-2">
+            <el-form-item label="校验 SHA256">
+              <el-input v-model="uploadSha" placeholder="可选：64 位十六进制，上传完成后核对" clearable :disabled="uploading" />
+            </el-form-item>
+          </el-form>
+          <template v-if="pickedFile">
+            <el-progress :percentage="uploadPct" :stroke-width="10" class="mt-2" />
+            <div class="iso-progress-line">
+              已传 {{ fmtBytes(uploadReceived) }} / {{ fmtBytes(uploadTotal) }}<template v-if="uploading"> · 速度 {{ fmtBytes(uploadSpeed) }}/s</template><template v-else-if="uploadDone"> · 已完成</template>
+              <span v-if="chunkSizeBytes" class="iso-chunk-note">（分块 {{ fmtBytes(chunkSizeBytes) }}，由后端 chunk_size 下发）</span>
+            </div>
+            <div v-if="uploadError" class="iso-error-line">{{ uploadError }}</div>
+          </template>
+          <div class="mt-2">
+            <el-button type="primary" :loading="uploading" :disabled="!pickedFile || uploadPre.blocked || uploadDone" @click="startManualUpload">开始上传</el-button>
+            <el-button v-if="uploading" @click="cancelUpload">取消上传</el-button>
+            <el-button v-if="uploadError && !uploading && !uploadDone" @click="retryUpload">重试当前块</el-button>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount, computed } from "vue"
-import http, { downloadZip } from "../api"
+import http, { downloadZip, pxeIsoSpace, pxeIsoTransfers, pxeIsoFetch, pxeIsoUploadInit, pxeIsoUploadChunk, pxeIsoUploadFinish, pxeIsoTransferCancel } from "../api"
 import { ElMessage } from "element-plus"
 import PageHeader from "../components/PageHeader.vue"
 import CardSection from "../components/CardSection.vue"
@@ -745,6 +868,320 @@ async function delIso(name) {
     ElMessage.success("已删除")
     loadIsos()
   } catch(e) {}
+}
+
+// ═══ ISO 镜像传输（契约冻结：/pxe/iso/space、/transfers、/fetch、/upload/*、/cancel） ═══
+// 三种添加镜像的方式：① URL 拉取（后台任务）② 本机分块上传 ③ scp/SFTP 直放宿主目录
+//（方式三零代码，不走本弹窗 —— 说明在卡片内 el-alert 与 Help「三种添加镜像的方式」）。
+const isoDialog = ref(false)
+const isoTab = ref("fetch")
+const isoSpace = ref(null)          // /pxe/iso/space → {dir,total,free,used,reserve,max_upload}
+const isoSpaceFailed = ref(false)
+const isoTransfers = ref({ items: [], concurrency: 1, busy: false })
+
+const fetchForm = reactive({ url: "", filename: "", sha256: "" })
+const fetchLoading = ref(false)
+
+const uploadRef = ref(null)
+const pickedFile = ref(null)        // 用户选中的 File 对象（el-upload 只当选择器，分块自己发）
+const uploadSha = ref("")
+const uploading = ref(false)        // 分块循环进行中
+const uploadDone = ref(false)
+const uploadReceived = ref(0)
+const uploadTotal = ref(0)
+const uploadSpeed = ref(0)          // 字节/秒（窗口 ≥0.5s 才更新，避免抖动）
+const uploadError = ref("")
+const uploadId = ref("")
+const chunkSizeBytes = ref(0)       // ★ 后端 /upload/init 下发的 chunk_size；0 = 尚未拿到
+let uploadAbort = false             // 取消标志（非响应式，只作循环判断）
+let speedBase = { ts: 0, bytes: 0 }
+const cancelingId = ref("")
+const notifiedDone = new Set()      // 已提示过「完成」的传输 id（轮询不重复弹）
+const notifiedFailed = new Set()
+
+function fmtBytes(n) {
+  const v = Number(n)
+  if (!Number.isFinite(v) || v < 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let i = 0, x = v
+  while (x >= 1024 && i < units.length - 1) { x /= 1024; i++ }
+  return (i === 0 ? String(Math.round(x)) : x.toFixed(1)) + " " + units[i]
+}
+
+const isoSpaceLine = computed(() => {
+  const s = isoSpace.value
+  if (!s) return isoSpaceFailed.value ? "ISO 目录 /srv/opstk/iso：空间信息暂不可用" : ""
+  return "ISO 目录 " + (s.dir || "/srv/opstk/iso") + "：可用 " + fmtBytes(s.free) + " / 共 " + fmtBytes(s.total)
+})
+const isoMaxUpload = computed(() => (isoSpace.value ? Number(isoSpace.value.max_upload || 0) : 0))
+const isoFreeAfterReserve = computed(() => {
+  const s = isoSpace.value
+  if (!s) return null
+  return Number(s.free || 0) - Number(s.reserve || 0)
+})
+
+async function loadIsoSpace() {
+  try { isoSpace.value = await pxeIsoSpace(); isoSpaceFailed.value = false }
+  catch (e) { isoSpaceFailed.value = true }
+}
+
+// ── 传输列表：单链轮询（U5-F5 同款约束：只有一条 setTimeout 链，卸载时清） ──
+let transferPollTimer = null
+async function loadTransfers() {
+  try {
+    const r = await pxeIsoTransfers()
+    isoTransfers.value = (r && r.items) ? r : { items: [], concurrency: 1, busy: false }
+    for (const it of (isoTransfers.value.items || [])) {
+      if (it.state === "done" && !notifiedDone.has(it.id)) {
+        notifiedDone.add(it.id)
+        ElMessage.success((it.kind === "fetch" ? "拉取完成" : "上传完成") + "，下一步请点「提取」")
+        loadIsos()        // 自动刷新 ISO 列表（复用现有刷新逻辑）
+        loadIsoSpace()    // 空间占用也变了
+      } else if (it.state === "failed" && !notifiedFailed.has(it.id)) {
+        notifiedFailed.add(it.id)
+        ElMessage.warning("镜像「" + (it.name || it.id) + "」处理失败：" + (it.error || "原因未知"))
+      }
+    }
+  } catch (e) {}
+  transferPollTimer = setTimeout(loadTransfers, 1500)   // 链尾重排；外部请用 refreshTransfersNow()
+}
+function refreshTransfersNow() {
+  clearTimeout(transferPollTimer)
+  loadTransfers()
+}
+
+function transferPct(row) {
+  const t = Number(row.total)
+  if (!t || t <= 0) return row.state === "done" ? 100 : 0
+  return Math.min(100, Math.round((Number(row.received || 0) / t) * 100))
+}
+function transferStateType(s) { return { running: "warning", done: "success", failed: "danger", canceled: "info" }[s] || "info" }
+function transferStateLabel(s) { return { running: "进行中", done: "完成", failed: "失败", canceled: "已取消" }[s] || s }
+
+async function cancelTransfer(row) {
+  cancelingId.value = row.id
+  try {
+    await pxeIsoTransferCancel(row.id)
+    ElMessage.success("已发送取消请求")
+    refreshTransfersNow()
+  } catch (e) {} finally { cancelingId.value = "" }
+}
+
+// ── 添加镜像弹窗 ──
+function resetUploadUi() {
+  pickedFile.value = null
+  uploadSha.value = ""
+  uploading.value = false
+  uploadDone.value = false
+  uploadReceived.value = 0
+  uploadTotal.value = 0
+  uploadSpeed.value = 0
+  uploadError.value = ""
+  uploadId.value = ""
+  chunkSizeBytes.value = 0
+  uploadAbort = false
+  if (uploadRef.value && uploadRef.value.clearFiles) uploadRef.value.clearFiles()
+}
+function openIsoDialog() {
+  fetchForm.url = ""; fetchForm.filename = ""; fetchForm.sha256 = ""
+  fetchLoading.value = false
+  resetUploadUi()
+  isoTab.value = "fetch"
+  isoDialog.value = true
+  loadIsoSpace()
+  refreshTransfersNow()
+}
+
+// 提交前预检（max_upload / 可用空间）。fetch 的远端大小事先未知，只能检"目录还有没有空间"；
+// upload 的文件大小已知，逐条检 max_upload 与 free-reserve，超了禁用提交并给中文提示。
+const fetchPre = computed(() => {
+  const msgs = []
+  const free = isoFreeAfterReserve.value
+  if (free !== null && free <= 0) {
+    msgs.push("ISO 目录可用空间不足（已含预留 " + fmtBytes(isoSpace.value.reserve || 0) + "），无法再放新镜像，请先删除不用的镜像")
+  }
+  return { blocked: msgs.length > 0, msgs }
+})
+const uploadPre = computed(() => {
+  const f = pickedFile.value
+  if (!f) return { blocked: false, msgs: [] }   // 未选文件：按钮本身禁用，不在此刷警告
+  const msgs = []
+  if (!String(f.name || "").toLowerCase().endsWith(".iso")) {
+    msgs.push("请选择 .iso 结尾的镜像文件（服务器目录只放行 .iso）")
+  }
+  if (isoMaxUpload.value > 0 && f.size > isoMaxUpload.value) {
+    msgs.push("文件 " + fmtBytes(f.size) + " 超过单文件上限 " + fmtBytes(isoMaxUpload.value) + "，请改用上方说明的 scp/SFTP 直放（方式三）")
+  }
+  const free = isoFreeAfterReserve.value
+  if (free !== null && f.size > free) {
+    msgs.push("文件 " + fmtBytes(f.size) + " 超过 ISO 目录可用空间（可用 " + fmtBytes(Math.max(0, free)) + "），请先清理旧镜像或改用方式三")
+  }
+  return { blocked: msgs.length > 0, msgs }
+})
+
+function deriveFilenameFromUrl(url) {
+  try {
+    const u = new URL(url)
+    const segs = u.pathname.split("/").filter(Boolean)
+    if (!segs.length) return ""
+    return decodeURIComponent(segs[segs.length - 1])
+  } catch (e) { return "" }
+}
+
+async function submitFetch() {
+  const url = (fetchForm.url || "").trim()
+  if (!url) { ElMessage.warning("请填写镜像 URL"); return }
+  if (!/^https?:\/\//i.test(url)) { ElMessage.warning("镜像 URL 需以 http:// 或 https:// 开头"); return }
+  const fname = (fetchForm.filename || "").trim() || deriveFilenameFromUrl(url)
+  if (!fname) { ElMessage.warning("无法从 URL 末尾推导文件名，请手动填写「保存文件名」"); return }
+  if (!fname.toLowerCase().endsWith(".iso")) { ElMessage.warning("保存文件名必须以 .iso 结尾"); return }
+  if (fetchPre.value.blocked) { ElMessage.warning(fetchPre.value.msgs[0]); return }
+  fetchLoading.value = true
+  try {
+    const payload = { url, filename: fname }
+    const sha = (fetchForm.sha256 || "").trim()
+    if (sha) payload.sha256 = sha.toLowerCase()
+    await pxeIsoFetch(payload)   // 202 {"id","state"}；409/400 的中文 detail 由拦截器弹出
+    ElMessage.success("已提交后台拉取，进度见「进行中 / 最近传输」")
+    isoDialog.value = false
+    refreshTransfersNow()
+  } catch (e) {
+    // 拦截器已弹中文原因；弹窗保持打开，改完可直接重试
+  } finally { fetchLoading.value = false }
+}
+
+// ── 本机上传：el-upload 仅选文件（auto-upload=false），分块自己按序 POST ──
+function onPickFile(file) {
+  if (uploading.value) return
+  if (file && file.raw) {
+    pickedFile.value = file.raw
+    uploadError.value = ""
+    uploadDone.value = false
+    uploadReceived.value = 0
+    uploadTotal.value = file.raw.size
+    chunkSizeBytes.value = 0
+  }
+}
+function onExceedFile(files) {
+  // limit=1 时再次选择 ⇒ 用新文件替换旧文件（Element Plus 官方推荐写法）
+  if (uploading.value) return
+  if (!uploadRef.value || !files || !files.length) return
+  uploadRef.value.clearFiles()
+  uploadRef.value.handleStart(files[0])
+  onPickFile({ raw: files[0] })
+}
+function onRemoveFile() {
+  if (uploading.value) return
+  pickedFile.value = null
+  uploadReceived.value = 0
+  uploadTotal.value = 0
+  chunkSizeBytes.value = 0
+  uploadError.value = ""
+  uploadDone.value = false
+}
+
+const uploadPct = computed(() => {
+  const t = uploadTotal.value
+  if (!t || t <= 0) return 0
+  return Math.min(100, Math.round((uploadReceived.value / t) * 100))
+})
+
+async function startManualUpload() {
+  const f = pickedFile.value
+  if (!f) { ElMessage.warning("请先选择本地 ISO 文件"); return }
+  if (uploadPre.value.blocked) { ElMessage.warning(uploadPre.value.msgs[0]); return }
+  uploading.value = true
+  uploadError.value = ""
+  uploadDone.value = false
+  uploadAbort = false
+  uploadTotal.value = f.size
+  try {
+    const payload = { filename: f.name, size: f.size }
+    const sha = (uploadSha.value || "").trim()
+    if (sha) payload.sha256 = sha.toLowerCase()
+    const init = await pxeIsoUploadInit(payload)   // → {"id","received":0,"chunk_size"}
+    uploadId.value = init.id
+    // ★ 自查项：File.slice 分块大小取后端 /upload/init 返回的 chunk_size，不写死；
+    //   仅当后端未返回或非法时兜底 8 MB（8 * 1024 * 1024，契约示例值）。
+    const cs = Number(init && init.chunk_size)
+    chunkSizeBytes.value = (Number.isFinite(cs) && cs > 0) ? cs : 8 * 1024 * 1024
+    uploadReceived.value = Number(init && init.received) || 0
+    speedBase = { ts: Date.now(), bytes: uploadReceived.value }
+    await runUploadChunks(f)
+  } catch (e) {
+    uploadError.value = (e && e.message) || "上传失败"
+  } finally { uploading.value = false }
+}
+
+async function retryUpload() {
+  const f = pickedFile.value
+  if (!f || uploading.value) return
+  if (!uploadId.value) { ElMessage.warning("上传尚未开始，请点「开始上传」"); return }
+  uploading.value = true
+  uploadError.value = ""
+  uploadAbort = false
+  try { await runUploadChunks(f) }
+  catch (e) { uploadError.value = (e && e.message) || "上传失败" }
+  finally { uploading.value = false }
+}
+
+// 分块主循环：File.slice() 按 chunk_size 从当前 offset 顺序切、顺序 POST；
+// 当前块连续 3 次失败才停下（offset 不前移，「重试当前块」从原地继续）；
+// received 以后端每次返回为准（防跳块/回退）。
+async function runUploadChunks(f) {
+  while (!uploadAbort && uploadReceived.value < f.size) {
+    const offset = uploadReceived.value
+    const end = Math.min(offset + chunkSizeBytes.value, f.size)
+    const blob = f.slice(offset, end)
+    let lastErr = null
+    let ok = false
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (uploadAbort) return
+      try {
+        const r = await pxeIsoUploadChunk(uploadId.value, offset, blob)
+        const got = Number(r && r.received)
+        if (!Number.isFinite(got) || got <= offset) {
+          throw new Error("后端返回 received=" + got + " 未推进（当前 offset=" + offset + "）")
+        }
+        uploadReceived.value = got
+        const now = Date.now()
+        const dt = (now - speedBase.ts) / 1000
+        if (dt >= 0.5) {
+          uploadSpeed.value = Math.max(0, (uploadReceived.value - speedBase.bytes) / dt)
+          speedBase = { ts: now, bytes: uploadReceived.value }
+        }
+        ok = true
+        break
+      } catch (e) { lastErr = e }
+    }
+    if (!ok) {
+      const why = (lastErr && lastErr.message) || "网络错误"
+      throw new Error("分块上传失败：offset " + offset + " 起的 " + fmtBytes(end - offset) + " 连续 3 次失败（" + why + "）。可点「重试当前块」继续。")
+    }
+  }
+  if (uploadAbort) return
+  if (uploadReceived.value < f.size) return
+  // 全部块到齐 → finish（收尾失败同样可点「重试当前块」：循环会跳过、直接 finish）
+  const fin = await pxeIsoUploadFinish(uploadId.value)
+  uploadDone.value = true
+  notifiedDone.add(uploadId.value)   // finish 这里已提示，轮询到 done 时不再重复弹
+  ElMessage.success("上传完成，下一步请点「提取」")
+  if (fin && fin.name) ElMessage.success("已保存为 " + fin.name)
+  loadIsos()
+  loadIsoSpace()
+  uploadId.value = ""
+}
+
+async function cancelUpload() {
+  uploadAbort = true
+  const id = uploadId.value
+  uploading.value = false
+  if (id) {
+    try { await pxeIsoTransferCancel(id) } catch (e) {}
+  }
+  uploadError.value = "已取消：已上传 " + fmtBytes(uploadReceived.value) + " / " + fmtBytes(uploadTotal.value) + "，可重新选择文件再次上传"
+  ElMessage.info("已取消上传")
+  refreshTransfersNow()
 }
 
 
@@ -1129,8 +1566,12 @@ function startInstallPolling() {
 }
 
 let serverPollTimer = null
-onBeforeUnmount(() => { clearTimeout(installTimer); clearTimeout(serverPollTimer) })
-onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); loadMedia(); startInstallPolling() })
+// onBeforeUnmount 必须清掉所有轮询链（含 ISO 传输的 1.5s 轮询）
+onBeforeUnmount(() => { clearTimeout(installTimer); clearTimeout(serverPollTimer); clearTimeout(transferPollTimer) })
+onMounted(() => {
+  loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); loadMedia(); startInstallPolling()
+  loadIsoSpace(); refreshTransfersNow()   // ISO 镜像传输：空间 + 1.5s 轮询
+})
 </script>
 
 <style scoped>
@@ -1181,4 +1622,14 @@ onMounted(() => { loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos()
 .written-note { margin-top: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 .dialog-body { line-height: 1.7; }
 .path-code { font-size: var(--ot-font-sm); }
+
+/* ── ISO 镜像传输（卡片内说明 / 传输列表 / 添加镜像弹窗）── */
+.iso-space-line { margin-bottom: var(--ot-space-2); font-size: var(--ot-font-sm); color: var(--ot-text-2); }
+.iso-alert-body { font-size: var(--ot-font-xs); line-height: 1.8; }
+.iso-scp-cmd { font-size: var(--ot-font-xs); }
+.iso-progress-cell { font-size: var(--ot-font-xs); color: var(--ot-text-2); }
+.iso-progress-bar { width: 160px; margin-top: var(--ot-space-1); }
+.iso-progress-line { margin-top: var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-2); }
+.iso-chunk-note { color: var(--ot-text-4); }
+.iso-error-line { margin-top: var(--ot-space-1); font-size: var(--ot-font-xs); line-height: 1.6; color: var(--ot-danger); }
 </style>

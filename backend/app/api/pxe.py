@@ -5,7 +5,7 @@ import asyncio
 import os
 import socket
 from urllib.parse import quote, unquote
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from app.core.schemas import PxeGenerateIn, PxeGenerateResult, PxeInstallIn, Pxe
 from app.database import get_db
 from app.core.ziputil import files_to_zip_response
 from app.it.pxe import server as pxe_server
+from app.it.pxe import transfers as iso_transfers
 from app.it.pxe.generator import (
     DEFAULT_KERNEL_CONSOLE,
     PxeConfig,
@@ -598,3 +599,87 @@ async def extract_iso(iso_name: str, body: dict = None, _user=Depends(require_ro
 async def delete_iso(iso_name: str, _user=Depends(require_role("admin"))):
     """删除 ISO 文件。"""
     return pxe_server.delete_iso(iso_name)
+
+
+# ---------- ISO 镜像传输（契约冻结：拉取 A + 分块上传 B） ----------
+# 路由前缀与本文件既有 /iso/list 一组一致（实际挂载在 /api/it/pxe 下）。
+# 全部 require_role("admin")，写法照 delete_iso。错误映射见 _iso_transfer_error：
+# 一律中文 detail，绝不把异常栈抛给前端。
+
+def _iso_transfer_http_error(e: Exception) -> HTTPException:
+    """transfers 的异常 → 契约状态码：Busy→409、NotFound→404、其余 TransferError→400。"""
+    if isinstance(e, iso_transfers.BusyError):
+        return HTTPException(status_code=409, detail=str(e))
+    if isinstance(e, iso_transfers.NotFoundError):
+        return HTTPException(status_code=404, detail=str(e))
+    if isinstance(e, iso_transfers.TransferError):
+        return HTTPException(status_code=400, detail=str(e))
+    # 兜底：未预期异常只暴露类型名，不抛栈
+    return HTTPException(status_code=500, detail="ISO 传输内部错误：" + type(e).__name__)
+
+
+@router.get("/iso/space")
+async def iso_space(_user=Depends(require_role("admin"))):
+    """GET /api/it/pxe/iso/space — ISO 目录磁盘水位 + 单镜像上限（供前端预检）。"""
+    return iso_transfers.space()
+
+
+@router.get("/iso/transfers")
+async def iso_transfer_list(_user=Depends(require_role("admin"))):
+    """GET /api/it/pxe/iso/transfers — 传输进度列表（内存注册表，不落库）。"""
+    return iso_transfers.list_transfers()
+
+
+@router.post("/iso/fetch", status_code=202)
+async def iso_fetch(body: dict = None, _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/iso/fetch — 按 URL 拉取 ISO（202 后台进行，进度看 /iso/transfers）。"""
+    body = body or {}
+    try:
+        return await iso_transfers.start_fetch(
+            body.get("url"), body.get("filename"), sha256=body.get("sha256") or "")
+    except Exception as e:
+        raise _iso_transfer_http_error(e) from e
+
+
+@router.post("/iso/upload/init")
+async def iso_upload_init(body: dict = None, _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/iso/upload/init — 创建分块上传会话（返回 id + chunk_size）。"""
+    body = body or {}
+    try:
+        return iso_transfers.upload_init(
+            body.get("filename"), body.get("size"), sha256=body.get("sha256") or "")
+    except Exception as e:
+        raise _iso_transfer_http_error(e) from e
+
+
+@router.post("/iso/upload/chunk")
+async def iso_upload_chunk(id: str = Form(...), offset: int = Form(...),
+                           chunk: UploadFile = File(...),
+                           _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/iso/upload/chunk — 顺序追加一块（offset 必须等于当前已收长度）。"""
+    try:
+        data = await chunk.read()
+        # fsync 在线程里做，别让 8MiB 块的落盘阻塞事件循环
+        return await asyncio.to_thread(iso_transfers.upload_chunk, id, offset, data)
+    except Exception as e:
+        raise _iso_transfer_http_error(e) from e
+
+
+@router.post("/iso/upload/finish")
+async def iso_upload_finish(body: dict = None, _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/iso/upload/finish — 校验大小+魔数后原子改名，返回识别结果。"""
+    body = body or {}
+    try:
+        # 整文件 sha256 + 魔数/卷标读取是同步块 I/O，放线程里跑
+        return await asyncio.to_thread(iso_transfers.upload_finish, body.get("id"))
+    except Exception as e:
+        raise _iso_transfer_http_error(e) from e
+
+
+@router.post("/iso/transfers/{tid}/cancel")
+async def iso_transfer_cancel(tid: str, _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/iso/transfers/{id}/cancel — 取消拉取/丢弃上传会话（幂等）。"""
+    try:
+        return iso_transfers.cancel_transfer(tid)
+    except Exception as e:
+        raise _iso_transfer_http_error(e) from e

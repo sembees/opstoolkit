@@ -88,6 +88,18 @@ class Settings(BaseSettings):
     # 供 app/core/oncall.py 读取（不再硬编码 2 秒）；只给代码侧默认值，具体值运维走 .env。
     oncall_timeout: float = 2.0
 
+    # ★ ISO 镜像传输（PXE 模块：服务端按 URL 拉取 + 浏览器分块上传）。
+    #   进度只放内存（app/it/pxe/transfers.py 的注册表），**不建表、不写数据库**；
+    #   这三个值只管"准入"与"分块大小"：
+    #   · pxe_iso_max_bytes     单个镜像的字节上限（默认 16 GiB）；
+    #   · pxe_iso_reserve_bytes 磁盘保留水位：准入要求 free - need >= 它（默认 2 GiB），
+    #     给系统/其它服务留余量，避免一次大镜像把盘写满；
+    #   · pxe_transfer_chunk    上传分块大小（字节，默认 8 MiB），/iso/upload/init
+    #     原样返回给前端，前端按它切分块。
+    pxe_iso_max_bytes: int = 16 * 1024**3
+    pxe_iso_reserve_bytes: int = 2 * 1024**3
+    pxe_transfer_chunk: int = 8 * 1024 * 1024
+
 
 @lru_cache
 def get_settings() -> Settings:

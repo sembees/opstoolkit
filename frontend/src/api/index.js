@@ -103,3 +103,52 @@ export async function downloadZip(url, body) {
   URL.revokeObjectURL(objUrl)
   return true
 }
+
+
+// ── PXE ISO 镜像传输（冻结契约：字段名不得改动，见任务契约） ─────────────────
+// 这些接口都在 /api 前缀下（baseURL 已含），路径不写 /api。
+// ★ 前缀必须是 /it/pxe：后端 pxe 路由挂载在 `api_router.include_router(pxe.router, prefix="/it/pxe")`
+//   （见 backend/app/api/__init__.py），与既有的 /it/pxe/iso/list 同一组。
+//   ★ 踩坑记录：契约初稿把这里写成 /pxe/iso/* —— 少了 `it` 段，实测 /api/pxe/iso/list 直接 404。
+// 注意：space / transfers 是 1.5s 级别的**轮询** GET —— 带 _silent: true，
+// 后端未就绪（404）或不支持的平台不会每 1.5s 弹一次红色报错，只让数据保持旧值。
+export function pxeIsoSpace() {
+  return http.get('/it/pxe/iso/space', { _silent: true })
+}
+
+export function pxeIsoTransfers() {
+  return http.get('/it/pxe/iso/transfers', { _silent: true })
+}
+
+// POST /it/pxe/iso/fetch {"url","filename","sha256"?} → 202 {"id","state"}；409/400 的
+// 中文 detail 由响应拦截器统一弹出（保持非 _silent，用户必须看到失败原因）。
+export function pxeIsoFetch(payload) {
+  return http.post('/it/pxe/iso/fetch', payload)
+}
+
+// POST /it/pxe/iso/upload/init {"filename","size","sha256"?} → {"id","received","chunk_size"}
+export function pxeIsoUploadInit(payload) {
+  return http.post('/it/pxe/iso/upload/init', payload)
+}
+
+// POST /it/pxe/iso/upload/chunk（multipart：id / offset / chunk 文件字段）
+// axios 在浏览器端对 FormData 会自动带上 multipart 边界，这里不手写 Content-Type。
+// 分块失败要走前端自己的重试计数，_silent: true 关掉拦截器的逐次弹错，由调用方
+// 在 3 次重试耗尽后给出一条明确的中文报错。
+export function pxeIsoUploadChunk(id, offset, chunkBlob) {
+  const fd = new FormData()
+  fd.append('id', id)
+  fd.append('offset', String(offset))
+  fd.append('chunk', chunkBlob, 'chunk.bin')
+  return http.post('/it/pxe/iso/upload/chunk', fd, { _silent: true })
+}
+
+// POST /it/pxe/iso/upload/finish {"id"} → {"ok",name,size,detected}
+export function pxeIsoUploadFinish(id) {
+  return http.post('/it/pxe/iso/upload/finish', { id })
+}
+
+// POST /it/pxe/iso/transfers/{id}/cancel → {"ok":true}
+export function pxeIsoTransferCancel(id) {
+  return http.post('/it/pxe/iso/transfers/' + encodeURIComponent(id) + '/cancel')
+}
