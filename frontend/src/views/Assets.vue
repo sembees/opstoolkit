@@ -14,7 +14,7 @@
         <el-table-column prop="name" label="名称" min-width="130" />
         <el-table-column label="类型" width="70">
           <template #default="{ row }">
-            <el-tag :type="row.category === 'ct' ? 'primary' : 'success'" size="small">{{ row.category === 'ct' ? 'CT' : 'IT' }}</el-tag>
+            <el-tag size="small">{{ row.category === 'ct' ? 'CT' : 'IT' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="vendor" label="厂商" width="80" />

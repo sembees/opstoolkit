@@ -34,7 +34,7 @@
         <el-table-column prop="name" label="模板名称" min-width="130" />
         <el-table-column label="厂商" width="90">
           <template #default="{ row }">
-            <el-tag size="small" :type="vendorType(row.vendor)">{{ vendorLabel(row.vendor) }}</el-tag>
+            <el-tag size="small">{{ vendorLabel(row.vendor) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="mgmt_vlan" label="管理VLAN" width="90" />
@@ -305,7 +305,7 @@
                  收进 .dlg-actions（flex + gap，同 .card-actions 做法），右对齐、间距统一、不折行。 -->
             <div class="dlg-actions">
               <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
-              <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
+              <el-button size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
               <el-button type="warning" size="small" @click="doDeploy" :loading="deploying" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Promotion /></el-icon> 部署到本机</el-button>
             </div>
           </el-col>

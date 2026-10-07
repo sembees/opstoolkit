@@ -54,7 +54,7 @@
               <el-option label="RHEL" value="rhel" />
             </el-select>
             <el-input v-model="row._osVer" size="small" class="os-ver-input" placeholder="22.04" />
-            <el-button type="success" link size="small" @click="askExtract(row)" :loading="row._extracting">提取</el-button>
+            <el-button type="primary" link size="small" @click="askExtract(row)" :loading="row._extracting">提取</el-button>
             <el-popconfirm title="确定删除?" @confirm="delIso(row.name)">
               <template #reference><el-button type="danger" link size="small">删除</el-button></template>
             </el-popconfirm>
@@ -75,7 +75,7 @@
         <el-table-column prop="name" label="模板名称" min-width="130" />
         <el-table-column label="系统" width="120">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.os_type === 'ubuntu' ? 'success' : 'danger'">{{ osLabel(row) }}</el-tag>
+            <el-tag size="small">{{ osLabel(row) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="disk_scheme" label="磁盘" width="70" />
@@ -85,7 +85,7 @@
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="openGenDialog(row)">生成配置</el-button>
-            <el-button type="success" link size="small" @click="deployProfile(row)">部署</el-button>
+            <el-button type="primary" link size="small" @click="deployProfile(row)">部署</el-button>
             <el-button link type="primary" size="small" @click="openProfileDialog(row)">编辑</el-button>
             <el-popconfirm title="确定删除?" @confirm="delProfile(row.id)">
               <template #reference><el-button type="danger" link size="small">删除</el-button></template>
@@ -520,7 +520,7 @@
           {{ genMediaNote }}
         </el-alert>
         <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
-          <el-button type="success" size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
+          <el-button size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
           <!-- U5-F7：预览与下载必须是同一份内容 -->
           <el-tag v-if="genStale" size="small" type="warning" class="tag-gap">预览已失效（参数或装机记录已变化，请重新生成）</el-tag>
           <el-tag v-else-if="Object.keys(genFiles).length" size="small" type="success" class="tag-gap">下载内容 = 预览内容</el-tag>

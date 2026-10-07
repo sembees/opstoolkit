@@ -8,6 +8,8 @@
      hover/active），只改主色不改色阶会出现"主色变了、浅底还是旧色"的 bug。
      所以：token 沿用 EP 的语义取值，再由 element-bridge.css 把 --el-* 映射到 --ot-*。
      以后要换品牌色（方案 B）只需改本文件里的 --ot-primary 并重算色阶，页面一个字都不用动。
+      （本轮品牌换肤已落地：语义色/侧栏/终端/登录渐变改为下方指定的品牌色值；
+        EP 派生色阶同步改由 element-bridge.css 按新基色显式覆盖，两边必须一起改。）
 
    取值来源（可复算）：frontend/node_modules/element-plus/dist/index.css 的 :root 段
    （117 个 --el-* 键），由 mimo/extract_el_palette.py 抽出，非凭记忆。
@@ -44,53 +46,57 @@
   --ot-text-inverse: #fff;       /* 深底上的白字（侧栏/终端） */
 
   /* ── 背景 ── */
-  --ot-bg-page: #f0f2f5;         /* 页面底（= EP --el-fill-color，保持零变化） */
+  --ot-bg-page: #F8F8F9;         /* 页面底（品牌换肤指定值；EP --el-fill-color 经 bridge 跟随） */
   --ot-bg-container: #fff;       /* 卡片/容器 */
-  --ot-bg-hover: #f5f7fa;        /* 悬停（= EP --el-fill-color-light） */
-  --ot-bg-code: #1e1e1e;         /* 代码块底（Help 用，原 VS Code 深色） */
+  --ot-bg-hover: #E9F1FA;        /* 悬停（品牌换肤指定值；EP --el-fill-color-light 经 bridge 跟随） */
+  --ot-bg-code: #0A1828;         /* 代码块底（Help 用；原 VS Code 深色，品牌换肤指定值） */
 
   /* ── 边框/分隔 ── */
   --ot-border: #dcdfe6;          /* ← 收编现状的 #dcdfe6 */
   --ot-border-light: #e4e7ed;    /* ← 收编现状的 #e8e8e8 */
   --ot-divide: #ebeef5;
 
-  /* ── 语义色（与 EP 同值；换肤时只改这里） ── */
-  --ot-primary: #409eff;
-  --ot-success: #67c23a;
-  --ot-warning: #e6a23c;
-  --ot-danger: #f56c6c;
+  /* ── 语义色（品牌换肤指定值；EP 的同名派生色阶在 element-bridge.css 同步覆盖） ── */
+  --ot-primary: #106EBE;
+  --ot-success: #009B4D;
+  --ot-warning: #ECA427;
+  --ot-danger: #C72B32;
   --ot-info: #909399;
 
   /* ── 分类强调色：**仅**用于"指标卡/状态分类"这类需要区分彼此的场合 ──
-        （不是语义色，不要用在成功/失败/警告上）
-        accent-4 是全套里唯一的非 EP 色值，只为了保持 4 个指标可区分；
-        若不需要区分，把 accent-1..4 全指向 --ot-primary 即可。 */
-  --ot-accent-1: #409eff;
-  --ot-accent-2: #67c23a;
-  --ot-accent-3: #e6a23c;
-  --ot-accent-4: #722ed1;
+        （不是语义色，不要用在成功/失败/警告上；所以这里**刻意不用**语义色的值，
+          否则"分类色"与"状态色"同色，等于把语义色当装饰 —— 与"语义色克制"原则冲突）
+        四个值都取自同一篇配色文章（品牌换肤依据），彼此可区分：
+          蓝 #106EBE（方案 8）、青 #178582（方案 21）、金 #957C3D（方案 23）、紫 #4F0341（方案 24） */
+  --ot-accent-1: #106EBE;
+  --ot-accent-2: #178582;
+  --ot-accent-3: #957C3D;
+  --ot-accent-4: #4F0341;
 
   /* ── 侧栏（P2 布局改版前先把现状值等值收进 token，改版时只动这里） ── */
-  --ot-sider-bg: #001529;
-  --ot-sider-bg-hover: #001121;  /* 等值搬自 EP 的老算法 TinyColor('#001529').shade(20)：
+  --ot-sider-bg: #111439;
+  --ot-sider-bg-hover: #0E102E;  /* = TinyColor('#111439').shade(20)，与老算法同式：与黑按 20% 混合，
+                                    逐通道 sRGB 线性插值 round(a*(1-t)+b*t)，a=基色通道、b=黑(0)：
+                                    17/20/57 → round(13.6)/round(16.0)/round(45.6) = 14/16/46 = #0E102E；
                                     菜单 hover 底色原由 el-menu 的 background-color prop 经 JS 算出；
                                     改走 CSS 变量后必须显式给出，否则 hover 会退回无色/黑色 */
-  --ot-sider-text: #a6adb4;
+  --ot-sider-text: #96C2DB;
   --ot-sider-active: #fff;
 
   /* ── 终端输出（原 main.css 是 Material 色，现并入同一套语义色） ── */
-  --ot-term-bg: #1a1a2e;
+  --ot-term-bg: #0A1828;
   --ot-term-fg: #e0e0e0;
-  --ot-term-cmd: #409eff;        /* 命令      ← 原 Material #4fc3f7 */
-  --ot-term-ok: #67c23a;         /* 成功       ← 原 Material #81c784 */
-  --ot-term-warn: #e6a23c;       /* 警告       ← 原 Material #ffb74d */
-  --ot-term-err: #f56c6c;        /* 错误       ← 原 Material #ef5350 */
-  --ot-term-info: #909399;       /* 普通输出   ← 原 Material #90a4ae */
+  --ot-term-cmd: #00ABE4;        /* 命令      ← 原 Material #4fc3f7；品牌换肤指定值 */
+  --ot-term-ok: #0FFCBE;         /* 成功       ← 原 Material #81c784；品牌换肤指定值 */
+  --ot-term-warn: #ECA427;       /* 警告       ← 原 Material #ffb74d；与语义 warning 同值（深色底上够亮） */
+  --ot-term-err: #E7473C;        /* 错误       ← 原 Material #ef5350；品牌换肤指定值（方案 20 亮红，
+                                    比语义 danger #C72B32 亮 —— 深色终端底上深砖红对比不足） */
+  --ot-term-info: #96C2DB;       /* 普通输出   ← 原 Material #90a4ae；品牌换肤指定值 */
 
   /* ── 代码块前景（Help） ── */
   --ot-code-fg: #d4d4d4;
 
   /* ── 登录页渐变（P2 重做登录页时改这里） ── */
-  --ot-login-from: #1a2a6c;
-  --ot-login-to: #2d4373;
+  --ot-login-from: #01257D;
+  --ot-login-to: #111439;
 }

@@ -10,9 +10,13 @@
      · 必须在 element-plus/dist/index.css **之后**引入（见 main.js 的引入顺序），否则被库覆盖；
      · 这里**只映射语义上等价的键**：不改 --el-text-color-placeholder 等我们并未统一的键，
        以免引入无谓的视觉漂移；
-     · EP 的派生色阶（--el-color-primary-light-3/5/7/8/9、-dark-2）**故意不动**：
-       当前 --ot-* 与 EP 取值相同，色阶天然一致。将来若换品牌主色（方案 B），
-       必须同时按 EP 的混色算法派生整套色阶，否则浅底会残留旧色（花色 bug）。
+     · EP 的派生色阶（--el-color-primary/success/warning/danger 的 -light-3/5/7/8/9、-dark-2）：
+       当初 --ot-* 与 EP 取值相同、色阶天然一致，故未覆盖；本轮品牌换肤后主色已不同，
+       **必须在下面显式覆盖**。为什么必须补：EP 只在 :root（element-plus/dist/index.css）声明
+       这些派生阶，组件不会跟着主色重算 ⇒ 只改主色不覆盖色阶时，按钮 hover/active/禁用态、
+       表格行选中/悬停底色等仍是旧主色派生的旧浅色（「新主色 + 旧浅蓝」脱节花色）。
+       覆盖值按 EP 同款混色算法从新基色硬算（见下方注释），硬编码 hex——EP 期望具体色值，
+       不能用 color-mix()。
    ============================================================================ */
 :root {
   /* 语义色 */
@@ -22,6 +26,51 @@
   --el-color-danger: var(--ot-danger);
   --el-color-error: var(--ot-danger);
   --el-color-info: var(--ot-info);
+
+  /* ── EP 派生色阶（必须显式覆盖，原因见文件头「注意」第三条） ──
+     为什么必须补：EP 只在 :root（element-plus/dist/index.css）声明这些派生阶，不覆盖
+     就会与自定义主色脱节——主色已指到新值，而按钮 hover/禁用、表格行选中底色用的
+     light-* 与 dark-2 还是旧主色派生的旧浅蓝。
+     算法与 EP 生成式一致（已对 EP 2.14.3 出厂 30 个派生阶逐一验证吻合）：
+       light-N = 主色与白混合，白权重 = N/10；dark-2 = 主色与黑混合，黑权重 = 2/10；
+       逐通道 sRGB 线性插值 round(a*(1-t) + b*t)，四舍五入（.5 进位）。
+     硬编码具体 hex：EP 期望具体色值，不用 color-mix()。 */
+  /* primary ← #106EBE */
+  --el-color-primary-light-3: #589AD2;
+  --el-color-primary-light-5: #88B7DF;
+  --el-color-primary-light-7: #B7D4EC;
+  --el-color-primary-light-8: #CFE2F2;
+  --el-color-primary-light-9: #E7F1F9;
+  --el-color-primary-dark-2: #0D5898;
+  /* success ← #009B4D */
+  --el-color-success-light-3: #4DB982;
+  --el-color-success-light-5: #80CDA6;
+  --el-color-success-light-7: #B3E1CA;
+  --el-color-success-light-8: #CCEBDB;
+  --el-color-success-light-9: #E6F5ED;
+  --el-color-success-dark-2: #007C3E;
+  /* warning ← #ECA427 */
+  --el-color-warning-light-3: #F2BF68;
+  --el-color-warning-light-5: #F6D293;
+  --el-color-warning-light-7: #F9E4BE;
+  --el-color-warning-light-8: #FBEDD4;
+  --el-color-warning-light-9: #FDF6E9;
+  --el-color-warning-dark-2: #BD831F;
+  /* danger ← #C72B32 */
+  --el-color-danger-light-3: #D86B70;
+  --el-color-danger-light-5: #E39599;
+  --el-color-danger-light-7: #EEBFC2;
+  --el-color-danger-light-8: #F4D5D6;
+  --el-color-danger-light-9: #F9EAEB;
+  --el-color-danger-dark-2: #9F2228;
+  /* error 在 EP 默认色板里与 danger 完全同值（alias），同样保持跟随，
+     免得 el-message--error / 表单校验态等用 error 浅底的组件残留旧红浅色 */
+  --el-color-error-light-3: var(--el-color-danger-light-3);
+  --el-color-error-light-5: var(--el-color-danger-light-5);
+  --el-color-error-light-7: var(--el-color-danger-light-7);
+  --el-color-error-light-8: var(--el-color-danger-light-8);
+  --el-color-error-light-9: var(--el-color-danger-light-9);
+  --el-color-error-dark-2: var(--el-color-danger-dark-2);
 
   /* 文字 */
   --el-text-color-primary: var(--ot-text-1);

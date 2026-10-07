@@ -53,7 +53,7 @@
     <CardSection title="快捷入口">
       <el-space wrap>
         <el-button type="primary" plain @click="$router.push('/inspection')"><el-icon><Monitor /></el-icon> CT 巡检</el-button>
-        <el-button type="success" plain @click="$router.push('/netconfig')"><el-icon><Connection /></el-icon> 网络配置生成</el-button>
+        <el-button plain @click="$router.push('/netconfig')"><el-icon><Connection /></el-icon> 网络配置生成</el-button>
         <el-button plain @click="$router.push('/assets')"><el-icon><Coin /></el-icon> 资产管理</el-button>
       </el-space>
     </CardSection>

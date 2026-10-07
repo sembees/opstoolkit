@@ -34,10 +34,10 @@
           </el-select>
           <!-- 工具条里统一**默认 size**：同行两 个 el-select、「开始巡检」「清屏」都是默认（32px），
                这里原先写死 size="small" 会矮一截、整行高矮不齐（审计实测 24/30/32 并存）。 -->
-          <el-button type="info" plain @click="openTemplates">
+          <el-button plain @click="openTemplates">
             <el-icon><Setting /></el-icon> 模板管理
           </el-button>
-          <el-tag v-if="currentTemplate" size="small" :type="currentTemplate.is_system ? 'info' : 'warning'">
+          <el-tag v-if="currentTemplate" size="small">
             {{ currentTemplate.vendor }} | {{ currentTemplate.items.length }} 项指标
           </el-tag>
         </el-form-item>
@@ -183,7 +183,7 @@
         </el-table-column>
         <el-table-column label="类型" width="70">
           <template #default="{ row }">
-            <el-tag :type="row.is_system ? 'info' : 'success'" size="small">{{ row.is_system ? '系统' : '自定义' }}</el-tag>
+            <el-tag size="small">{{ row.is_system ? '系统' : '自定义' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" min-width="200" fixed="right">
@@ -191,10 +191,10 @@
             <!-- 5 个操作必须排在**同一行**：包进 .table-actions（工具类里已抵消
                  EP 相邻按钮的 12px 外边距并换成 4px 间距）—— 详见 main.css 的注释。 -->
             <div class="table-actions">
-              <el-button link type="primary" size="small" @click="openTplView(row)">查看</el-button>
-              <el-button link type="success" size="small" @click="exportTemplate(row)">导出</el-button>
-              <el-button link type="primary" size="small" @click="cloneTpl(row)">克隆</el-button>
-              <el-button link type="warning" size="small" :disabled="row.is_system" @click="openTplEdit(row)">编辑</el-button>
+              <el-button link size="small" @click="openTplView(row)">查看</el-button>
+              <el-button link size="small" @click="exportTemplate(row)">导出</el-button>
+              <el-button link size="small" @click="cloneTpl(row)">克隆</el-button>
+              <el-button link size="small" :disabled="row.is_system" @click="openTplEdit(row)">编辑</el-button>
               <el-popconfirm title="确定删除?" @confirm="delTpl(row.id)">
                 <template #reference><el-button link type="danger" size="small" :disabled="row.is_system">删除</el-button></template>
               </el-popconfirm>
