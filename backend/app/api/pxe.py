@@ -202,9 +202,11 @@ def _detect_rhel_media(mirror, server_ip):
         base_dir = os.path.join(base_dir, subs[0])
         repo_url = _serve_url(base_dir, server_ip)
     stage2 = ""
+    stage2_dir = ""
     cur = base_dir
     for _ in range(3):
         if os.path.isdir(os.path.join(cur, "images")):
+            stage2_dir = cur
             stage2 = _serve_url(cur, server_ip)
             break
         parent = os.path.dirname(cur)
@@ -212,10 +214,22 @@ def _detect_rhel_media(mirror, server_ip):
             break
         cur = parent
     extra = []
-    parent = os.path.dirname(base_dir)
-    if os.path.isdir(parent):
-        for sib in sorted(os.listdir(parent)):
-            sp = os.path.normpath(os.path.join(parent, sib))
+    # ★ 额外仓库 = **stage2 那一层里的兄弟仓库**（2026-10-08 修正，取代原先"扫主仓库父目录"）。
+    #   为什么按 stage2 定界：
+    #     · RHEL/Rocky DVD：mirror 常填 `…/rocky-9.4/BaseOS/`，主仓库 = BaseOS，
+    #       stage2 层 = `…/rocky-9.4/`（含 images/）⇒ 兄弟里认出 AppStream ✓
+    #       （少了它会在 auth 步骤崩，见本函数 docstring；既有用例与生产 ks 都是这个行为）。
+    #     · 单仓库 DVD（openEuler 24.03：`Packages/`+`repodata/` 直接躺在树根）：
+    #       主仓库**就是** stage2 层 ⇒ 没有"兄弟仓库"可谈。若照"主仓库父目录"去扫，
+    #       扫到的是**别的发布介质树**（我们发布过 centos-7、rocky-9.4），于是 ks 多出
+    #       `repo --name="centos-7"`、iPXE 多出 `inst.addrepo=centos-7,<url>`，
+    #       真机后果实测：**openEuler 24.03 根本不取 kickstart**（安装器退回交互式主菜单；
+    #       手工去掉那条 addrepo 后立刻开始抓 ks）。
+    #       证据：mimo/out/e2e-vm140-openeuler-console.log 与 RUNBOOK §5.83.44/45。
+    if stage2_dir and os.path.normpath(stage2_dir) != os.path.normpath(base_dir) \
+            and os.path.isdir(stage2_dir):
+        for sib in sorted(os.listdir(stage2_dir)):
+            sp = os.path.normpath(os.path.join(stage2_dir, sib))
             # 用 normpath 比较而不是字符串相等：rel 里带的是 '/'，os.path.join 在
             # Windows 下会给出 '\'，直接比会把主仓库自己也算成"额外仓库"。
             if sp == base_dir or not os.path.isdir(sp):
