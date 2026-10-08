@@ -1902,7 +1902,16 @@ def _rhel_ks(c):
         "",
         net,
         "",
-        "auth --enableshadow --passalgo=sha512",
+        # ★ 2026-10-08 真机实证：这里原来有一行 `auth --enableshadow --passalgo=sha512`，
+        #   Rocky 9.4 接受它，但 **openEuler 24.03 的 anaconda 已把 auth 命令整体移除**，
+        #   装机在读取 kickstart 时当场终止：
+        #     The following problem occurred on line 11 of the kickstart file:
+        #     auth has been removed.  →  Pane is dead (status 1)
+        #   （串口日志见 mimo/out/e2e-vm140-openeuler-console.log）。
+        #   而 auth 在老版本 anaconda 上本来就是**可选**的：不写时默认就是 shadow 认证 +
+        #   sha512 口令算法（与本行等价）。所以删掉它对老目标是行为等价、对新目标是必需的。
+        #   ⚠️ 改这一行会让 rhel 两个 golden（lvm/direct）的 sha256 变化，属**有意变更**，
+        #   已按 §5.14 先例重新基线化并在注释里留证。
         # 口令回退保持可用：rootpw 优先 root_password、其次 admin_password；两者都空时 _hash_pw 抛 ValueError
         "rootpw --iscrypted " + _hash_pw(c.root_password or c.admin_password),
         # user 行同样两者都空才报错：仅填 root_password 时 admin 口令沿用同一来源，绝不代填默认口令

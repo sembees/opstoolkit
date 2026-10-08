@@ -903,15 +903,20 @@ class PxeDiskRegressionTest(unittest.TestCase):
         #   direct 绕开）。改后固定部分 30208 MiB ≈ 29.5 GiB，30 GB 盘可用，剩余给 /home。
         #   机械复算见 PxeLvmFitsSmallDiskTest（固定部分 ≤ 30 GiB 且 /home 必须带 --grow）。
         #   旧值（第二次基线化时）：c3a1b7dbb9d4c271d61e02f1bb6be077e475d025241a06d86f1fb6866fe87512
+#   ⚠️ 2026-10-08 第四次重新基线化（用户要求测 openEuler 时发现真缺陷）：删掉了 kickstart 里那行
+#   `auth --enableshadow --passalgo=sha512` —— openEuler 24.03 的 anaconda 已移除 auth 命令，
+#   装机读 ks 时当场终止（串口：line 11 auth has been removed → Pane is dead status 1）。
+#   影响面：**只有 rhel 的两个 golden 变**（lvm 8052a17c… → de95663c…，direct cb501602… → 1bc45576…），
+#   两个 Ubuntu golden 必须逐字不变（本改动只碰 kickstart 家族）。
         golden = {
             '["ubuntu","lvm",null]':
                 "bd7011ba9bfb41d12da354592ca00910c85ff8c79076207d3e6a968ace6efc52",
             '["ubuntu","direct",{"disk":"vda"}]':
                 "a8385ca56bacc27294497e41c2bef33ef3e5eb0cefddc4968a488d23b3469b67",
             '["rhel","lvm",null]':
-                "8052a17c1419e88268b180b1ba54622e4ff279765cbf596f58397c76f003e3e5",
+                "de95663c8f672b34284dbe5d4ff2eaa2de42179e04f31252aaf88feb9df18730",
             '["rhel","direct",{"disk":"nvme0n1"}]':
-                "cb501602e5741af1449773686113cae394dfa389a627cb458a7edfdb9bde0d72",
+                "1bc45576e84bec20cff37b35b6c05551a6e182b4c045fd0b0af71ef1e7a42158",
         }
         cases = [
             ("ubuntu", "lvm", None),
