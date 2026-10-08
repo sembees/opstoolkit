@@ -431,25 +431,45 @@ def install_done_url(server_ip: str, install_id: str) -> str:
             + str(install_id) + "/done?t=" + _install_done_token(install_id))
 
 
-async def _finish_install(iid: str, db: AsyncSession) -> dict:
-    """finish/done 共用：标记完成（幂等）→ 尽力自动重部署。**先提交、后重部署**，
-    且重部署的任何异常都只进返回体的 redeploy 字段 —— 「已标记完成」绝不回滚。"""
+async def _set_install_status(iid: str, db: AsyncSession, status: str) -> dict:
+    """finish / done / reset 共用：把记录置成目标状态（幂等）→ 尽力自动重部署。
+
+    **先提交、后重部署**，且重部署的任何异常都只进返回体的 redeploy 字段 ——
+    「状态已经改了」这件事绝不因为重部署失败而回滚。
+    finished_at 只在 installed 时写；退回 pending 时清空（否则界面上会显示
+    「待装机 + 完成时间」这种自相矛盾的行）。
+    """
     inst = await db.get(models.PxeInstall, iid)
     if not inst:
         raise HTTPException(status_code=404, detail="装机记录不存在")
-    if (inst.status or "") != "installed":
-        # 幂等：已是 installed 就不再改（finished_at 保留第一次的时间）
-        inst.status = "installed"
-        inst.finished_at = utcnow()
+    if (inst.status or "") != status:
+        inst.status = status
+        inst.finished_at = utcnow() if status == "installed" else None
         await db.commit()
     return {"ok": True, "id": inst.id, "status": inst.status,
             "redeploy": await _auto_redeploy(inst.profile_id, db)}
+
+
+async def _finish_install(iid: str, db: AsyncSession) -> dict:
+    """标记完成（= 置 installed）。"""
+    return await _set_install_status(iid, db, "installed")
 
 
 @router.post("/installs/{iid}/finish")
 async def install_finish(iid: str, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
     """POST /api/it/pxe/installs/{iid}/finish — 人工把装机记录标记完成（admin）。"""
     return await _finish_install(iid, db)
+
+
+@router.post("/installs/{iid}/reset")
+async def install_reset(iid: str, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/installs/{iid}/reset — 把已装完的记录退回「待装机」（admin）。
+
+    为什么必须有这条路：标记完成之后，运维若要把这台机器**重装一遍**（换盘、重做、
+    交付给别的用途），没有它就只能删记录再重建。reset 会自动重部署一次，
+    生成器于是重新给该 MAC 下发自动装机菜单（红线守卫照旧生效）。
+    """
+    return await _set_install_status(iid, db, "pending")
 
 
 @router.api_route("/installs/{iid}/done", methods=["POST", "GET"])

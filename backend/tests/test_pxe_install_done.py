@@ -485,5 +485,59 @@ class PxeDoneRedeployTest(_DbCase):
         self.assertIn("【当前模板警告】", calls[0]["files"]["README.txt"])
 
 
+class PxeInstallResetTest(_DbCase):
+    """reset：把已装完的记录退回「待装机」（可重装），并让生成器重新下发装机菜单。
+
+    为什么必须有这条路：标记完成之后运维若要把机器重装一遍（换盘/重做），
+    没有它就只能删记录再重建 —— 真实现场一定会撞上。
+    """
+
+    def test_reset_installed_back_to_pending_clears_finished_at(self):
+        pid, iid = self._seed(status="pending")
+        c = self._client()
+        r = c.post("/api/it/pxe/installs/" + iid + "/finish")
+        self.assertEqual(r.status_code, 200, r.text)
+        st, fin = self._db_status(iid)
+        self.assertEqual(st, "installed")
+        self.assertIsNotNone(fin)
+
+        r2 = c.post("/api/it/pxe/installs/" + iid + "/reset")
+        self.assertEqual(r2.status_code, 200, r2.text)
+        body = r2.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["status"], "pending")
+        self.assertIn("redeploy", body)
+        st2, fin2 = self._db_status(iid)
+        self.assertEqual(st2, "pending")
+        # 退回待装机必须清掉完成时间，否则界面上会出现「待装机 + 完成时间」这种自相矛盾的行
+        self.assertIsNone(fin2)
+
+    def test_reset_is_idempotent_when_already_pending(self):
+        pid, iid = self._seed(status="pending")
+        c = self._client()
+        r = c.post("/api/it/pxe/installs/" + iid + "/reset")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self._db_status(iid)[0], "pending")
+
+    def test_reset_unknown_install_is_404(self):
+        self._seed(status="pending")
+        c = self._client()
+        r = c.post("/api/it/pxe/installs/no-such-id/reset")
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_generator_emits_install_menu_again_after_reset(self):
+        """判据：installed 时不下发按 MAC 的装机菜单；退回 pending 后**必须回来**
+        —— 这才是"reset 之后重装能生效"，而不只是数据库里一个字段变了。"""
+        from app.it.pxe.generator import generate_all
+        off = generate_all(_rhel_cfg(), [{"mac": MAC, "hostname": "web-01", "ip": IP,
+                                          "status": "installed"}])["dnsmasq.conf"]
+        self.assertNotIn("tag-if=set:fw-menu-" + TAG, off)
+        self.assertIn("dhcp-host=" + MAC.lower() + "," + IP, off)
+        on = generate_all(_rhel_cfg(), [{"mac": MAC, "hostname": "web-01", "ip": IP,
+                                         "status": "pending"}])["dnsmasq.conf"]
+        self.assertIn("tag-if=set:fw-menu-" + TAG, on)
+        self.assertIn("dhcp-boot=tag:fw-menu-" + TAG, on)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -158,20 +158,34 @@
         <el-table-column prop="ip" label="分配 IP" width="120" />
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
-            <el-tag :type="statusType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
+            <!-- 已装完：把"不会再被重装"这条后果挂在标签上（点开即可看到），不占版面 -->
+            <el-tooltip v-if="row.status === 'installed'"
+                        content="已标记完成：dnsmasq 不再给这台机器下发自动装机菜单，重启走网卡不会被重装。要重装请点右侧「重新启用装机」"
+                        placement="top">
+              <el-tag :type="statusType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
+            </el-tooltip>
+            <el-tag v-else :type="statusType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="created_at" label="创建时间" width="160">
           <template #default="{ row }">{{ row.created_at ? row.created_at.replace('T',' ').slice(0,19) : '' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
+            <el-button v-if="row.status === 'pending'" type="primary" link size="small"
+                       :loading="finishingId === row.id" @click="markInstalled(row)">标记完成</el-button>
+            <el-button v-else-if="row.status === 'installed'" type="warning" link size="small"
+                       :loading="resettingId === row.id" @click="reenableInstall(row)">重新启用装机</el-button>
             <el-popconfirm title="确定删除?" @confirm="delInstall(row.id)">
               <template #reference><el-button type="danger" link size="small">删除</el-button></template>
             </el-popconfirm>
           </template>
         </el-table-column>
       </el-table>
+      <div class="text-muted install-hint">
+        装完的机器请点「标记完成」——之后 dnsmasq 不再给它下发装机菜单，重启走网卡不会被重装；
+        要重装请点「重新启用装机」（会抹盘，有二次确认）。
+      </div>
     </CardSection>
 
     <!-- 模板编辑弹窗 -->
@@ -763,7 +777,7 @@
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount, computed } from "vue"
 import http, { downloadZip, pxeIsoSpace, pxeIsoTransfers, pxeIsoFetch, pxeIsoUploadInit, pxeIsoUploadChunk, pxeIsoUploadFinish, pxeIsoTransferCancel } from "../api"
-import { ElMessage } from "element-plus"
+import { ElMessage, ElMessageBox } from "element-plus"
 import PageHeader from "../components/PageHeader.vue"
 import CardSection from "../components/CardSection.vue"
 
@@ -1343,8 +1357,8 @@ const form = reactive(emptyForm())
 const genForm = reactive({ hostname: "server01", server_ip: "", http_root: "", kernel_path: "", initrd_path: "", squashfs_path: "", deploy_mode: "standalone" })
 
 function osLabel(row) { return row.os_type + " " + row.os_version }
-function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", failed: "danger" }[s] || "info" }
-function statusLabel(s) { return { pending: "待装机", booting: "引导中", installing: "安装中", done: "完成", failed: "失败" }[s] || s }
+function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", installed: "success", failed: "danger" }[s] || "info" }
+function statusLabel(s) { return { pending: "待装机", booting: "引导中", installing: "安装中", done: "完成", installed: "已装完", failed: "失败" }[s] || s }
 
 function versionsFor(osType) {
   const seen = new Set()
@@ -1701,6 +1715,52 @@ async function delInstall(id) {
   loadInstalls()
 }
 
+// ── 装机记录生命周期（2026-10-08 真机实证：装完的机器重启走网卡会被重装，必须能标记完成）──
+// 后端 finish/done 之后会**自动重部署**：生成的 dnsmasq 不再给该 MAC 下发自动装机菜单，
+// 它落到"未登记默认菜单"（拒绝自动安装）⇒ 固件继续引导本地磁盘。
+// redeploy 字段是后端的说明（成功 / 未找到上次部署参数 / 被拒绝），按语义分别提示。
+const finishingId = ref("")
+const resettingId = ref("")
+function redeployMsg(res, okText) {
+  const r = res && res.redeploy ? String(res.redeploy) : ""
+  if (r && /已自动重部署/.test(r)) return { type: "success", text: okText + "：" + r }
+  if (r) return { type: "warning", text: okText + "：" + r }
+  return { type: "success", text: okText }
+}
+async function markInstalled(row) {
+  finishingId.value = row.id
+  try {
+    const res = await http.post("/it/pxe/installs/" + row.id + "/finish")
+    const m = redeployMsg(res, "已标记完成")
+    if (m.type === "success") ElMessage.success(m.text); else ElMessage.warning(m.text)
+    await loadInstalls()
+  } catch (e) {
+    ElMessage.error("标记完成失败：" + ((e && (e.detail || e.message)) || "未知错误"))
+  } finally {
+    finishingId.value = ""
+  }
+}
+async function reenableInstall(row) {
+  try {
+    await ElMessageBox.confirm(
+      "重新启用后，该机下次走网卡引导会被重新安装（会抹盘）。确定吗？",
+      "重新启用装机", { type: "warning", confirmButtonText: "确定", cancelButtonText: "取消" })
+  } catch (e) {
+    return   // 用户取消：什么都不做，也不报错
+  }
+  resettingId.value = row.id
+  try {
+    const res = await http.post("/it/pxe/installs/" + row.id + "/reset")
+    const m = redeployMsg(res, "已恢复为待装机")
+    if (m.type === "success") ElMessage.success(m.text); else ElMessage.warning(m.text)
+    await loadInstalls()
+  } catch (e) {
+    ElMessage.error("重新启用失败：" + ((e && (e.detail || e.message)) || "未知错误"))
+  } finally {
+    resettingId.value = ""
+  }
+}
+
 async function loadProfiles() { profiles.value = await http.get("/it/pxe/profiles") }
 async function loadInstalls() { installs.value = await http.get("/it/pxe/installs") }
 
@@ -1777,6 +1837,7 @@ onMounted(() => {
 .disk-auto-line { margin-bottom: var(--ot-space-3); font-size: var(--ot-font-xs); color: var(--ot-text-3); display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--ot-space-2); }
 .mode-note { margin-top: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 .written-note { margin-top: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.install-hint { margin-top: var(--ot-space-2); font-size: var(--ot-font-xs); line-height: 1.7; }
 .dialog-body { line-height: 1.7; }
 .path-code { font-size: var(--ot-font-sm); }
 
