@@ -1193,12 +1193,28 @@ def _rhel_layout_lines(scheme, disk) -> str:
     if scheme == "direct":
         return (
             "clearpart --drives=" + disk + " --all --initlabel\n"
+            # ★ 2026-10-08 真机实证（openEuler 24.03 / anaconda 36）：
+            #   BIOS 引导 + **GPT 分区表**的盘必须有一个 1MiB 的 biosboot 分区，否则存储校验失败：
+            #     ValidationReport(error_messages=["Your BIOS-based system needs a special partition
+            #       to boot from a GPT disk label. ... please create a 1MiB 'biosboot' type partition."])
+            #   症状：安装器在「Installation Destination」spoke 停下等人工（不报错退出，只静默停住）。
+            #   UEFI 机器上该分区无副作用（anaconda 建了不用）；Rocky 的 anaconda 34 容忍缺失，
+            #   但 openEuler 36 严格执行 ⇒ 必须给。direct 与 lvm 两个方案都要（同一行文本，替换即覆盖两处）。
+            "part biosboot --fstype=biosboot --size=1\n"
             "part /boot/efi --fstype=efi --size=512\n"
             "part / --fstype=ext4 --ondisk=" + disk + " --grow\n"
             "part swap --size=8192\n"
         )
     return (
         "clearpart --drives=" + disk + " --all --initlabel\n"
+            # ★ 2026-10-08 真机实证（openEuler 24.03 / anaconda 36）：
+            #   BIOS 引导 + **GPT 分区表**的盘必须有一个 1MiB 的 biosboot 分区，否则存储校验失败：
+            #     ValidationReport(error_messages=["Your BIOS-based system needs a special partition
+            #       to boot from a GPT disk label. ... please create a 1MiB 'biosboot' type partition."])
+            #   症状：安装器在「Installation Destination」spoke 停下等人工（不报错退出，只静默停住）。
+            #   UEFI 机器上该分区无副作用（anaconda 建了不用）；Rocky 的 anaconda 34 容忍缺失，
+            #   但 openEuler 36 严格执行 ⇒ 必须给。direct 与 lvm 两个方案都要（同一行文本，替换即覆盖两处）。
+            "part biosboot --fstype=biosboot --size=1\n"
         "part /boot/efi --fstype=efi --size=512\n"
         "part /boot --fstype=ext4 --size=1024\n"
         "part pv.01 --size=1 --grow\n"

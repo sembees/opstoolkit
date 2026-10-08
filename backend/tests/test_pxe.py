@@ -754,6 +754,9 @@ LEGACY_KS_LVM = [
     # §5.14 修复：补上 ignoredisk 把"没有 --ondisk 的 part 行"钉在目标盘上（见 generator._rhel_ks）
     "ignoredisk --only-use=sda",
     "clearpart --drives=sda --all --initlabel",
+    # ★ 2026-10-08：BIOS+GPT 盘必须有 1MiB biosboot（openEuler 24.03 的 anaconda 36 严格执行，
+    #   缺了会在「安装位置」spoke 静默停等人；真机验证见 RUNBOOK §5.83.49）
+    "part biosboot --fstype=biosboot --size=1",
     "part /boot/efi --fstype=efi --size=512",
     "part /boot --fstype=ext4 --size=1024",
     "part pv.01 --size=1 --grow",
@@ -769,6 +772,8 @@ LEGACY_KS_DIRECT = [
     # §5.14 修复：同上
     "ignoredisk --only-use=sda",
     "clearpart --drives=sda --all --initlabel",
+    # ★ 2026-10-08：同上（BIOS+GPT 需要 biosboot）
+    "part biosboot --fstype=biosboot --size=1",
     "part /boot/efi --fstype=efi --size=512",
     "part / --fstype=ext4 --ondisk=sda --grow",
     "part swap --size=8192",
@@ -914,9 +919,9 @@ class PxeDiskRegressionTest(unittest.TestCase):
             '["ubuntu","direct",{"disk":"vda"}]':
                 "a8385ca56bacc27294497e41c2bef33ef3e5eb0cefddc4968a488d23b3469b67",
             '["rhel","lvm",null]':
-                "de95663c8f672b34284dbe5d4ff2eaa2de42179e04f31252aaf88feb9df18730",
+                "f43af634b1c1b08e880a2b41070369e18f29788c3472070eaf420396f9e1fde9",
             '["rhel","direct",{"disk":"nvme0n1"}]':
-                "1bc45576e84bec20cff37b35b6c05551a6e182b4c045fd0b0af71ef1e7a42158",
+                "a0bc0a585025c6e69f00138482db3e159bce153d8a5977301056264dbdbc3420",
         }
         cases = [
             ("ubuntu", "lvm", None),
