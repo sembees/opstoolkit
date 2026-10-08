@@ -50,13 +50,14 @@
             </el-collapse-item>
 
             <el-collapse-item title="我要裸机装系统，从头怎么操作？" name="b3">
-              <el-steps direction="vertical" :active="6">
+              <el-steps direction="vertical" :active="7">
                 <el-step title="第 1 步：放置 ISO" description="把 Ubuntu live-server 或 RHEL/Rocky 的 ISO 放到服务器 /srv/opstk/iso/ 目录（应用内没有上传接口，用 scp/共享目录放进去即可）" />
                 <el-step title="第 2 步：提取内核" description="打开「PXE 装机」→ ISO 镜像管理面板，为该 ISO 选择系统类型（下拉可搜索，完整清单来自系统目录，含 openEuler/麒麟/UOS 等）和版本号（常见候选 + 从文件名自动识别），点「提取」。系统自动挂载 ISO 提取 vmlinuz/initrd（Ubuntu 还有 installer.squashfs）" />
                 <el-step title="第 3 步：建装机模板" description="点「新建装机模板」，填系统类型/版本、管理员账号密码、磁盘方案与目标磁盘（自动选最大盘 / 按盘名 / 按序列号或型号）。这些就是装好后的系统配置" />
                 <el-step title="第 4 步：一键部署" description="点模板旁的「部署」，确认弹窗里选部署模式（默认 ProxyDHCP，与现有 DHCP 并存更安全）。系统生成配置、写盘、重启 dnsmasq，下方显示部署日志，并列出实际写入的文件" />
                 <el-step title="第 5 步：设置裸机" description="裸机接上与服务器同网段的网线，开机进 BIOS/UEFI 把 Network Boot 设为第一位。部分服务器可按 F12 临时选网络启动" />
                 <el-step title="第 6 步：等待安装完成" description="裸机重启后自动安装，装完自动重启，用模板中的账号密码登录即可。" />
+                <el-step title="第 7 步：标记完成（关键，别跳过）" description="装完的机器必须变成「已装完」，否则它下次走网卡引导会被重新装一遍（盘会被再抹一次）。正常情况下机器装完会自己回调服务端完成标记；也可以在「装机记录」里点「标记完成」。标记完成后 dnsmasq 不再给这台机器下发装机菜单，重启走网卡会落到“拒绝自动安装”并继续引导本地磁盘。要重装这台机器：点「重新启用装机」（会抹盘，有二次确认）。" />
               </el-steps>
             </el-collapse-item>
 
@@ -94,6 +95,9 @@ docker compose up -d --build</pre>
                 </el-collapse-item>
                 <el-collapse-item title="“PXE 部署后裸机不引导”" name="faq4">
                   <p>检查：1) dnsmasq 是否运行（PXE 页面顶部状态灯或 <code>systemctl status dnsmasq</code>）；2) 裸机与服务器是否同一网段（DHCP 广播不过路由）；3) 网段内是否有其他 DHCP（standalone 模式会冲突，换 ProxyDHCP）；4) ISO 是否已提取（PXE 页面 HTTP 文件列表应有对应目录）。</p>
+                </el-collapse-item>
+                <el-collapse-item title="“装完的机器重启后又被装了一遍（盘又被抹了）？”" name="faq4b">
+                  <p>这是 2026-10-08 之前版本的已知缺陷：装机记录一直停在「待装机」，dnsmasq 就一直给这台机器下发自动装机菜单，它每次走网卡引导都会被重装一遍。现在装完的机器会<strong>自动回调</strong>服务端（应答文件里的 <code>%post</code> / <code>late-commands</code> 调用 <code>/api/it/pxe/installs/机器记录ID/done?t=一次性令牌</code>），也可以在「装机记录」里人工点「标记完成」；变成「已装完」之后就不会再被重装（<code>dhcp-host</code> 地址预留仍保留，IP 不会漂）。若确实要重装这台机器：点「重新启用装机」，它会退回「待装机」并自动重新部署一次，机器下次网卡引导即重新安装（会抹盘，有二次确认）。</p>
                 </el-collapse-item>
                 <el-collapse-item title="“忘记 admin 密码”" name="faq5">
                   <p>管理员密码在首次初始化时随机生成并打印在服务日志里（容器部署是 <code>docker logs opstoolkit</code>，只在创建时打印一次）。若彻底丢失：停服后删除数据库文件 ops.db 再启动，会重建 admin 并打印新的初始密码——但已录入的资产/凭据/模板会一起清空，操作前先备份数据库和 .env。</p>
@@ -610,6 +614,17 @@ scp Rocky-9.5-x86_64-dvd.iso yang@服务器IP:/srv/opstk/iso/</pre>
                 <el-table-column prop="desc" label="说明" />
               </el-table>
               <p class="mt-2"><b>token 保护</b>：/pxe/serve 是无认证的 HTTP 根（iPXE、anaconda、cloud-init 这些客户端不支持认证头），ks.cfg / user-data 里含口令哈希。可在 backend/.env 里配置 pxe_serve_token（≥16 位）启用门禁：URL 形如 /pxe/serve/&lt;token&gt;/ks.cfg 或 /pxe/serve/ks.cfg?t=&lt;token&gt;；留空 = 不启用（行为与从前逐字相同），启用/更换后必须重新部署一次。PXE 页面顶部会如实显示“是否启用”。TFTP 一侧（ipxe 固件）与 /pxe/iso 不在门禁内（前者无认证可言，后者只发 .iso）。</p>
+            </el-collapse-item>
+
+            <el-collapse-item title="装机记录的状态与「装完不再重装」" name="p9">
+              <p><b>状态只有两个：待装机 / 已装完。</b>「已装完」不是摆设 —— 它决定 dnsmasq 还给不给这台机器下发自动装机菜单。改这个状态之前，装完的机器每次走网卡引导都会被<strong>重装一遍（盘会被再抹一次）</strong>。</p>
+              <ul>
+                <li><b>怎么变成「已装完」</b>：① 机器自己回调 —— 生成应答文件时会把一条回调写进 RHEL 的 <code>%post</code> / Ubuntu 的 <code>late-commands</code>（<code>curl -X POST /api/it/pxe/installs/&lt;记录ID&gt;/done?t=&lt;一次性令牌&gt;</code>，令牌由后端密钥派生、不落库；网络不通只会被 <code>|| true</code> 吞掉，不会把装好的系统判成失败）；② 人工在「装机记录」里点<strong>「标记完成」</strong>。</li>
+                <li><b>标记完成之后</b>：该 MAC 的按机装机菜单不再下发（原位置留一行注释），<code>dhcp-host=&lt;MAC&gt;,&lt;IP&gt;</code> 地址预留<strong>保留</strong>（重装/重启 IP 不漂）；它落到「未登记默认菜单」——明确拒绝自动安装然后 <code>exit</code>，固件继续按引导顺序引导本地磁盘。因此<b>推荐把裸机引导顺序设成「先硬盘、后网卡」</b>：空盘装机会自然落到网卡，装好的机器直接起系统。</li>
+                <li><b>要重装这台机器</b>：点<strong>「重新启用装机」</strong>（二次确认会提醒抹盘）→ 记录退回「待装机」并自动重新部署一次 → 机器下次网卡引导即重新安装。</li>
+                <li><b>标记完成会顺带自动重部署</b>：用的还是上次部署的 server_ip / 部署模式（记在 <code>/srv/opstk/state/last-deploy.json</code>），同一个红线守卫照旧生效；若该模板从未部署过，会提示「未找到上次部署参数，请手动点一次部署」。</li>
+                <li>装机记录一直停在「待装机」时页面会保持轮询（用来跟踪进度）；全部标记完成后轮询自动停。</li>
+              </ul>
             </el-collapse-item>
 
             <el-collapse-item title="明确不支持 / 会被拒绝的写法" name="p8">
