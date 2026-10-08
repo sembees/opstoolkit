@@ -249,6 +249,15 @@ class PxeConfig:
     # 模板级 ks.cfg / user-data 恒为空串（不带回调，输出与历史逐字一致）；
     # 生成侧只认本文件拼好的值，且必须先过 _safe_done_url 白名单。
     done_url: str = ""
+    # ── 服务端绑卡警告（2026-10-08 补：/generate 与 /download 没有部署侧那道守卫）──
+    # 部署（/deploy）有 fail-closed 守卫：查不到 server_ip 所在网卡就 422。但
+    # /generate 与 /download **产出的是要交给别人落地的文件**（离线 ZIP、手工安装），
+    # 它们既不能硬拒（离线场景没有"本机网卡事实"可查），又不能沉默 ——
+    # 否则 dnsmasq 的 `interface=` 会沿用模板里的**客户端**网卡名，落到别的机器上
+    # 就可能把 DHCP 开在非装机网段。所以：api 层把警告文本塞进本字段，README 里
+    # 用【服务端绑卡警告】整段印出来，同时随 /generate 响应与 ZIP 里的
+    # WARNINGS-*.txt 一起交付。空串 = 无警告（输出与历史逐字一致）。
+    warn_serve_binding: str = ""
 
 
 # 装机流程按**安装器家族**分岔（不再是"ubuntu vs 其余"）：
@@ -2448,6 +2457,8 @@ def _readme(c, has_registered=False):
         "否则装机在分区阶段就会失败（盘放不下这套固定尺寸）。\n"
         + ("【当前模板警告】" + LVM_SIZE_WARNING + "\n\n"
            if (c.disk_scheme or "") == "lvm" else "\n") +
+        (("【服务端绑卡警告】" + c.warn_serve_binding + "\n\n")
+         if c.warn_serve_binding else "") +
         "引导顺序（必读）\n"
         "----------------\n"
         "目标机固件请设为【先硬盘、后网卡】，例如 PVE：\n"

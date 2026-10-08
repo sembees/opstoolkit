@@ -539,5 +539,113 @@ class PxeInstallResetTest(_DbCase):
         self.assertIn("dhcp-boot=tag:fw-menu-" + TAG, on)
 
 
+class PxeServeBindingWarningTest(_DbCase):
+    """生成侧绑卡警告（2026-10-08 补）：/generate 与 /download 没有部署侧那道 fail-closed
+    守卫，产物是要交给别人落地的（离线 ZIP、手工安装）—— 不能硬拒，但绝不能沉默，
+    否则 dnsmasq 的 interface= 会沿用模板里的**客户端**网卡名，落到别的机器上
+    就可能把 DHCP 开在非装机网段。"""
+
+    def _rocky_profile(self):
+        return self._seed(status="pending", profile_kw={
+            "os_type": "rocky", "os_version": "9.4",
+            "mirror": "http://mirror.example/rocky/9/BaseOS/x86_64/os/"})
+
+    def test_helper_branches(self):
+        from app.api.pxe import _serve_binding_warning
+        # ① 没给 server_ip：警告里必须点名"客户端网卡名"与具体网卡名
+        w1 = _serve_binding_warning("", "ens18", {}, True)
+        self.assertIn("客户端网卡名", w1)
+        self.assertIn("ens18", w1)
+        # ② 给了 server_ip 但本机没有网卡持有它
+        w2 = _serve_binding_warning("192.168.199.1", "ens18", {}, True)
+        self.assertIn("192.168.199.1", w2)
+        self.assertIn("没有网卡持有该地址", w2)
+        # ③ 绑卡查到了 → 无话可说
+        self.assertEqual(_serve_binding_warning(
+            "192.168.199.1", "ens18",
+            {"interface": "ens19", "ip": "192.168.199.1", "prefixlen": 24}, True), "")
+        # ④ 非 Linux：查不到网卡是常态，警告只会变噪音（与部署侧口径一致）
+        self.assertEqual(_serve_binding_warning("", "ens18", {}, False), "")
+
+    def test_readme_carries_warning_only_when_set(self):
+        off = generate_all(_rhel_cfg())["README.txt"]
+        self.assertNotIn("【服务端绑卡警告】", off)
+        on = generate_all(_rhel_cfg(warn_serve_binding="测试警告正文"))["README.txt"]
+        self.assertIn("【服务端绑卡警告】", on)
+        self.assertIn("测试警告正文", on)
+
+    def test_generate_returns_warning_and_download_zip_carries_it(self):
+        import io
+        import zipfile
+
+        from app.api import pxe as pxe_api
+        pid, iid = self._rocky_profile()
+        c = self._client()
+        with mock.patch.object(pxe_api.pxe_server, "serve_binding", lambda ip: {}), \
+                mock.patch.object(pxe_api.pxe_server, "is_linux", lambda: True):
+            r = c.post("/api/it/pxe/profiles/" + pid + "/generate",
+                       json={"kernel_path": "rocky/9.4/vmlinuz", "initrd_path": "rocky/9.4/initrd.img"})
+            self.assertEqual(r.status_code, 200, r.text)
+            body = r.json()
+            self.assertTrue(body.get("warnings"), body.get("warnings"))
+            self.assertIn("客户端网卡名", body["warnings"][0])
+            self.assertIn("【服务端绑卡警告】", body["files"]["README.txt"])
+
+            d = c.post("/api/it/pxe/profiles/" + pid + "/download",
+                       json={"kernel_path": "rocky/9.4/vmlinuz", "initrd_path": "rocky/9.4/initrd.img"})
+            self.assertEqual(d.status_code, 200, d.text)
+            names = zipfile.ZipFile(io.BytesIO(d.content)).namelist()
+            self.assertIn("WARNINGS-1.txt", names)
+
+        # 绑卡能查到时不产生警告（输出回到常态）
+        with mock.patch.object(pxe_api.pxe_server, "serve_binding",
+                               lambda ip: {"interface": "ens19", "ip": ip,
+                                           "netmask": "255.255.255.0", "prefixlen": 24}), \
+                mock.patch.object(pxe_api.pxe_server, "is_linux", lambda: True):
+            r2 = c.post("/api/it/pxe/profiles/" + pid + "/generate",
+                        json={"server_ip": "192.168.199.1"})
+            self.assertEqual(r2.status_code, 200, r2.text)
+            self.assertEqual(r2.json().get("warnings"), [])
+            self.assertNotIn("【服务端绑卡警告】", r2.json()["files"]["README.txt"])
+
+
+class PxeLastDeployCleanupTest(_DbCase):
+    """「上次部署参数」条目的清理：模板删了就不该再留着（否则 state 越堆越多）。"""
+
+    def _tmp_path(self):
+        d = tempfile.mkdtemp()
+        return str(pathlib.Path(d) / "last-deploy.json")
+
+    def test_delete_profile_drops_entry(self):
+        from app.api import pxe as pxe_api
+        pid, iid = self._seed(status="pending")
+        path = self._tmp_path()
+        pathlib.Path(path).write_text(
+            json.dumps({pid: {"server_ip": "192.168.199.1", "deploy_mode": "standalone"}}),
+            encoding="utf-8")
+        c = self._client()
+        with mock.patch.object(pxe_api, "_last_deploy_path", lambda: path):
+            r = c.delete("/api/it/pxe/profiles/" + pid)
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertNotIn(pid, json.loads(pathlib.Path(path).read_text(encoding="utf-8")))
+
+    def test_auto_redeploy_reports_deleted_profile_and_cleans_entry(self):
+        from app.api import pxe as pxe_api
+        path = self._tmp_path()
+        pathlib.Path(path).write_text(
+            json.dumps({"gone-profile": {"server_ip": "10.0.0.1", "deploy_mode": "standalone"}}),
+            encoding="utf-8")
+
+        async def _go():
+            async with self.SessionLocal() as s:
+                with mock.patch.object(pxe_api, "_last_deploy_path", lambda: path):
+                    return await pxe_api._auto_redeploy("gone-profile", s)
+
+        msg = self._run(_go())
+        self.assertIn("模板已删除", msg)
+        self.assertNotIn("gone-profile",
+                         json.loads(pathlib.Path(path).read_text(encoding="utf-8")))
+
+
 if __name__ == "__main__":
     unittest.main()

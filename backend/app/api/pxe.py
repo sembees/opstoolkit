@@ -359,6 +359,9 @@ async def delete_profile(pid: str, db: AsyncSession = Depends(get_db), _user=Dep
     if p:
         await db.delete(p)
         await db.commit()
+        # 模板没了，它的「上次部署参数」也留不住（否则 finish/done 会拿着一个已删模板
+        # 的参数去重部署 —— 现在还会被红线守卫兜住，但那些陈旧条目会一直堆在 state 里）
+        _drop_last_deploy(pid)
     return {"ok": True}
 
 
@@ -507,11 +510,14 @@ def _gen_body_dict(body: PxeGenerateIn | None) -> dict:
     return body.model_dump(exclude_none=True)
 
 
-async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
+async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession,
+                         out_warnings: list | None = None) -> dict:
     """生成全部 PXE 部署文件 (autoinstall/kickstart + iPXE + dnsmasq)。
 
     入参 body 约定来自 `PxeGenerateIn.model_dump(exclude_none=True)`
     （见 _gen_body_dict）：模型校验在 HTTP 层完成，这里只消费摊平后的字段。
+    out_warnings：给了就把生成期的非致命警告（目前只有"服务端绑卡没确定"）追加进去 ——
+    部署路径不需要（它有 fail-closed 守卫），/generate 与 /download 需要。
     """
     p = await db.get(models.PxeProfile, pid)
     if not p:
@@ -560,6 +566,15 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
             _nc_bound = dict(cfg.net_config or {})
             _nc_bound["server_interface"] = _bind["interface"]
             cfg.net_config = _nc_bound
+    # ★ 生成侧不硬拒，但必须把「绑卡没确定」显式交付出去（部署侧有守卫，离线产物没有）：
+    #   写进 README + 响应 warnings（/download 由调用方放进 ZIP 的 WARNINGS-*.txt）。
+    _bind_warn = _serve_binding_warning(
+        body.get("server_ip"), (cfg.net_config or {}).get("interface"),
+        _bind if body.get("server_ip") else {}, pxe_server.is_linux())
+    if _bind_warn:
+        cfg.warn_serve_binding = _bind_warn
+        if out_warnings is not None:
+            out_warnings.append(_bind_warn)
     installs = list(body.get("installs", []))
     # ★ 装完防重复抹盘（2026-10-08 真机实证）：装机记录的 id / status 以**库里**为准。
     # 为什么显式传入 installs 也必须过这一步 —— 前端的 PxeInstallItem 只有
@@ -612,14 +627,19 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
 
 @router.post("/profiles/{pid}/generate", response_model=PxeGenerateResult)
 async def generate_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
-    files = await _gen_pxe_files(pid, _gen_body_dict(body), db)
-    return {"files": files}
+    warns: list = []
+    files = await _gen_pxe_files(pid, _gen_body_dict(body), db, out_warnings=warns)
+    return {"files": files, "warnings": warns}
 
 
 @router.post("/profiles/{pid}/download")
 async def download_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """下载全部 PXE 部署文件 (zip 压缩包)。"""
-    files = await _gen_pxe_files(pid, _gen_body_dict(body), db)
+    warns: list = []
+    files = await _gen_pxe_files(pid, _gen_body_dict(body), db, out_warnings=warns)
+    # 警告也要跟着 ZIP 走：拿到包的人可能不经过界面，只在 README 里印一遍不够稳
+    for _i, _w in enumerate(warns, 1):
+        files["WARNINGS-%d.txt" % _i] = _w + "\n"
     return files_to_zip_response(files, "pxe-deploy.zip")
 
 
@@ -701,6 +721,26 @@ def _read_last_deploy() -> dict:
         return obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _drop_last_deploy(pid: str) -> bool:
+    """删掉某个模板的「上次部署参数」条目（模板删除、或发现模板已不存在时调用）。
+
+    返回是否真的删掉了。写失败只记日志 —— 它只是缓存，绝不能让删模板这种操作失败。
+    """
+    try:
+        data = _read_last_deploy()
+        if str(pid) not in data:
+            return False
+        data.pop(str(pid), None)
+        tmp = _last_deploy_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp, _last_deploy_path())
+        return True
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("清理上次部署参数条目失败（不影响主流程）：%s", e)
+        return False
 
 
 def _save_last_deploy(pid: str, server_ip: str, deploy_mode: str) -> None:
@@ -813,6 +853,39 @@ async def _generate_and_deploy(pid: str, server_ip: str, deploy_mode: str,
     return res
 
 
+def _serve_binding_warning(server_ip: str, client_iface: str, bind: dict,
+                           is_linux: bool = True) -> str:
+    """**生成侧**的绑卡警告（/generate、/download 用）：返回中文警告，或空串表示无话可说。
+
+    与部署侧守卫的分工（两者缺一不可）：
+      · `/deploy` —— 有 fail-closed 守卫 `_deploy_redline_check`：查不到 server_ip 所在
+        网卡、或 DHCP 池不在该网卡网段内，直接 422，绝不生成可疑配置；
+      · `/generate`、`/download` —— 产物是**要交给别人落地**的（离线 ZIP、手工安装、
+        拷到另一台机器），没有「本机网卡事实」可以依赖，硬拒会把离线流程打死；
+        但也**绝不能沉默**：dnsmasq 的 `interface=` 会沿用模板里的**客户端**网卡名，
+        落到别的机器上就可能把 DHCP 开在非装机网段（本项目里就是企业网）。
+
+    所以这里只产出「一句必须让人看见的警告」，由 api 层同时写进三处：
+    README 的【服务端绑卡警告】、/generate 响应的 warnings、/download 包里的 WARNINGS-*.txt。
+    非 Linux 返回空串：那种环境下 serve_binding 本来就查不到网卡，警告只会变成噪音
+    （与部署侧"非 Linux 不做守卫"保持一致）。
+    """
+    if not is_linux:
+        return ""
+    iface = client_iface or "eth0"
+    if not server_ip:
+        return ("本次生成没有指定 server_ip，dnsmasq 的 interface= 只能沿用模板里的"
+                "客户端网卡名「" + iface + "」。如果这份配置被放到别的机器上、而那张网卡"
+                "接的不是装机网，就会在非装机网段（例如企业网）上开 DHCP。"
+                "请在生成/部署时显式填写 server_ip（服务端 PXE 网卡的地址）。")
+    if not (bind or {}).get("interface"):
+        return ("已指定 server_ip=" + str(server_ip) + "，但本机没有网卡持有该地址，"
+                "无法确定服务端该绑哪张网卡；dnsmasq 的 interface= 只能沿用模板里的"
+                "客户端网卡名「" + iface + "」。请确认该地址已配置在服务端某张网卡上 —— "
+                "在服务端本机部署时，这一条会被部署侧守卫直接拒绝。")
+    return ""
+
+
 @router.post("/profiles/{pid}/deploy")
 async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
     """POST /api/it/pxe/profiles/{pid}/deploy — 一键部署到本机：生成配置→落地文件→重启 dnsmasq。"""
@@ -851,6 +924,10 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
 
 async def _auto_redeploy(pid: str, db: AsyncSession) -> str:
     """finish/done 之后尽力自动重部署（一句话结论，绝不抛异常出去）。"""
+    # 模板已经删了就别再拿它的参数去部署：顺手把陈旧条目清掉（否则 state 会越堆越多）
+    if await db.get(models.PxeProfile, pid) is None:
+        return ("模板已删除，已清理上次部署参数（无需重部署）"
+                if _drop_last_deploy(pid) else "模板已删除，无需重部署")
     try:
         params = _read_last_deploy().get(str(pid))
     except Exception as e:  # noqa: BLE001

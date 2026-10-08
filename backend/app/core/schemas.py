@@ -1477,6 +1477,10 @@ class PxeGenerateIn(BaseModel):
 
 class PxeGenerateResult(BaseModel):
     files: dict[str, str] = {}
+    # 生成期的非致命警告（目前只有一条：服务端绑卡没确定 —— /generate 与 /download
+    # 不能像 /deploy 那样硬拒，但必须让调用方看得见，见 api/pxe.py 的
+    # _serve_binding_warning）。空列表 = 与历史输出一致。
+    warnings: list[str] = []
 
 
 # ---------- IT 网络配置生成 ----------

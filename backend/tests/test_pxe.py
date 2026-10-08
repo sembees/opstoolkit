@@ -2058,6 +2058,14 @@ class DeployIsolationTest(unittest.TestCase):
             # 那与本类要测的"路径隔离/原子落盘"无关，却会让用例随宿主环境漂移。
             # 红线逻辑本身由 test_ztp_deploy.py 专门覆盖（含 PXE 侧的接入点）。
             (server._dhcp, "check_dhcp_conf_safety", lambda *a, **k: (True, "")),
+            # ★ 2026-10-08 补：deploy_to_host 成功后会写 last-deploy.json（finish/done 的
+            # 自动重部署靠它还原 server_ip/deploy_mode），而它落在**宿主机真实 state 目录**。
+            # 实测后果：跑一次全量用例，就往生产 /srv/opstk/state/last-deploy.json 里塞进一条
+            # pid="eeee…"（本类固定 pid）的假条目 —— 我清一次它回来一次，就是这么来的。
+            # 把状态目录指到临时目录：读写都在测试自己的沙箱里（目录要先建，否则 save 会走
+            # 「写失败只记日志」的兜底分支，用例就不再覆盖真实写入路径了）。
+            (server._dhcp, "HOST_RELOAD_STATE_DIR",
+             (lambda d: (os.makedirs(d, exist_ok=True), d)[1])(os.path.join(self._tmp.name, "state"))),
             # 2026-10-08（红线修复）：deploy_to_host 新增两条**读宿主机真实网络事实**的
             # 守卫 —— serve_binding() 用 ioctl 反查 server_ip 所在网卡、并检查 DHCP 池
             # 是否落在该网卡网段内。与上面 R4 同一个理由：本类只验"接线/路径隔离/原子

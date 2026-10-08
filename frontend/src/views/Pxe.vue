@@ -602,6 +602,11 @@
         <el-alert v-if="genMediaNote" type="warning" :closable="false" show-icon class="mb-2">
           {{ genMediaNote }}
         </el-alert>
+        <!-- ★ 生成侧绑卡警告（后端 /generate 返回 warnings）：/generate 与 /download 没有
+             部署侧那道 fail-closed 守卫（产物是给别的机器落地的），所以这里必须让人看见，
+             否则 dnsmasq 的 interface= 会静默沿用模板里的客户端网卡名。 -->
+        <el-alert v-for="(w, i) in shownWarnings" :key="'gw' + i" type="warning"
+                  :closable="false" show-icon class="mb-2" :title="w" />
         <el-button type="primary" size="small" @click="doGenerate" :loading="generating"><el-icon><Check /></el-icon> {{ genStale ? '重新生成' : '生成文件' }}</el-button>
           <el-button size="small" @click="doDownload" :disabled="!Object.keys(genFiles).length || genStale"><el-icon><Download /></el-icon> 下载 ZIP</el-button>
           <!-- U5-F7：预览与下载必须是同一份内容 -->
@@ -789,6 +794,9 @@ const saving = ref(false)
 const genDialog = ref(false)
 const generating = ref(false)
 const genFiles = ref({})
+// 生成期非致命警告（后端 /generate 的 warnings；目前是「服务端绑卡没确定」）。
+// 与 genFiles 同生命周期：重新打开弹窗、参数变化、重新生成时都要跟着更新/清空。
+const genWarnings = ref([])
 // 当前预览对应的参数指纹（U5-F7：参数/装机记录变了就作废，见 genStale）+ 请求序号
 const genKey = ref("")
 const genMediaNote = ref("")
@@ -1658,6 +1666,7 @@ function openGenDialog(row) {
   genMediaNote.value = d.note
   genDialog.value = true
   genFiles.value = {}
+  genWarnings.value = []
   genKey.value = ""
   sessionStorage.setItem("pxe_profile_id", row.id)
   doGenerate()
@@ -1681,6 +1690,8 @@ function genBody() {
 const genBodyKey = computed(() => JSON.stringify(genBody()))
 const genStale = computed(() =>
   !!Object.keys(genFiles.value).length && genBodyKey.value !== genKey.value)
+// 预览失效时警告也一起收起（它描述的是"最后一次生成"的那份配置）
+const shownWarnings = computed(() => (genStale.value ? [] : genWarnings.value))
 
 async function doGenerate() {
   generating.value = true
@@ -1692,10 +1703,13 @@ async function doGenerate() {
     const res = await http.post("/it/pxe/profiles/" + pid + "/generate", body)
     if (seq !== genSeq) return          // 期间又发起了新的生成 ⇒ 丢弃这次响应
     genFiles.value = res.files
+    // 生成期警告（服务端绑卡没确定）：跟着预览一起显示，别让它只躺在 README 里
+    genWarnings.value = (res && res.warnings) || []
     genKey.value = key
     const keys = Object.keys(res.files)
     if (keys.length) activeFile.value = keys[0]
-    ElMessage.success("生成完成: " + keys.length + " 个文件")
+    if (genWarnings.value.length) ElMessage.warning(genWarnings.value[0])
+    else ElMessage.success("生成完成: " + keys.length + " 个文件")
   } finally { if (seq === genSeq) generating.value = false }
 }
 
