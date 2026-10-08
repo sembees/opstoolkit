@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
+import logging
 import os
 import socket
 from urllib.parse import quote, unquote
@@ -13,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import crypto, models, serve_token
 from app.core.auth import get_current_user, require_role
 from app.core.schemas import PxeGenerateIn, PxeGenerateResult, PxeInstallIn, PxeInstallOut, PxeProfileIn, PxeProfileOut
+from app.core.timeutil import utcnow
 from app.database import get_db
 from app.core.ziputil import files_to_zip_response
 from app.it.pxe import server as pxe_server
@@ -20,6 +25,7 @@ from app.it.pxe import transfers as iso_transfers
 from app.it.pxe import os_catalog
 from app.it.pxe.generator import (
     DEFAULT_KERNEL_CONSOLE,
+    LVM_SIZE_WARNING,
     PxeConfig,
     generate_all,
     is_rhel_family,
@@ -398,6 +404,72 @@ async def delete_install(iid: str, db: AsyncSession = Depends(get_db), _user=Dep
     return {"ok": True}
 
 
+# ---------- 装机完成标记（防重复抹盘，2026-10-08 真机实证）----------
+# 背景：装机记录表早就有 status/finished_at 两个字段，但整个后端没有任何地方把
+# status 置为完成 —— 记录永远 pending，而生成器对所有已登记 MAC 都下发「按 MAC 的
+# 第二阶段自动装机菜单」。于是装完的机器重启时 BIOS 先走网卡 → 又被自动装一遍
+# （真机 VM140 实测只能靠人工把引导顺序改成磁盘优先才停下来）。
+# 现在的闭环：应答文件里带装完回调（done_url）→ 装完回调把记录标记 installed →
+# 生成器按 status 决定不再给这台机器下发装机菜单 → 网卡引导落到「未登记默认菜单」
+# （拒绝自动安装并 exit）→ 固件按引导顺序继续引导本地磁盘。
+
+def _install_done_token(install_id: str) -> str:
+    """done 回调令牌：HMAC-SHA256(secret_key, id) 的前 32 位 hex。
+
+    · 同一个 id 恒定（幂等重试、生成与回调分处两台生命周期都不受影响）；
+    · **不落库**（表上一个列都不加 —— create_all 不会给已存在的表补列，动了就炸）；
+    · 换 secret_key 后旧 URL 自然失效，重新部署一次即刷新。
+    """
+    key = (crypto.ensure_secret_key() or "opstk").encode("utf-8")
+    msg = ("pxe-install-done:" + str(install_id)).encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()[:32]
+
+
+def install_done_url(server_ip: str, install_id: str) -> str:
+    """装完回调 URL（拼进该机应答文件，安装器收尾时 curl 一下）。"""
+    return ("http://" + str(server_ip) + ":8000/api/it/pxe/installs/"
+            + str(install_id) + "/done?t=" + _install_done_token(install_id))
+
+
+async def _finish_install(iid: str, db: AsyncSession) -> dict:
+    """finish/done 共用：标记完成（幂等）→ 尽力自动重部署。**先提交、后重部署**，
+    且重部署的任何异常都只进返回体的 redeploy 字段 —— 「已标记完成」绝不回滚。"""
+    inst = await db.get(models.PxeInstall, iid)
+    if not inst:
+        raise HTTPException(status_code=404, detail="装机记录不存在")
+    if (inst.status or "") != "installed":
+        # 幂等：已是 installed 就不再改（finished_at 保留第一次的时间）
+        inst.status = "installed"
+        inst.finished_at = utcnow()
+        await db.commit()
+    return {"ok": True, "id": inst.id, "status": inst.status,
+            "redeploy": await _auto_redeploy(inst.profile_id, db)}
+
+
+@router.post("/installs/{iid}/finish")
+async def install_finish(iid: str, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/installs/{iid}/finish — 人工把装机记录标记完成（admin）。"""
+    return await _finish_install(iid, db)
+
+
+@router.api_route("/installs/{iid}/done", methods=["POST", "GET"])
+async def install_done(iid: str, t: str = "", db: AsyncSession = Depends(get_db)):
+    """POST/GET /api/it/pxe/installs/{iid}/done — 装完回调（目标机调，无登录态）。
+
+    不鉴权，但必须带对令牌：?t= 必须等于 _install_done_token(iid)，
+    没带 / 带错一律 403（令牌在生成时应答文件里，目标机之外猜不到）。
+
+    ★ 为什么同时收 GET：这条命令是**生成器拼进应答文件**的，而路由在另一处代码里 ——
+    实测（2026-10-08 真机 VM140）第一版生成的是不带 `-X POST` 的 curl（等价 GET），
+    而这里只收 POST ⇒ 回调静默 404、记录永远 pending、机器被反复重装，
+    而我自己的单测只断言了"URL 出现在 ks 里"，根本抓不到。
+    允许 GET 之后，工件与路由再漂移也不会沉默失效（生成侧仍按 POST 发）。
+    """
+    if not t or t != _install_done_token(iid):
+        raise HTTPException(status_code=403, detail="done 回调令牌无效：?t= 缺失或不匹配")
+    return await _finish_install(iid, db)
+
+
 # ---------- 应答文件生成 ----------
 def _gen_body_dict(body: PxeGenerateIn | None) -> dict:
     """PxeGenerateIn → 与旧版 dict 载荷逐键等价的摊平 dict。
@@ -469,6 +541,27 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
             _nc_bound["server_interface"] = _bind["interface"]
             cfg.net_config = _nc_bound
     installs = list(body.get("installs", []))
+    # ★ 装完防重复抹盘（2026-10-08 真机实证）：装机记录的 id / status 以**库里**为准。
+    # 为什么显式传入 installs 也必须过这一步 —— 前端的 PxeInstallItem 只有
+    # mac/hostname/ip 三个字段（D7 模型），界面路径传什么都不能绕过库里的状态：
+    # status=installed 的记录要被盖上 installed，pending 的补装完回调 done_url
+    # （装完回调用它把记录标记 installed，之后 dnsmasq 不再给这台机器下发装机菜单）。
+    # MAC 归一化与生成器 _safe_mac 同口径（小写冒号形式）。
+    rows = (await db.execute(
+        select(models.PxeInstall).where(models.PxeInstall.profile_id == pid)
+    )).scalars().all()
+    by_mac = {str(r.mac or "").strip().lower(): r for r in rows}
+    # done_url 的主机名用请求里的 server_ip；没给时退到生成器的默认服务地址。
+    # （deploy 路径恒有 server_ip；/generate 预览时可能落到占位地址，无碍。）
+    _srv_ip = body.get("server_ip") or cfg.server_ip
+
+    def _with_done(item: dict, r) -> dict:
+        item["id"] = r.id
+        item["status"] = r.status or "pending"
+        if item["status"] == "pending":
+            item["done_url"] = install_done_url(_srv_ip, r.id)
+        return item
+
     # 回落：调用方不传 installs 时，取**该模板在 DB 里的装机记录**。
     # 为什么不回落不行 —— 实测（RUNBOOK-STATE §5.29）：给模板登记了 3 台 MAC，但只要
     # deploy body 不带 installs，就完全走不到按 MAC 隔离那条分支：
@@ -477,12 +570,19 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
     # （界面部署按钮固定发 installs: []，所以界面上登记的装机条目对部署毫无影响）。
     # 优先级：显式传入 > DB 记录 > 维持旧行为（模板菜单，向后兼容）。
     if not installs:
-        rows = (await db.execute(
-            select(models.PxeInstall).where(models.PxeInstall.profile_id == pid)
-        )).scalars().all()
-        installs = [{"mac": r.mac, "hostname": r.hostname,
-                     "ip": getattr(r, "ip", None) or getattr(r, "mgmt_ip", None)}
-                    for r in rows]
+        installs = []
+        for r in rows:
+            installs.append(_with_done(
+                {"mac": r.mac, "hostname": r.hostname,
+                 "ip": getattr(r, "ip", None) or getattr(r, "mgmt_ip", None)}, r))
+    else:
+        for item in installs:
+            if not isinstance(item, dict):
+                continue
+            r = by_mac.get(str(item.get("mac") or "").strip().lower())
+            if r is None:
+                continue
+            _with_done(item, r)
     try:
         return generate_all(cfg, installs)
     except ValueError as e:
@@ -564,26 +664,53 @@ def _deploy_redline_check(ip: str, mode: str, net_config: dict, bind: dict,
     return None
 
 
-@router.post("/profiles/{pid}/deploy")
-async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
-    """POST /api/it/pxe/profiles/{pid}/deploy — 一键部署到本机：生成配置→落地文件→重启 dnsmasq。"""
-    body = body or PxeGenerateIn()
-    net = pxe_server.detect_network()
+# ---------- 上次部署参数（finish/done 自动重部署用；best-effort，绝不影响部署）----------
+# 存放位置与 dnsmasq 重载握手状态同一个目录（compose 已挂载 /srv/opstk/state）。
+# 有意**不**替它建目录：目录不在 = 部署形态没挂这个盘 ⇒ 记不了就记不了，只记日志；
+# 绝不为一个 best-effort 缓存在文件系统根上随手 mkdir。
 
-    # 1. 调用方显式给出的 server_ip —— 最高优先级
-    # 2. 否则用 detect_network()["server_ip"]
-    # 3. 否则回退 _local_ip()
-    if body.server_ip:
-        auto_ip = False
-    elif net and net.get("server_ip"):
-        body.server_ip = net["server_ip"]
-        auto_ip = True
-    else:
-        body.server_ip = _local_ip()
-        auto_ip = True
+def _last_deploy_path() -> str:
+    from app.core import dhcp as _dhcp_mod
+    return _dhcp_mod.HOST_RELOAD_STATE_DIR + "/last-deploy.json"
 
+
+def _read_last_deploy() -> dict:
+    try:
+        with open(_last_deploy_path(), encoding="utf-8") as fh:
+            obj = json.load(fh)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_last_deploy(pid: str, server_ip: str, deploy_mode: str) -> None:
+    """把本次部署参数读-改-写进 last-deploy.json（形如 {"<pid>": {"server_ip": …, "deploy_mode": …}}）。
+
+    写失败只记日志 —— 它只是 finish/done 自动重部署的依据，绝不能让部署本身失败。
+    """
+    try:
+        data = _read_last_deploy()
+        data[str(pid)] = {"server_ip": str(server_ip), "deploy_mode": str(deploy_mode)}
+        tmp = _last_deploy_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp, _last_deploy_path())
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "记录上次部署参数到 %s 失败（不影响本次部署）：%s", _last_deploy_path(), e)
+
+
+async def _generate_and_deploy(pid: str, server_ip: str, deploy_mode: str,
+                               db: AsyncSession, auto_ip: bool = False,
+                               payload: dict | None = None) -> dict:
+    """deploy_to_host 的核心：server_ip 已定 → 红线守卫 → 生成 → 落地 → ok 判定。
+
+    deploy_to_host 与 finish/done 的自动重部署都走这里（deploy_to_host 传入请求体
+    摊平的 payload 保持原语义；重部署只带 last-deploy.json 里的两个参数）。
+    红线守卫（_deploy_redline_check + serve_binding 那段）判据与文案**一字未动**。
+    """
+    ip = str(server_ip or "")
     # 解析到环回地址说明无法确定对外 IP，必须报错而不是生成不可用的配置
-    ip = body.server_ip
     if ip.startswith("127.") or ip == "::1":
         raise HTTPException(
             status_code=400,
@@ -598,7 +725,7 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     # 上一版修复把 http_root 整体指到 profiles/<pid>，媒体 URL 于是变成
     # profiles/<pid>/ubuntu/22.04/vmlinuz（文件不在那儿）→ iPXE "Could not boot image"，
     # 生产 PXE 被打断，因此被回退（190c1f8）。隔离必须只作用于**应答/引导脚本**。
-    body.http_root = serve_token.serve_base(body.server_ip)
+    http_root = serve_token.serve_base(ip)
 
     # 模板作用域：pid 校验失败直接 400（不静默脱敏 —— 否则会以为隔离了、实际落到别处）
     try:
@@ -608,10 +735,11 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     # 该前缀必须与 deploy_files 的落盘前缀一一对应：WEB_ROOT/profiles/<pid>。
     # 目录名常量取自 server.PROFILE_SCOPE_DIR，避免两边各写一份字符串而漂移。
     # J：serve_base 已经含 /pxe/serve（启用时还含 token 段），所以这里只接作用域目录。
-    answer_root = (serve_token.serve_base(body.server_ip)
+    answer_root = (serve_token.serve_base(ip)
                    + "/" + pxe_server.PROFILE_SCOPE_DIR + "/" + scope)
 
-    payload = body.model_dump(exclude_none=True)
+    payload = dict(payload or {})
+    net = pxe_server.detect_network()
     # 合并 net_config：以 detect_network() 为底，调用方显式传入的键覆盖它。
     # 注意必须在 dict 层合并：detect_network() 的结果含 server_ip、warnings
     # 等模型字段之外的键，须原样保留并传给生成器，不能经过模型二次过滤。
@@ -631,6 +759,9 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
         payload["net_config"] = merged
     # 应答文件 / iPXE 菜单的 URL 前缀（不是模型字段，客户端无法注入；由上面算出）
     payload["answer_root"] = answer_root
+    payload["server_ip"] = ip
+    payload["http_root"] = http_root
+    payload["deploy_mode"] = deploy_mode
     # ★ 红线守卫（判据与文案见 _deploy_redline_check）：
     #   ① 先把「server_ip 所在网卡」**写进 payload**，再让 _gen_pxe_files 用同一个值
     #      —— 之前是生成期自己再查一次，第二次查不到就静默回落到模板的客户端网卡名
@@ -654,6 +785,36 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     # 事件循环卡住 25 秒 —— 并发装机时所有 API（包括别的部署、进度查询）全部停摆。
     # 丢到线程里执行，事件循环继续服务。
     res = await asyncio.to_thread(pxe_server.deploy_files, files, pid)
+    # 部署成功后把「lvm 简写的固定容量」警告也送进部署日志（P2：小盘用户要能看见）。
+    if res.get("supported") and res.get("ok"):
+        _pf = await db.get(models.PxeProfile, pid)
+        if _pf is not None and (_pf.disk_scheme or "") == "lvm":
+            res.setdefault("log", []).append(LVM_SIZE_WARNING)
+    return res
+
+
+@router.post("/profiles/{pid}/deploy")
+async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/profiles/{pid}/deploy — 一键部署到本机：生成配置→落地文件→重启 dnsmasq。"""
+    body = body or PxeGenerateIn()
+    net = pxe_server.detect_network()
+
+    # 1. 调用方显式给出的 server_ip —— 最高优先级
+    # 2. 否则用 detect_network()["server_ip"]
+    # 3. 否则回退 _local_ip()
+    if body.server_ip:
+        auto_ip = False
+    elif net and net.get("server_ip"):
+        body.server_ip = net["server_ip"]
+        auto_ip = True
+    else:
+        body.server_ip = _local_ip()
+        auto_ip = True
+
+    payload = body.model_dump(exclude_none=True)
+    res = await _generate_and_deploy(
+        pid, body.server_ip, body.deploy_mode or "standalone",
+        db, auto_ip=auto_ip, payload=payload)
 
     # 部署结果必须可判定：ok=False 时配置可能已经处于"指向不存在的文件"的状态，
     # 绝不能当成功返回（前端会显示"部署完成"）。
@@ -663,7 +824,32 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     if not res.get("ok"):
         detail = "PXE 部署失败：" + "；".join(res.get("errors") or ["未知错误"])
         raise HTTPException(status_code=500, detail=detail[:800])
+    # 成功才记「上次部署参数」（finish/done 的自动重部署靠它还原 server_ip/deploy_mode）
+    _save_last_deploy(pid, body.server_ip, payload.get("deploy_mode") or "standalone")
     return res
+
+
+async def _auto_redeploy(pid: str, db: AsyncSession) -> str:
+    """finish/done 之后尽力自动重部署（一句话结论，绝不抛异常出去）。"""
+    try:
+        params = _read_last_deploy().get(str(pid))
+    except Exception as e:  # noqa: BLE001
+        return "读取上次部署参数失败：" + type(e).__name__
+    if not isinstance(params, dict) or not params.get("server_ip"):
+        return "未找到上次部署参数，请手动点一次部署"
+    try:
+        res = await _generate_and_deploy(
+            pid, str(params.get("server_ip")),
+            str(params.get("deploy_mode") or "standalone"), db, auto_ip=False)
+    except HTTPException as e:
+        return "自动重部署被拒绝：" + str(e.detail)[:200]
+    except Exception as e:  # noqa: BLE001
+        return "自动重部署失败：" + type(e).__name__ + " " + str(e)[:120]
+    if not res.get("supported"):
+        return "跳过：当前主机不支持自动部署（非 Linux）"
+    if not res.get("ok"):
+        return "自动重部署失败：" + "；".join(res.get("errors") or ["未知错误"])[:200]
+    return "已自动重部署：完成的机器不再收到自动装机菜单"
 
 
 # ---------- ISO ?? ----------

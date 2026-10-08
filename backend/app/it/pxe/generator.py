@@ -242,6 +242,13 @@ class PxeConfig:
     # 两族都显式落盘成 /etc/sudoers.d/90-opstk-<user>（RHEL wheel 默认要密码、
     # Ubuntu subiquity 默认免密 —— 两态都由我们显式表达，不依赖安装器默认值）。
     sudo_nopasswd: bool = True
+    # ── 装完回调（防重复抹盘，2026-10-08 真机实证）────────────────────────
+    # 该台机器装完后的回调 URL（api 层按装机记录 id + HMAC 令牌拼出，见
+    # app/api/pxe.py 的 install_done_url）。只随**每机**应答文件下发：装机完成时
+    # 回调把该机记录标记 installed，dnsmasq 从此不再给这台机器下发自动装机菜单。
+    # 模板级 ks.cfg / user-data 恒为空串（不带回调，输出与历史逐字一致）；
+    # 生成侧只认本文件拼好的值，且必须先过 _safe_done_url 白名单。
+    done_url: str = ""
 
 
 # 装机流程按**安装器家族**分岔（不再是"ubuntu vs 其余"）：
@@ -1781,6 +1788,17 @@ def _ubuntu_user_data(c):
         lines.append("    - " + json.dumps(
             "curtin in-target --target=/target -- bash -c " + shlex.quote(
                 "grep -rls NOPASSWD /etc/sudoers.d/ 2>/dev/null | xargs -r rm -f")))
+    # ── 装完回调（防重复抹盘，2026-10-08 真机实证）──
+    # 仅按装机记录展开（done_url 非空）时追加：装机收尾回调服务端，把该机的装机
+    # 记录标记 installed —— 之后 dnsmasq 不再给这台机器下发自动装机菜单。
+    # **不**经 curtin in-target：curl 在 live ISO（安装环境）里现成，target 最小装
+    # 未必有；这条命令本来就该在安装环境里跑（跑完紧接着就是 reboot）。
+    # done_url 已过 _safe_done_url 白名单（无引号/$/分号/空格），双引号里安全；
+    # || true 保证回调失败绝不把装好的系统判成装机失败（与上面 systemctl 同理）。
+    _done = _safe_done_url(c.done_url)
+    if _done:
+        lines.append("    - " + json.dumps(
+            "curl -s -m 10 -X POST " + chr(34) + _done + chr(34) + " >/dev/null 2>&1 || true"))
     # 这条必须容错。真机实测（22.04 live-server 最小安装）里 ssh 单元根本不存在，
     # 命令返回 1，curtin 于是把**已经装好的系统**判成 install_fail：
     #   串口实证 "Command '[... systemctl enable ssh]' returned non-zero exit status 1"
@@ -1916,6 +1934,15 @@ def _rhel_ks(c):
         L.append("chown -R " + admin + ":" + admin + " /home/" + admin + "/.ssh")
     if c.post_script:
         L.append(c.post_script)
+    # ── 装完回调（防重复抹盘，2026-10-08 真机实证）──
+    # 仅按装机记录展开（done_url 非空）时追加：装机收尾回调服务端，把该机的
+    # 装机记录标记 installed —— 之后 dnsmasq 不再给这台机器下发自动装机菜单，
+    # 重启走网卡引导也不会被重装。done_url 已过 _safe_done_url 白名单
+    # （无引号/$/分号/空格），放在 shell 双引号里是安全的；|| true 保证回调
+    # 失败（网络没通、服务端重启中等）绝不把装好的系统判成装机失败。
+    _done = _safe_done_url(c.done_url)
+    if _done:
+        L.append("curl -s -m 10 -X POST " + q + _done + q + " >/dev/null 2>&1 || true")
     L.append("%end")
     return "\n".join(L) + "\n"
 
@@ -1965,6 +1992,30 @@ def _extra_repo_args(repos) -> str:
         if name and url:
             out += " inst.addrepo=" + name + "," + url
     return out
+
+
+# 装完回调 URL 的字符白名单：http(s):// 加常规 URL 字符（字母数字与 :/._%~?=&-）。
+# 为什么比 _safe_line 严：done_url 会被拼进 %post / late-commands 的 shell **双引号**
+# 里（`curl -s -m 10 "<done_url>" >/dev/null 2>&1 || true`）—— 引号、$、反引号、
+# 分号、空格都会改变 shell 语法结构，而 _safe_line 只拦控制字符，挡不住这些。
+_DONE_URL_RE = re.compile(r"https?://[0-9A-Za-z:/._%~?=&-]+")
+
+
+def _safe_done_url(v) -> str:
+    """done_url 白名单校验；空值放行（空串 = 该机不带回调，模板级产物恒如此）。
+
+    D7 第 3 层的同一份思路：不信任任何调用方 —— api 层拼的 URL 也要在这里
+    再体检一次，注入不进 %post / late-commands。
+    """
+    s = _safe_line(v, "done_url").strip()
+    if not s:
+        return ""
+    if not _DONE_URL_RE.fullmatch(s):
+        raise ValueError(
+            "done_url 不合法 " + repr(s)
+            + "：只允许 http(s):// 加常规 URL 字符（字母数字与 :/._%~?=&-）"
+        )
+    return s
 
 
 # ===== iPXE 菜单 =====
@@ -2184,13 +2235,18 @@ def _dnsmasq(c, installs=None):
     # D7 第 3 层：只接受合法 MAC，非法直接跳过（防注入进 dhcp-host 与文件名）
     # 元组第 3 位 = 该机登记的静态 ip（没登记为 None）：有它 dnsmasq 才按 MAC 下发
     # DHCP 预留（重装/改配置时该机也拿到同一地址，防止 IP 漂移）。
+    # 元组第 4/5 位 = 装机状态与完成时间：status 非 pending 的记录**不再下发**按机
+    # 的自动装机菜单（防重复抹盘，2026-10-08 真机实证：装完的机器重启走网卡引导
+    # 又被装了一遍），但 dhcp-host 地址预留照发（该机的 IP 稳定性不能丢）。
     reg = []
     for inst in installs:
         mac = _safe_mac(inst.get("mac"))
         if not mac:
             continue
         addr, _prefix = _require_install_ip(inst, "装机记录 " + mac)
-        reg.append((mac, _mac_tag(mac), addr))
+        _fin = " ".join(str(inst.get("finished_at") or "").split())
+        reg.append((mac, _mac_tag(mac), addr,
+                    str(inst.get("status") or "pending"), _fin or "已完成"))
 
     if mode == "relay":
         # M6：原实现同时写了 interface=<iface> 与 no-dhcp-interface=<iface>。
@@ -2249,9 +2305,11 @@ def _dnsmasq(c, installs=None):
     L.append("dhcp-match=set:efi-x86_64,option:client-arch,9")
     L.append("dhcp-match=set:efi-ia32,option:client-arch,6")
     L.append("dhcp-match=set:ipxe,175")
-    for mac, tag, ip in reg:
+    for mac, tag, ip, _st, _fin in reg:
         # 照抄同文件既有拼法：dhcp-host=<mac>,set:pxe_<tag>；该机登记了 ip 时
         # 在中间插入 <ip>（dnsmasq 的 dhcp-host=MAC,IP,set:tag 是同一指令的预留写法）。
+        # ★ 已标记完成的机器这行**照发**：地址预留要保持稳定（IP 不漂移），
+        #   只是它对应的自动装机菜单不再下发（见下面第二阶段循环）。
         L.append("dhcp-host=" + mac + ("," + ip if ip else "") + ",set:pxe_" + tag)
     L.append("")
     L.append("# 用 tag-if 造两两互斥的 tag：每条 dhcp-boot 只带一个 tag，不依赖优先级")
@@ -2280,13 +2338,24 @@ def _dnsmasq(c, installs=None):
     L.append("")
     L.append("# 第二阶段：iPXE 自己再次 DHCP 时下发【脚本 URL】（HTTP），而不是固件")
     L.append("# 按 MAC 指定 iPXE 菜单 (tag 方式, 避免 URL 被当作 hostname)")
-    for mac, tag, _ip in reg:
+    for mac, tag, _ip, st, fin in reg:
+        if st != "pending":
+            # ★ 防重复抹盘（2026-10-08 真机实证）：该机已标记完成（finished_at=…），
+            #   不再下发自动装机菜单 → 回落未登记默认菜单 → 引导本地磁盘。
+            #   它的两条 per-MAC 行（tag-if=set:fw-menu-<tag> 与 dhcp-boot）就此缺席：
+            #   机器重启走网卡时拿不到装机菜单，固件按引导顺序继续引导本地盘。
+            L.append("# " + mac + "：该机已标记完成（finished_at=" + fin
+                     + "），不再下发自动装机菜单 → 回落未登记默认菜单 → 引导本地磁盘")
+            continue
         L.append("tag-if=set:fw-menu-" + tag + ",tag:fw-menu,tag:pxe_" + tag)
         L.append("dhcp-boot=tag:fw-menu-" + tag + "," + answer_base + "/boot/" + tag + ".ipxe")
-    # 默认菜单对**所有**已登记 MAC 取反，从而与上面每台机的专属菜单互斥。
-    # 它指向扁平的 <http_root>/boot.ipxe（全局唯一），内容见 _unregistered_default_menu()：
-    # 有装机记录时那是一份"拒绝自动安装"的安全菜单，不会把没登记的机器重新分区。
-    neg = "".join(",tag:!pxe_" + t for _, t, _ip in reg)
+    # 默认菜单对**仍待装机**的 MAC 取反，从而与上面每台机的专属菜单互斥。
+    # 已标记完成的机器**不**取反：它的 dhcp-host 仍在（set:pxe_<tag> 照发），
+    # 而专属菜单已不下发 ⇒ tag:fw-menu 成立且所有 tag:!pxe_<待装> 都成立
+    # ⇒ 落到 fw-menu-def（未登记默认菜单：拒绝自动安装并 exit）⇒ 固件继续
+    # 按引导顺序引导本地磁盘 —— 这正是本单元要的目标行为。
+    # 它指向扁平的 <http_root>/boot.ipxe（全局唯一），内容见 _unregistered_default_menu()。
+    neg = "".join(",tag:!pxe_" + t for _m, t, _ip, st, _fin in reg if st == "pending")
     L.append("tag-if=set:fw-menu-def,tag:fw-menu" + neg)
     L.append("# 未登记机器的默认菜单：扁平全局文件（不是 profiles/<pid>/ 下的那份）")
     L.append("dhcp-boot=tag:fw-menu-def," + c.http_root + "/boot.ipxe")
@@ -2306,6 +2375,19 @@ def _mode_label(mode):
         "proxy": "proxy - ProxyDHCP (与现有 DHCP 并存)",
         "relay": "relay - 中继模式 (仅 TFTP, 依赖交换机中继)",
     }.get(mode, mode)
+
+
+# ── P2：lvm 简写的固定容量提示（README 与部署日志共用同一份文案）──
+# 数字来源：_rhel_layout_lines("lvm", …) 的固定尺寸合计
+#   20480 MiB(root) + 8192 MiB(swap) + 10240 MiB(/home) + 1024 MiB(/boot)
+#   + 512 MiB(ESP) = 40448 MiB ≈ 40.4 GB（按十进制 GB 读）。
+# 小盘（如 40 GB 的系统盘实际可用只有 ~37 GiB）装不下这套固定尺寸，分区阶段就失败。
+LVM_SIZE_WARNING = (
+    "警告：本模板用 lvm 简写分区，固定尺寸合计 ≈ 40.4 GB"
+    "（root 20 GiB + swap 8 GiB + /home 10 GiB + /boot 1 GiB + ESP 0.5 GiB）；"
+    "目标引导盘小于约 40 GB 时装机必然失败，请改用 direct（part / --grow，随盘缩放）"
+    "或自定义分区。"
+)
 
 
 
@@ -2358,13 +2440,24 @@ def _readme(c, has_registered=False):
         "注意：`url=` 这个内核参数 cloud-init 也会解析（cloud-config-url 的弃用别名），\n"
         "所以必须同时给出 cloud-config-url=，否则 cloud-init 会把整份 ISO 也当配置下载一遍\n"
         "（实测：3.66GB anon RSS 被 OOM 杀）。本配置已经带上了。\n\n"
+        "磁盘容量要求（必读）\n"
+        "----------------\n"
+        "lvm 简写的固定尺寸合计 ≈ 40.4 GB\n"
+        "（root 20 GiB + swap 8 GiB + /home 10 GiB + /boot 1 GiB + ESP 0.5 GiB）。\n"
+        "目标引导盘小于约 40 GB 时请改用 direct（`part / --grow`，随盘缩放）或自定义分区，\n"
+        "否则装机在分区阶段就会失败（盘放不下这套固定尺寸）。\n"
+        + ("【当前模板警告】" + LVM_SIZE_WARNING + "\n\n"
+           if (c.disk_scheme or "") == "lvm" else "\n") +
         "引导顺序（必读）\n"
         "----------------\n"
         "目标机固件请设为【先硬盘、后网卡】，例如 PVE：\n"
         "  qm set <vmid> --boot \"order=scsi0;net0\"\n"
         "  - 空盘机器：硬盘引导失败 → 落到网卡 → PXE 装机\n"
         "  - 装好的机器：硬盘有 grub → 直接起系统，不会被 PXE 重装\n"
-        "若设成只从网卡引导，装完自动重启后会再次 PXE 并**重装一遍**（反复抹盘）。\n\n"
+        "若设成只从网卡引导，装完自动重启后会再次 PXE 并**重装一遍**（反复抹盘）。\n"
+        "装机收尾会回调服务端把该机标记完成（finish/done），标记完成后 dnsmasq\n"
+        "不再给这台机器下发自动装机菜单 —— 网卡引导只会落到拒绝安装的默认菜单后\n"
+        "交回固件，不会再抹盘；把引导顺序改成磁盘优先仍是最稳妥的兜底。\n\n"
         "内核控制台\n"
         "----------\n"
         "本次参数: " + (c.kernel_console or "(未设置)") + "\n"
@@ -2475,7 +2568,12 @@ def generate_all(c, installs=None):
             continue
         tag = _mac_tag(mac)
         hostname = _safe_hostname(inst.get("hostname"), "") or _safe_hostname(c.hostname)
-        ic = replace(c, hostname=hostname)
+        # ── 装完回调（防重复抹盘）──
+        # done_url 只随**每机**应答文件下发（api 层按装机记录拼好带来）；模板级
+        # ks.cfg/user-data 用的是 c 本体，done_url 恒为空串，不带回调。
+        # 无论该机 status 是什么，文件都照旧生成（幂等、便于复核）——是否下发
+        # 由 _dnsmasq 按 status 决定，与文件在不在无关。
+        ic = replace(c, hostname=hostname, done_url=str(inst.get("done_url") or ""))
         # ── 每机静态 IP（本单元核心）───────────────────────────────────
         # 该机登记了 ip ⇒ 按【静态】生成这份机器自己的应答文件（装机记录的 ip
         # 优先于模板 net_config 的 ip；掩码取该机 ip 的 "/N"，缺省沿用模板），
