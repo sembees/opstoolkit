@@ -760,7 +760,9 @@ LEGACY_KS_LVM = [
     "volgroup vg0 pv.01",
     "logvol / --vgname=vg0 --name=root --size=20480 --fstype=ext4",
     "logvol swap --vgname=vg0 --name=swap --size=8192",
-    "logvol /home --vgname=vg0 --name=home --size=10240 --fstype=ext4",
+    # ★ 2026-10-08：/home 由固定 10240 改为随盘增长（--size=1 --grow）。
+    # 原因见 generator._rhel_layout_lines 的注释：原固定合计 ≈40.4 GB，30 GB 盘装不上。
+    "logvol /home --vgname=vg0 --name=home --size=1 --grow --fstype=ext4",
     "bootloader --location=mbr --boot-drive=sda",
 ]
 LEGACY_KS_DIRECT = [
@@ -891,13 +893,23 @@ class PxeDiskRegressionTest(unittest.TestCase):
         #     默认进生成物（验收⑤"用户+公钥+sudo 进生成物，两侧"），默认 allow_root=False
         #     要求 PermitRootLogin 两态显式固化 —— 字节级"改造前不动"与本需求不可兼得，
         #     依 §5.14 先例按新基线重算；四用例的新差异只含上述新增行。
+        # ⚠️ 2026-10-08 第三次重新基线化（用户已确认第 ④ 项"lvm 简写改为随盘增长"）：
+        #   只有 ["rhel","lvm",null] 这一个用例的 sha 变了，另外三个（ubuntu lvm/direct、
+        #   rhel direct）**必须保持原值**——本次只动 _rhel_layout_lines 的 lvm 分支一行：
+        #     改前：logvol /home --vgname=vg0 --name=home --size=10240 --fstype=ext4
+        #     改后：logvol /home --vgname=vg0 --name=home --size=1 --grow --fstype=ext4
+        #   原因：原固定尺寸合计 40448 MiB ≈ 40.4 GB，而本项目测试机就是 30 GB 盘
+        #   （PVE "30G" = 30720 MiB）⇒ lvm 简写在小盘上分区阶段必失败（上一轮只能用
+        #   direct 绕开）。改后固定部分 30208 MiB ≈ 29.5 GiB，30 GB 盘可用，剩余给 /home。
+        #   机械复算见 PxeLvmFitsSmallDiskTest（固定部分 ≤ 30 GiB 且 /home 必须带 --grow）。
+        #   旧值（第二次基线化时）：c3a1b7dbb9d4c271d61e02f1bb6be077e475d025241a06d86f1fb6866fe87512
         golden = {
             '["ubuntu","lvm",null]':
                 "bd7011ba9bfb41d12da354592ca00910c85ff8c79076207d3e6a968ace6efc52",
             '["ubuntu","direct",{"disk":"vda"}]':
                 "a8385ca56bacc27294497e41c2bef33ef3e5eb0cefddc4968a488d23b3469b67",
             '["rhel","lvm",null]':
-                "c3a1b7dbb9d4c271d61e02f1bb6be077e475d025241a06d86f1fb6866fe87512",
+                "8052a17c1419e88268b180b1ba54622e4ff279765cbf596f58397c76f003e3e5",
             '["rhel","direct",{"disk":"nvme0n1"}]':
                 "cb501602e5741af1449773686113cae394dfa389a627cb458a7edfdb9bde0d72",
         }
@@ -4493,3 +4505,43 @@ class PerMachineStaticIPAndSSHTest(unittest.TestCase):
         self.assertNotIn("/ks/" + self.T2, m1)
         self.assertNotIn("--ip=10.10.10.200", files["ks/" + self.T1 + "/ks.cfg"])
         self.assertNotIn("--ip=10.10.10.100", files["ks/" + self.T2 + "/ks.cfg"])
+
+class PxeLvmFitsSmallDiskTest(unittest.TestCase):
+    """lvm 简写的固定尺寸必须能塞进 30 GB 盘（2026-10-08：/home 改随盘增长）。
+
+    为什么要有这条：原来四项固定尺寸合计 ≈40.4 GB，而本项目测试机就是 30 GB 盘
+    （PVE "30G" = 30720 MiB）⇒ 默认的 lvm 方案在小盘上分区阶段必失败（我上一轮只能用
+    direct 绕开）。这条用**机械复算**钉住"固定部分 ≤ 30 GiB"，防止以后又被改回大固定值：
+    把生成的 ks 里所有 part/logvol 行取出来，没有 --grow 的按 --size 全额计，
+    带 --grow 的只计它的最小基数（anaconda 要求给基数）。
+    """
+
+    def test_lvm_fixed_part_fits_30g(self):
+        import re
+        files = generate_all(_cfg(os_type="rhel", os_version="9",
+                                  mirror="http://mirror.example/rocky/9/BaseOS/x86_64/os/"))
+        ks = files["ks.cfg"]
+        total = 0
+        grow_lines = []
+        for line in ks.splitlines():
+            if not re.match(r"^(part|logvol)\s", line):
+                continue
+            m = re.search(r"--size=(\d+)", line)
+            size = int(m.group(1)) if m else 0
+            if "--grow" in line:
+                grow_lines.append(line)
+                total += size          # --grow 行只计最小基数
+            else:
+                total += size
+        self.assertTrue(any(l.startswith("logvol /home") for l in grow_lines),
+                        "lvm 简写的 /home 必须是 --grow（随盘增长）：%s" % grow_lines)
+        # 至少要有一个 logvol 带 --grow（否则剩余空间没人吃，等于又回到固定尺寸）
+        self.assertTrue(any(l.startswith("logvol /") for l in grow_lines),
+                        "必须有一个 logvol 带 --grow：%s" % grow_lines)
+        self.assertLessEqual(
+            total, 30720,
+            "lvm 固定部分（含 --grow 的最小基数）合计 %d MiB，已超过 30 GiB 盘（30720 MiB）" % total)
+
+
+if __name__ == "__main__":
+    unittest.main()

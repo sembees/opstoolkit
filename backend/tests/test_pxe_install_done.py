@@ -481,7 +481,9 @@ class PxeDoneRedeployTest(_DbCase):
         self.assertTrue(res["ok"], res)
         self.assertIn(LVM_SIZE_WARNING, res["log"])
         # README（给用户看的那份）同样带提示与当前模板警告
-        self.assertIn("40.4 GB", calls[0]["files"]["README.txt"])
+        # 2026-10-08：/home 改为随盘增长后，固定部分由 ≈40.4 GB 降到 ≈29.5 GB（30 GB 盘可用），
+        # 这里跟着改口径；断言仍钉住"README 里必须出现这个数字"
+        self.assertIn("29.5 GB", calls[0]["files"]["README.txt"])
         self.assertIn("【当前模板警告】", calls[0]["files"]["README.txt"])
 
 

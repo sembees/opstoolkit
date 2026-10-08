@@ -1205,7 +1205,13 @@ def _rhel_layout_lines(scheme, disk) -> str:
         "volgroup vg0 pv.01\n"
         "logvol / --vgname=vg0 --name=root --size=20480 --fstype=ext4\n"
         "logvol swap --vgname=vg0 --name=swap --size=8192\n"
-        "logvol /home --vgname=vg0 --name=home --size=10240 --fstype=ext4\n"
+        # ★ 2026-10-08：/home 由固定 10240 改成 `--size=1 --grow`（随盘增长）。
+        # 为什么必须改：原来四项固定尺寸合计 20480+8192+10240+1024+512 = 40448 MiB ≈ 40.4 GB，
+        # 而本项目测试机就是 30 GB 盘（PVE "30G" = 30720 MiB）⇒ 用 lvm 简写装机在分区阶段
+        # 必然失败（我上一轮只能改用 direct 绕开，等于默认方案在小盘上不可用）。
+        # 改后固定部分降到 30208 MiB ≈ 29.5 GiB，30 GB 盘可用，多出来的空间全部给 /home。
+        # 注意顺序：`logvol /home` 必须是**最后一个** LV，anaconda 的 --grow 才会吃掉剩余空间。
+        "logvol /home --vgname=vg0 --name=home --size=1 --grow --fstype=ext4\n"
     )
 
 
@@ -2392,9 +2398,9 @@ def _mode_label(mode):
 #   + 512 MiB(ESP) = 40448 MiB ≈ 40.4 GB（按十进制 GB 读）。
 # 小盘（如 40 GB 的系统盘实际可用只有 ~37 GiB）装不下这套固定尺寸，分区阶段就失败。
 LVM_SIZE_WARNING = (
-    "警告：本模板用 lvm 简写分区，固定尺寸合计 ≈ 40.4 GB"
-    "（root 20 GiB + swap 8 GiB + /home 10 GiB + /boot 1 GiB + ESP 0.5 GiB）；"
-    "目标引导盘小于约 40 GB 时装机必然失败，请改用 direct（part / --grow，随盘缩放）"
+    "警告：本模板用 lvm 简写分区，固定尺寸合计 ≈ 29.5 GB"
+    "（root 20 GiB + swap 8 GiB + /boot 1 GiB + ESP 0.5 GiB，/home 随盘增长）；"
+    "目标引导盘小于约 30 GB 时装机仍会失败，请改用 direct（part / --grow，随盘缩放）"
     "或自定义分区。"
 )
 
@@ -2451,9 +2457,9 @@ def _readme(c, has_registered=False):
         "（实测：3.66GB anon RSS 被 OOM 杀）。本配置已经带上了。\n\n"
         "磁盘容量要求（必读）\n"
         "----------------\n"
-        "lvm 简写的固定尺寸合计 ≈ 40.4 GB\n"
-        "（root 20 GiB + swap 8 GiB + /home 10 GiB + /boot 1 GiB + ESP 0.5 GiB）。\n"
-        "目标引导盘小于约 40 GB 时请改用 direct（`part / --grow`，随盘缩放）或自定义分区，\n"
+        "lvm 简写的固定尺寸合计 ≈ 29.5 GB\n"
+        "（root 20 GiB + swap 8 GiB + /boot 1 GiB + ESP 0.5 GiB；/home 用 --grow 吃掉剩余空间）。\n"
+        "目标引导盘小于约 30 GB 时请改用 direct（`part / --grow`，随盘缩放）或自定义分区，\n"
         "否则装机在分区阶段就会失败（盘放不下这套固定尺寸）。\n"
         + ("【当前模板警告】" + LVM_SIZE_WARNING + "\n\n"
            if (c.disk_scheme or "") == "lvm" else "\n") +
