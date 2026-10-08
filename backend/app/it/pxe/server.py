@@ -209,6 +209,28 @@ def service_control(action: str) -> dict:
 
 # ── Network detection ──
 
+def _default_route_warning(iface: str, gateway: str) -> str:
+    """**建议值取自默认路由网卡**时的告警文本（"" = 无话可说）。
+
+    背景（真机实证 2026-10-08）：向导第 4 步 `/setup/network` 直通本模块的
+    `detect_network()`，而在 10.128.118.113 上默认路由是 **ens18 / 企业网**，于是向导把
+    `ens18 / 10.128.118.113 / 池 10.128.118.191-253` 当成"建议值"展示出来。
+    照它部署就是把 DHCP 开在企业网上 —— 虽然部署侧守卫会挡住
+    （standalone + 自动探测到的 server_ip → 422；池不在绑卡网段 → 422），
+    但向导必须把风险说清楚，不能让人误以为"这就是推荐配置"。
+
+    纯函数（不碰真实网络），便于单测。只认"有网卡且有网关"这一种情形 ——
+    这两样同时有值，就意味着建议值是从默认路由那条路取来的。
+    """
+    if not iface or not gateway:
+        return ""
+    return ("建议值取自本机【默认路由】网卡 " + str(iface) + "（网关 " + str(gateway) + "）："
+            "这通常是上联/办公网的卡。若把 PXE/ZTP 的 DHCP 绑在它上面，"
+            "DHCP 就可能服务到这个网段（本项目里就是企业网 10.128.118.0/24）。"
+            "装机的正确做法是改用【独立的隔离网卡】：在模板里显式填写 PXE 网卡的地址"
+            "（server_ip），部署侧守卫会在「DHCP 池不在该网卡网段内」时直接拒绝。")
+
+
 def detect_network() -> dict:
     """探测本机主用网卡 / IP / 网关 / DHCP 范围。
 
@@ -372,6 +394,11 @@ def detect_network() -> dict:
                 dhcp_end = str(hosts[-2])
         except Exception as e:  # noqa: BLE001
             warnings.append("计算 DHCP 范围失败: " + str(e)[:60])
+
+    # ---- 3.5 建议值来自默认路由网卡时必须提示风险（见 _default_route_warning）----
+    _route_warn = _default_route_warning(iface, gateway)
+    if _route_warn:
+        warnings.append(_route_warn)
 
     # ---- 4. 只放入有值的键：绝不放空字符串 ----
     result = {}
