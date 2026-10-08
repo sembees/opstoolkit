@@ -391,6 +391,93 @@ def detect_network() -> dict:
     return result
 
 
+def serve_binding(ip: str) -> dict:
+    """反查「持有该 IPv4 的本机网卡」—— dnsmasq 的 interface= 只允许绑它。
+
+    为什么必须按 server_ip 反查，而不能用模板里的 net_config.interface：
+    后者在界面上是「网卡名」(占位符 ens33)，语义是**被装机器**的网卡名；生成器早期
+    把这同一个键也当成服务端 dnsmasq 的绑定网卡。多网卡 PXE 服务器上两者并不相同 ——
+    本项目实测：ens18 = 10.128.118.113（企业网，红线，绝不允许在上面开 DHCP）、
+    ens19 = 192.168.199.1（隔离装机网）。于是模板「客户端网卡 ens18 + server_ip
+    192.168.199.1」生成出来的正是 `interface=ens18`：一部署就在企业网上开 DHCP。
+    服务端该绑哪张网卡，唯一正确的判据是「谁持有 server_ip」，所以这里反查。
+
+    只依赖标准库：容器镜像里没有 iproute2（见 detect_network 的注释），所以走
+    socket.if_nameindex() + ioctl，不调用 `ip` 命令。容器是 network_mode: host，
+    看到的网卡与宿主一致（已实测）。
+
+    返回 `{"interface": 网卡名, "ip": 地址, "netmask": 掩码, "prefixlen": 前缀长}`；
+    取不到（非 Linux / 参数为空 / 没有网卡持有该地址 / ioctl 失败）返回 `{}` ——
+    调用方必须把空字典当「不知道」，而不是当「随便绑一张」。
+    掩码单独取失败时仍返回网卡名（前缀长给 None）：绑卡这件事已经能确定，
+    不确定的只是「池是否落在该网段内」，那个判断由 range_inside_binding 兜底。
+    """
+    if not ip or not _dhcp.is_linux():
+        return {}
+    try:
+        import fcntl
+        import ipaddress
+        import socket
+        import struct
+    except ImportError:  # pragma: no cover - Linux 上不会发生
+        return {}
+
+    SIOCGIFADDR = 0x8915
+    SIOCGIFNETMASK = 0x891B
+    target = str(ip).strip()
+
+    def _ioctl_addr(sock, name: str, code: int) -> str:
+        raw = fcntl.ioctl(sock.fileno(), code, struct.pack("256s", name[:15].encode()))
+        return socket.inet_ntoa(raw[20:24])
+
+    for _idx, name in socket.if_nameindex():
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                if _ioctl_addr(s, name, SIOCGIFADDR) != target:
+                    continue
+                try:
+                    netmask = _ioctl_addr(s, name, SIOCGIFNETMASK)
+                except Exception:  # noqa: BLE001
+                    netmask = ""
+            finally:
+                s.close()
+        except Exception:  # noqa: BLE001
+            # 没有 IPv4 的接口（veth、docker0 之外的半成品口）会抛 EADDRNOTAVAIL，
+            # 属正常情况，跳过即可 —— 不能让一张无关网卡把整次反查打成失败。
+            continue
+        prefixlen = None
+        if netmask:
+            try:
+                prefixlen = ipaddress.IPv4Network("0.0.0.0/" + netmask).prefixlen
+            except Exception:  # noqa: BLE001
+                prefixlen = None
+        return {"interface": name, "ip": target, "netmask": netmask, "prefixlen": prefixlen}
+    return {}
+
+
+def range_inside_binding(start: str, end: str, binding: dict) -> bool:
+    """DHCP 池是否整体落在 binding 那张网卡的网段内（红线守卫的判据）。
+
+    standalone 模式下 dnsmasq 会在 interface= 那张网卡上直接发地址。只要池与该网卡
+    网段不匹配，就有把地址发到**别的网段**的风险（本项目里 ens18 是企业网
+    10.128.118.0/24）—— 宁可拒绝部署，也不要生成「看着是装机网、实际在企业网上开
+    DHCP」的配置。所以任何说不清的情况一律 False（fail-closed）：
+    binding 为空、前缀长缺失、地址非法、start > end 全部返回 False。
+    """
+    if not binding or binding.get("prefixlen") is None:
+        return False
+    try:
+        import ipaddress
+        net = ipaddress.ip_network(
+            str(binding.get("ip", "")) + "/" + str(binding["prefixlen"]), strict=False)
+        a = ipaddress.ip_address(str(start))
+        b = ipaddress.ip_address(str(end))
+    except Exception:  # noqa: BLE001
+        return False
+    return a in net and b in net and int(a) <= int(b)
+
+
 # ── Directory & firmware prep ──
 
 def prepare_dirs() -> list:

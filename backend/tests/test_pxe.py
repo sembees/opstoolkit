@@ -2058,6 +2058,16 @@ class DeployIsolationTest(unittest.TestCase):
             # 那与本类要测的"路径隔离/原子落盘"无关，却会让用例随宿主环境漂移。
             # 红线逻辑本身由 test_ztp_deploy.py 专门覆盖（含 PXE 侧的接入点）。
             (server._dhcp, "check_dhcp_conf_safety", lambda *a, **k: (True, "")),
+            # 2026-10-08（红线修复）：deploy_to_host 新增两条**读宿主机真实网络事实**的
+            # 守卫 —— serve_binding() 用 ioctl 反查 server_ip 所在网卡、并检查 DHCP 池
+            # 是否落在该网卡网段内。与上面 R4 同一个理由：本类只验"接线/路径隔离/原子
+            # 落盘"，宿主机网络必须被固定住，否则用例随宿主环境漂移（本类给的
+            # server_ip=10.0.0.1 是占位值，真机上根本不存在这张网卡）。
+            # 守卫判据本身由 tests/test_pxe_serve_iface.py::DeployRedlineCheckTest 覆盖。
+            (server, "detect_network", lambda: {}),
+            (server, "serve_binding",
+             lambda ip: {"interface": "eth0", "ip": "192.168.1.1",
+                         "netmask": "255.255.255.0", "prefixlen": 24}),
         ):
             p = mock.patch.object(target, attr, value)
             p.start()

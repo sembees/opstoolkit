@@ -452,6 +452,22 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession) -> dict:
         merged = dict(cfg.net_config or {})
         merged.update(body["net_config"])
         cfg.net_config = merged
+    # ★ 红线修复（2026-10-08 实测）：dnsmasq 的 interface= 必须绑到「持有 server_ip 的
+    #   那张网卡」，而不是模板的 net_config.interface —— 后者是**被装机器**的网卡名
+    #   （界面标签「网卡名」，占位 ens33）。实测模板 interface=ens18（客户端网卡名，
+    #   正确）+ server_ip=192.168.199.1（隔离装机网）时，生成出来的 dnsmasq.conf 是
+    #   `interface=ens18`，而本机 ens18=10.128.118.113 是企业网网卡：一部署就会在
+    #   10.128.118.0/24 上开 DHCP。这里按 server_ip 反查真实网卡写进 server_interface，
+    #   客户端那份 `network --device=` 仍然用它自己的网卡名，两者互不影响。
+    #   所有模式都要写：relay 虽然不发 DHCP，但生成器对 relay 同样输出 interface= +
+    #   enable-tftp（它要提供 TFTP/HTTP 文件），绑错网卡一样服务不到装机网。
+    #   取不到网卡时不写，由部署侧 fail-closed 守卫兜底。
+    if body.get("server_ip"):
+        _bind = pxe_server.serve_binding(body.get("server_ip"))
+        if _bind.get("interface"):
+            _nc_bound = dict(cfg.net_config or {})
+            _nc_bound["server_interface"] = _bind["interface"]
+            cfg.net_config = _nc_bound
     installs = list(body.get("installs", []))
     # 回落：调用方不传 installs 时，取**该模板在 DB 里的装机记录**。
     # 为什么不回落不行 —— 实测（RUNBOOK-STATE §5.29）：给模板登记了 3 台 MAC，但只要
@@ -505,6 +521,49 @@ async def service_control(body: dict = None, _user=Depends(require_role("admin")
     return pxe_server.service_control(action)
 
 
+def _deploy_redline_check(ip: str, mode: str, net_config: dict, bind: dict,
+                          auto_ip: bool = False) -> str | None:
+    """本机部署前的红线判定：返回**拒绝原因**（中文），通过则 None。
+
+    抽成纯函数是为了能被单测直接覆盖（路由层只剩「非 None 就 422」）。
+    三条判据，任何一条不满足都拒绝 —— 本机部署会把配置交给**宿主 root dnsmasq**
+    加载，而 standalone 模式会在 interface= 那张网卡上直接分配地址：
+
+    1. server_ip 所在网卡必须查得到（查不到就只能回落模板里的**客户端**网卡名，
+       本项目里那个名字正是企业网卡 ens18）；
+    2. standalone **不接受自动探测出来的 server_ip**：探测值取的是默认路由所在网卡
+       （本项目实测 = 企业网 10.128.118.113），在它上面开 DHCP 就是把地址发到
+       管理/生产网 —— 而「池 ⊆ 该网卡网段」这种自洽性检查**拦不住**它（探测出来的
+       pool 本来就落在同一张网卡网段里，两条判据同时为真）。
+       所以 standalone 必须由运维**显式**给出隔离装机网的 server_ip；proxy/relay
+       不发地址，自动探测照旧允许。
+    3. DHCP 池必须整体落在该网卡网段内（池与网段不匹配时可能把地址发到别的网段）。
+    """
+    if not bind or not bind.get("interface"):
+        return ("无法确定 server_ip " + str(ip) + " 所在网卡，拒绝部署：dnsmasq 的 "
+                "interface= 必须绑到持有该地址的本机网卡上，否则可能在别的网段"
+                "（例如企业网）上开 DHCP。请确认该地址已配置在本机某张网卡上，"
+                "或在部署参数里显式给出正确的 server_ip。")
+    if mode != "standalone":
+        return None
+    if auto_ip:
+        return ("拒绝部署：standalone（独立 DHCP）会在 " + str(bind.get("interface"))
+        + " 上直接分配地址，而本次 server_ip 是**自动探测**出来的 " + str(ip)
+        + "（默认路由所在网卡）—— 那通常是管理/生产网口，在上面开 DHCP 会把地址"
+          "发到该网段。请显式填写隔离装机网的 server_ip（例如模板里 PXE 网卡的地址）"
+          "后再部署；若只想提供引导信息、不分配地址，请改用 proxy 模式。")
+    _nc = net_config or {}
+    _start = _nc.get("dhcp_start", "192.168.1.100")
+    _end = _nc.get("dhcp_end", "192.168.1.200")
+    if not pxe_server.range_inside_binding(_start, _end, bind):
+        return ("拒绝部署：DHCP 池 " + str(_start) + "-" + str(_end)
+                + " 不在 server_ip " + str(ip) + " 所在网卡 " + str(bind.get("interface"))
+                + " 的网段内 —— standalone 模式会在该网卡上直接分配地址，池与网段"
+                  "不匹配时可能把地址发到别的网段（例如企业网）。请把模板 net_config "
+                  "的 dhcp_start/dhcp_end 改成该网卡网段内的地址。")
+    return None
+
+
 @router.post("/profiles/{pid}/deploy")
 async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(require_role("admin"))):
     """POST /api/it/pxe/profiles/{pid}/deploy — 一键部署到本机：生成配置→落地文件→重启 dnsmasq。"""
@@ -515,11 +574,13 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     # 2. 否则用 detect_network()["server_ip"]
     # 3. 否则回退 _local_ip()
     if body.server_ip:
-        pass
+        auto_ip = False
     elif net and net.get("server_ip"):
         body.server_ip = net["server_ip"]
+        auto_ip = True
     else:
         body.server_ip = _local_ip()
+        auto_ip = True
 
     # 解析到环回地址说明无法确定对外 IP，必须报错而不是生成不可用的配置
     ip = body.server_ip
@@ -570,6 +631,23 @@ async def deploy_to_host(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
         payload["net_config"] = merged
     # 应答文件 / iPXE 菜单的 URL 前缀（不是模型字段，客户端无法注入；由上面算出）
     payload["answer_root"] = answer_root
+    # ★ 红线守卫（判据与文案见 _deploy_redline_check）：
+    #   ① 先把「server_ip 所在网卡」**写进 payload**，再让 _gen_pxe_files 用同一个值
+    #      —— 之前是生成期自己再查一次，第二次查不到就静默回落到模板的客户端网卡名
+    #      （= 修复前的错绑），而守卫已经跑完、拦不住；现在只有一份判据。
+    #   ② 只在 Linux 上判：非 Linux 本来走 deploy_files 的 supported=False 优雅降级
+    #      （提示去下载 ZIP），不能因为查不到网卡就把那条路变成 422。
+    if pxe_server.is_linux():
+        _bind = pxe_server.serve_binding(ip)
+        if _bind.get("interface"):
+            _nc_bound = dict(payload.get("net_config") or {})
+            _nc_bound["server_interface"] = _bind["interface"]
+            payload["net_config"] = _nc_bound
+        _err = _deploy_redline_check(
+            ip, (payload.get("deploy_mode") or "standalone"),
+            payload.get("net_config") or {}, _bind, auto_ip=auto_ip)
+        if _err:
+            raise HTTPException(status_code=422, detail=_err)
     files = await _gen_pxe_files(pid, payload, db)
     # deploy_files 是同步函数，而容器部署路径里它会**阻塞等待**宿主机重载完成
     # （最长 OPS_HOST_RELOAD_TIMEOUT，默认 25s）。直接在 async 路由里调用会把整个

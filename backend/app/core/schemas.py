@@ -1335,13 +1335,19 @@ class PxeNetConfigIn(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     interface: Optional[str] = None   # 网卡名白名单
+    # server_interface：**服务端** dnsmasq 要绑的网卡（与 interface「被装机器网卡名」
+    # 是两个概念；生成器优先用它）。2026-10-08 红线修复新增 —— 它由 api 层按
+    # server_ip 反查写入，但请求体同样能传，所以必须和 interface 走**同一套**网卡名
+    # 白名单：漏了这一步它就是个绕过 ifname 校验的注入点，而 _dnsmasq 在
+    # `"interface=" + iface` 里是裸拼接（换行即注入宿主 root dnsmasq 的配置行）。
+    server_interface: Optional[str] = None
     gateway: Optional[str] = None
     dns_server: Optional[str] = None
     dhcp_start: Optional[str] = None
     dhcp_end: Optional[str] = None
 
 
-    @field_validator("interface")
+    @field_validator("interface", "server_interface")
     @classmethod
     def _check_interface(cls, v: Optional[str]) -> Optional[str]:
         return _require_ifname(v) if v else v
@@ -1362,7 +1368,8 @@ class PxeNetConfigIn(BaseModel):
         也不会丢掉 warnings/server_ip 等附加键。
         """
         out: dict = dict(self.__pydantic_extra__ or {})
-        for key in ("interface", "gateway", "dns_server", "dhcp_start", "dhcp_end"):
+        for key in ("interface", "server_interface", "gateway", "dns_server",
+                    "dhcp_start", "dhcp_end"):
             val = getattr(self, key)
             if val is not None:
                 out[key] = val

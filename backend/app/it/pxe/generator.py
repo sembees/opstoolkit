@@ -2155,7 +2155,13 @@ def _dnsmasq(c, installs=None):
     """
     installs = installs or []
     nc = c.net_config or {}
-    iface = nc.get("interface", "eth0")
+    # 服务端绑卡：**只认 server_interface**（由 api 层按 server_ip 反查持有它的网卡写入）。
+    # nc["interface"] 是**被装机器**的网卡名（界面标签「网卡名」，占位 ens33）—— 早期
+    # 这里直接用它，多网卡服务器上就会把 DHCP 绑到错误的网卡：本项目实测模板
+    # interface=ens18（客户端网卡名，正确）+ server_ip=192.168.199.1（隔离装机网）时，
+    # 生成物是 `interface=ens18`，而 ens18=10.128.118.113 是企业网卡 —— 一部署就在
+    # 10.128.118.0/24 上开 DHCP。没有 server_interface 时保持原样（向后兼容）。
+    iface = nc.get("server_interface") or nc.get("interface", "eth0")
     gateway = nc.get("gateway", "192.168.1.1")
     mode = c.deploy_mode or "standalone"
     # 每台【已登记】机器的第二阶段引导脚本放在 answer_root 下（按模板隔离）。
