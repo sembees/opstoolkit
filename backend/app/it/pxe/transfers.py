@@ -95,7 +95,8 @@ class _Transfer:
 
     __slots__ = ("id", "kind", "name", "total", "received", "state", "error",
                  "started_at", "finished_at", "sha256", "detected", "part_path",
-                 "expected_sha256", "cancel_flag", "task", "last_activity")
+                 "expected_sha256", "cancel_flag", "task", "last_activity",
+                 "lock")
 
     def __init__(self, tid: str, kind: str, name: str, total: int, part_path: str):
         self.id = tid
@@ -114,6 +115,7 @@ class _Transfer:
         self.cancel_flag = False    # threading 安全的普通布尔（GIL 下读写原子）
         self.task = None            # fetch 的 asyncio.Task；upload 恒为 None
         self.last_activity = time.monotonic()  # 上传会话活动时间（清扫用）
+        self.lock = threading.RLock()  # 每会话锁：chunk 提交 / finish / cancel 互斥
 
     def to_dict(self) -> dict:
         return {
@@ -415,6 +417,11 @@ async def start_fetch(url, filename, sha256: str = "") -> dict:
             await _safe_client_aclose(client)
             _settle(t, "failed", "无法连接镜像源：" + _err_text(e))
             raise TransferError(t.error) from e
+        except Exception as e:  # noqa: BLE001 —— 畸形 URL（httpx.InvalidURL 等 ValueError 系）
+            # 不是 HTTPError/OSError，之前会裸抛成 500，且注册表条目永远 running
+            # ⇒ 锁死并发名额。这里兜住：中文 400 + 名额释放（清理交给下方 finally）。
+            _settle(t, "failed", "镜像地址无法使用：" + _err_text(e))
+            raise TransferError(t.error) from e
         t.task = asyncio.create_task(_fetch_worker(t, client, resp, resumed))
         return {"id": t.id, "state": "running"}
     finally:
@@ -423,6 +430,10 @@ async def start_fetch(url, filename, sha256: str = "") -> dict:
             # 不能泄漏到本函数之外。
             await _safe_aclose(resp)
             await _safe_client_aclose(client)
+            # 任何异常路径都必须释放名额：worker 没接手且仍是 running 的残留，
+            # 一律落 failed（_settle 终态只写一次，不会覆盖已有终态）。
+            if t.state == "running":
+                _settle(t, "failed", "镜像下载启动失败，请重试")
 
 
 async def _fetch_worker(t: _Transfer, client, resp, resumed: bool) -> None:
@@ -444,6 +455,13 @@ async def _fetch_worker(t: _Transfer, client, resp, resumed: bool) -> None:
                 raise _Cancelled()
             if not chunk:
                 continue
+            if t.total and t.total <= t.received:
+                # 续传且远端没回 Content-Length：total 只是断点前缀（have+0），
+                # 预检已经失效 ⇒ 兜底必须按**已收字节**判断；且在写入前就判，
+                # 保证 received 永不越过单镜像上限。
+                msg = _admission_error(t.received + len(chunk), _disk_free())
+                if msg:
+                    raise TransferError(msg)
             await asyncio.to_thread(_append_chunk, part, mode, chunk)
             mode = "ab"
             t.received += len(chunk)
@@ -506,7 +524,12 @@ def upload_init(filename, size, sha256: str = "") -> dict:
         raise TransferError(msg)
     part = _part_path(name)
     _silent_remove(part)  # 同名残留的旧 .part 一律作废，重新从头收
-    open(part, "wb").close()
+    try:
+        open(part, "wb").close()
+    except OSError as e:
+        # ISO 目录不存在 / .part 被同名目录占用 / 文件名超长被 OS 拒绝 ——
+        # 都必须转成可读的中文 400，绝不裸抛 OSError（API 层会兜成 500）。
+        raise TransferError("无法创建上传临时文件：" + _err_text(e)) from e
     t = _Transfer(uuid.uuid4().hex, "upload", name, size, part)
     t.expected_sha256 = str(sha256 or "").strip().lower()
     _TRANSFERS[t.id] = t
@@ -524,19 +547,35 @@ def upload_chunk(tid, offset, data: bytes) -> dict:
         raise TransferError("上传会话已结束（%s），请重新发起上传" % t.state)
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise TransferError("offset 必须是不小于 0 的整数")
-    if offset != t.received:
-        raise TransferError(
-            "偏移量不连续：服务器已收到 %d 字节，请求却从 %d 字节开始；"
-            "只支持顺序追加，下一个分块请从 offset=%d 开始"
-            % (t.received, offset, t.received))
     if not data:
         raise TransferError("分块内容为空")
-    if t.total and t.received + len(data) > t.total:
-        raise TransferError("分块超出声明大小：已收 %d 字节，本块 %d 字节，声明共 %d 字节"
-                            % (t.received, len(data), t.total))
+    with t.lock:
+        if offset != t.received:
+            raise TransferError(
+                "偏移量不连续：服务器已收到 %d 字节，请求却从 %d 字节开始；"
+                "只支持顺序追加，下一个分块请从 offset=%d 开始"
+                % (t.received, offset, t.received))
+        if t.total and t.received + len(data) > t.total:
+            raise TransferError("分块超出声明大小：已收 %d 字节，本块 %d 字节，声明共 %d 字节"
+                                % (t.received, len(data), t.total))
     _append_chunk(t.part_path, "ab", data)
-    t.received += len(data)
-    t.last_activity = time.monotonic()
+    with t.lock:
+        if t.received != offset:
+            # 并发 twin：另一个携带同一 offset 的分块已抢先落账 ⇒ 本块是重复
+            # 字节，必须从 .part 上裁掉，再按契约给中文 400（检查/写/计数
+            # 三步在会话锁下原子，绝不允许同一逻辑块落盘两次）。
+            try:
+                with open(t.part_path, "r+b") as fh:
+                    if fh.seek(0, 2) > t.received:
+                        fh.truncate(t.received)
+            except OSError:
+                pass
+            raise TransferError(
+                "偏移量不连续：服务器已收到 %d 字节，请求却从 %d 字节开始；"
+                "只支持顺序追加，下一个分块请从 offset=%d 开始"
+                % (t.received, offset, t.received))
+        t.received += len(data)
+        t.last_activity = time.monotonic()
     return {"received": t.received}
 
 
@@ -548,6 +587,9 @@ def upload_finish(tid) -> dict:
     if t.state != "running":
         raise TransferError("上传会话已结束（%s）" % t.state)
     part = t.part_path
+    with t.lock:
+        if t.state != "running":
+            raise TransferError("上传会话已结束（%s），请重新发起上传" % t.state)
 
     def _fail(msg: str) -> TransferError:
         _settle(t, "failed", msg)
@@ -562,14 +604,23 @@ def upload_finish(tid) -> dict:
     digest = _sha256_file(part)
     if t.expected_sha256 and digest != t.expected_sha256:
         raise _fail("SHA256 校验失败：期望 %s，实际 %s" % (t.expected_sha256, digest))
-    t.sha256 = digest
-    t.detected = detect_os_from_file(part)
-    final = pxe_server._iso_path(t.name)
-    if final is None:
-        raise _fail("目标文件名非法")
-    os.replace(part, final)
-    t.received = actual
-    _settle(t, "done")
+    with t.lock:
+        # cancel 可能刚在 sha256 校验窗口里 settle canceled 并删了 .part：
+        # finish/cancel 同锁互斥，在这里复查终态 ⇒ 中文 400，绝不裸抛。
+        if t.state != "running":
+            raise TransferError("上传会话已结束（%s），请重新发起上传" % t.state)
+        t.sha256 = digest
+        t.detected = detect_os_from_file(part)
+        final = pxe_server._iso_path(t.name)
+        if final is None:
+            raise _fail("目标文件名非法")
+        try:
+            os.replace(part, final)
+        except OSError as e:
+            # .part 在竞态窗口里被删（外部清理/磁盘问题）⇒ 中文 400，不裸抛 500
+            raise _fail("落盘收尾失败：" + _err_text(e)) from e
+        t.received = actual
+        _settle(t, "done")
     return {"ok": True, "name": t.name, "size": actual, "detected": dict(t.detected)}
 
 
@@ -581,9 +632,11 @@ def cancel_transfer(tid) -> dict:
     if t is None:
         raise NotFoundError("传输任务不存在")
     if t.state == "running":
-        t.cancel_flag = True
-        _settle(t, "canceled", "已取消")
-        _silent_remove(t.part_path)
+        with t.lock:  # 与 upload_finish 同锁：终态落定与删 .part 必须原子
+            if t.state == "running":  # 复查：finish 可能刚抢先 settle done
+                t.cancel_flag = True
+                _settle(t, "canceled", "已取消")
+                _silent_remove(t.part_path)
         task = t.task
         if task is not None and not task.done():
             try:
@@ -600,11 +653,14 @@ def sweep_stale_sessions(now: float | None = None) -> int:
     for t in list(_TRANSFERS.values()):
         if (t.kind == "upload" and t.state == "running"
                 and now - t.last_activity > UPLOAD_STALE_SECONDS):
-            t.cancel_flag = True
-            _settle(t, "canceled",
-                    "上传会话超过 %d 分钟无活动，已被自动清理" % (UPLOAD_STALE_SECONDS // 60))
-            _silent_remove(t.part_path)
-            n += 1
+            with t.lock:
+                if t.state == "running":  # 复查：finish/cancel 可能刚抢先
+                    t.cancel_flag = True
+                    _settle(t, "canceled",
+                            "上传会话超过 %d 分钟无活动，已被自动清理"
+                            % (UPLOAD_STALE_SECONDS // 60))
+                    _silent_remove(t.part_path)
+                    n += 1
     return n
 
 

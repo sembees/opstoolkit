@@ -38,6 +38,11 @@ _ADDITIVE_UNIQUE_INDEXES = (
 _ADDITIVE_COLUMNS = (
     ("notifications", "oncall_lookup_failed", "BOOLEAN NOT NULL DEFAULT 0"),
     ("notifications", "merged_count", "INTEGER NOT NULL DEFAULT 0"),
+    # 装完能 SSH（本单元）：模板新增的两个开关。默认值与 PxeProfileIn/PxeProfileOut
+    # 的 schema 默认值一致（allow_root=False / sudo_nopasswd=True，用户已定），
+    # 存量模板补列后即取该默认值，不需要回填。
+    ("pxe_profiles", "allow_root", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("pxe_profiles", "sudo_nopasswd", "BOOLEAN NOT NULL DEFAULT 1"),
 )
 
 

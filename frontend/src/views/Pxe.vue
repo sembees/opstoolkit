@@ -239,7 +239,17 @@
         <el-form-item label="SSH公钥">
           <el-input v-model="form.ssh_keys_text" type="textarea" :rows="2" placeholder="每行一个公钥" />
         </el-form-item>
-
+        <el-form-item>
+          <div class="group-label">
+            <!-- 装完能 SSH（每机静态 IP 同批交付）：装机建的是普通管理员 + wheel/sudo 组，
+                 RHEL 系 root 常被禁用 —— 装完请用「管理员」账号 ssh 登录，root 直登默认关闭。
+                 配了公钥的模板会同时确保 openssh-server 在装（Ubuntu 侧自动补装）。 -->
+            <el-switch v-model="form.sudo_nopasswd" />
+            <span class="switch-label">sudo 免密（默认开）</span>
+            <el-switch v-model="form.allow_root" class="switch-gap" />
+            <span class="switch-label">允许 root SSH 直登（默认关，装完请用管理员 + sudo）</span>
+          </div>
+        </el-form-item>
         <el-divider content-position="left">磁盘</el-divider>
         <div class="group-label">目标盘与分区方案</div>
         <el-row :gutter="12">
@@ -1317,6 +1327,8 @@ const emptyForm = () => ({
   timezone: "Asia/Shanghai", locale: "en_US.UTF-8", keyboard: "us",
   admin_user: "ops", admin_password: "", root_password: "",
   ssh_keys_text: "",
+  // 装完能 SSH：sudo 免密默认开、root SSH 直登默认关（语义与后端 schema 一致）
+  allow_root: false, sudo_nopasswd: true,
   // 磁盘：默认"自动选盘"。以前这里默认 sda，等于把盘名写死 ——
   // 在 NVMe(nvme0n1) / virtio-blk(vda) 的机器上必然装不上。
   disk_scheme: "lvm",
@@ -1479,6 +1491,8 @@ function buildPayload() {
     admin_password: form.admin_password || null,
     root_password: form.root_password || null,
     ssh_keys: form.ssh_keys_text.split("\n").map(k => k.trim()).filter(Boolean),
+    allow_root: !!form.allow_root,
+    sudo_nopasswd: !!form.sudo_nopasswd,
     disk_scheme: form.disk_scheme,
     disk_config: buildDiskConfig(),
     net_mode: form.net_mode,
@@ -1499,6 +1513,9 @@ function fillForm(p) {
   form.timezone = p.timezone; form.locale = p.locale; form.keyboard = p.keyboard
   form.admin_user = p.admin_user
   form.ssh_keys_text = (p.ssh_keys || []).join("\n")
+  // 老模板/异常载荷（undefined）一律折回默认值，与后端 schema 默认一致
+  form.allow_root = !!p.allow_root
+  form.sudo_nopasswd = p.sudo_nopasswd !== false
   form.disk_scheme = p.disk_scheme || "lvm"
   const dc = p.disk_config || {}
   const dt = dc.target || {}
@@ -1723,6 +1740,9 @@ onMounted(() => {
 
 /* 卡片内小节标题 / 文件标签 / 空态文案 */
 .group-label { margin-bottom: var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+/* 装完能 SSH：两开关一行摆放，标签与开关间距用既有 token */
+.switch-label { margin: 0 var(--ot-space-3) 0 var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+.switch-gap { margin-left: var(--ot-space-3); }
 .file-tag { margin: 2px; }
 .list-empty { color: var(--ot-text-4); font-size: var(--ot-font-xs); }
 

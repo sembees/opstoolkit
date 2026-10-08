@@ -109,6 +109,12 @@ class PxeProfile(Base):
     ssh_keys: Mapped[Optional[list]] = mapped_column(JSON, default=list)
     root_password_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # 装完能 SSH（本单元）：root 直登开关（默认否）与 sudo 免密开关（默认是）。
+    # 存量库由 app/database._ensure_additive_columns 幂等补列（create_all 不给已存在
+    # 的表加列），列定义与 _ADDITIVE_COLUMNS 里的 DDL 对齐：NOT NULL + 默认值。
+    allow_root: Mapped[bool] = mapped_column(default=False)
+    sudo_nopasswd: Mapped[bool] = mapped_column(default=True)
+
     disk_scheme: Mapped[str] = mapped_column(String(16), default="lvm")  # lvm / direct
     disk_config: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
 

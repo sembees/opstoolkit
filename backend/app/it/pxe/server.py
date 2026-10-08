@@ -24,6 +24,7 @@ from app.core import filestore as _filestore
 # 不另写一套更弱的检查：server.py 这边多一个入口，注入面就多一个，标准必须一致。
 from app.it.pxe.generator import _safe_ident, _safe_line
 from app.it.pxe import os_catalog
+from app.it.pxe import iso9660 as _iso9660
 
 TFTP_ROOT = "/srv/tftp"
 WEB_ROOT = "/srv/opstk/pxe-web"
@@ -1072,8 +1073,21 @@ def extract_from_iso(iso_name, os_type="ubuntu", os_version="22.04") -> dict:
     _dhcp._run(["umount", "-l", mountpoint], sudo=True)
     rc, _, err = _dhcp._run(["mount", "-o", "loop,ro", iso_path, mountpoint], sudo=True)
     if rc != 0:
+        # 挂载失败 ≠ 提取失败（生产实测：openEuler-24.03-LTS-SP4.iso 在容器里
+        # 报 "failed to setup loop device" —— util-linux 的 mount 解析 -o loop 时
+        # 是向 /dev/loop-control **现取**空闲设备号再打开 /dev/loopN，容器 /dev 里
+        # 往往没有那个节点；产品还要跑在离线、无特权/无 loop 的主机上）。
+        # 所以这里自动回退到内置 ISO9660 解析提取（iso9660.py，不依赖 loop），
+        # 并把"用了哪条路径、为什么回退"如实写进 log。
         log.append("Mount failed: " + err.strip()[:80])
-        return {"ok": False, "log": log}
+        log.append("回退路径：loop 挂载失败，改用内置 ISO9660 解析器直接从 ISO "
+                   "读引导文件（不依赖 loop 设备/特权挂载；常见原因：容器 /dev 缺 "
+                   "空闲 loop 设备节点，或主机无 loop/无特权）")
+        try:
+            return _extract_without_mount(iso_path, dest, ost, log)
+        except Exception as e:  # noqa: BLE001  兜底也失败时给出能读懂的失败日志
+            log.append("ISO9660 兜底提取失败: " + str(e)[:120])
+            return {"ok": False, "log": log, "dest": dest, "extracted": []}
     log.append("Mounted -> " + mountpoint)
 
     # M4：从挂载成功起，后续所有路径（正常返回 / 未提取到文件的早退 /
@@ -1138,14 +1152,25 @@ def _extract_after_mount(mountpoint, dest, ost, log) -> dict:
                 extracted.append(entry.dest_squashfs + " (" + sq_files[0] + ")")
                 break
 
+    return _finish_extract(dest, extracted, log, entry.kernel_dirs)
+
+
+def _finish_extract(dest, extracted, log, expected_dirs=()) -> dict:
+    """挂载/兜底两条提取路径**共用**的收尾：log 文案与返回结构保持一致。
+
+    extracted 为空 = 一个引导文件都没提取到，追加"ISO 里没有候选引导文件"
+    的如实说明（expected_dirs 是 os_catalog 的候选目录）；正常路径追加
+    Extracted/Dest/Files 三行。返回结构与拆分前逐字一致：
+    {"ok", "log", "dest", "extracted"} —— API 字段与语义不变。
+    """
     if not extracted:
-        expected = " or ".join(d + "/" for d in entry.kernel_dirs) or "(no candidate dirs)"
-        log.append("No boot files found in ISO (expected " + expected
-                   + " boot files); nothing was extracted")
+        if expected_dirs:
+            expected = " or ".join(d + "/" for d in expected_dirs) or "(no candidate dirs)"
+            log.append("No boot files found in ISO (expected " + expected
+                       + " boot files); nothing was extracted")
         return {"ok": False, "log": log, "dest": dest, "extracted": extracted}
     log.append("Extracted: " + ", ".join(extracted))
     log.append("Dest: " + dest)
-
     final = []
     if os.path.isdir(dest):
         for f in os.listdir(dest):
@@ -1153,6 +1178,52 @@ def _extract_after_mount(mountpoint, dest, ost, log) -> dict:
             final.append(f + " (" + str(round(sz / 1048576, 1)) + "MB)")
     log.append("Files: " + ("; ".join(final) if final else "none"))
     return {"ok": True, "log": log, "dest": dest, "extracted": extracted}
+
+
+def _extract_without_mount(iso_path, dest, ost, log) -> dict:
+    """loop 挂载失败时的兜底提取：内置 ISO9660 解析直接读 ISO（不依赖 loop）。
+
+    为什么需要（生产实测）：util-linux 的 `mount -o loop` 不再扫描现存的空闲
+    loop 节点，而是向 /dev/loop-control 现取空闲设备号后打开 /dev/loopN ——
+    容器 /dev 里只有 loop0/loop1 节点（且常被宿主长期占用）时必然失败；而本产品
+    要跑在离线、可能无特权/无 loop 的主机上，"必须挂载才能提取"是脆弱设计。
+    本函数用纯标准库解析 ISO9660（PVD + 目录记录，主名字集匹配，支持 ";1"
+    版本后缀与大小写，见 iso9660.py），按 os_catalog 的候选路径提取
+    内核/initrd/squashfs —— 候选路径与顺序和挂载路径完全同源。
+
+    返回值结构与挂载路径一致（{"ok", "log", "dest", "extracted"}），
+    由 extract_from_iso 在 mount 失败时调用；本函数不做任何挂载/卸载。
+    """
+    entry = os_catalog.entry(ost)
+    if entry is None:
+        # extract_from_iso 的白名单校验（_ALLOWED_OS_TYPES）已拦截未知类型；
+        # 这里再兜一次底（defense-in-depth，与 _extract_after_mount 口径一致）。
+        return {"ok": False, "log": log + ["Illegal os_type: " + str(ost)],
+                "dest": dest, "extracted": []}
+    os.makedirs(dest, exist_ok=True)
+    _dhcp._run(["semanage", "fcontext", "-a", "-t", "tftpdir_t", WEB_ROOT + "(/.*)?"], sudo=True)
+    _dhcp._run(["restorecon", "-R", WEB_ROOT], sudo=True)
+
+    # 候选相对路径与挂载路径同序：目录优先（kernel_dirs 在外层），目录内再试文件名
+    wanted = [
+        ("vmlinuz",
+         [d + "/" + c for d in entry.kernel_dirs for c in entry.kernel_names]),
+        (entry.dest_initrd,
+         [d + "/" + c for d in entry.kernel_dirs for c in entry.initrd_names]),
+    ]
+    extracted = _iso9660.extract(iso_path, wanted, dest, log)
+
+    # casper 的 squashfs：与挂载路径同口径，只有带 dest_squashfs 的条目（ubuntu）要带
+    if entry.dest_squashfs:
+        for d in entry.kernel_dirs:
+            hit = _iso9660.extract_largest(
+                iso_path, d, ".squashfs",
+                os.path.join(dest, entry.dest_squashfs), log)
+            if hit:
+                extracted.append(entry.dest_squashfs + " (" + hit + ")")
+                break
+
+    return _finish_extract(dest, extracted, log, entry.kernel_dirs)
 
 
 def delete_iso(iso_name) -> dict:

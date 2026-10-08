@@ -86,6 +86,20 @@ class OsCatalogEntry:
     # 只有 rhel 需要：它是整个 RHEL 家族的"伞"，旧实现（及其测试）让
     # pick_iso("rhel", …) 在整个家族里挑镜像 —— 保持该语义不变。
     pick_keywords: tuple = ()
+    # pick_exclude_keywords：pick_iso 的排除关键字 —— 文件名命中任一关键字的
+    # 同时还含排除词的，直接跳过（审计 D9：跨家族镜像装机必败，宁可不挑、
+    # 走"识别不出来"的人工路径）。只有 kylin 需要：优麒麟(UbuntuKylin) 文件名
+    # 同时含 "ubuntu" 与 "kylin"，但它是 ubuntu/casper 家族镜像、没有 anaconda，
+    # 用 kylin 的 kickstart/inst.* 去装必然失败。不误伤正例：银河麒麟官方 ISO
+    # （Kylin-Server-/Kylin-Desktop-…）文件名从不带 ubuntu；优麒麟 ISO 文件名
+    # 必带 ubuntukylin。ubuntu 自己的 pick 仍能挑中优麒麟镜像（与"最长关键字
+    # 识别判给 ubuntu"的既有语义一致）。
+    pick_exclude_keywords: tuple = ()
+    # live_is_installer：官方安装介质本身就是 live 形态（casper+subiquity 的
+    # live-server），目前只有 ubuntu 是。对它 pick 保持既有"live-server 优先"；
+    # anaconda 系的 live/desktop/workstation 是"无安装器"的减分形态（审计 D10，
+    # 分层实现见 generator.pick_iso）。
+    live_is_installer: bool = False
     note: str = ""
 
 
@@ -96,6 +110,7 @@ _OS = (
         filename_keywords=("ubuntu",), label_keywords=("ubuntu",),
         kernel_dirs=("casper",), kernel_names=("vmlinuz",), initrd_names=("initrd",),
         dest_initrd="initrd", dest_squashfs="installer.squashfs",
+        live_is_installer=True,
         version_hints=("22.04", "24.04", "20.04"), verified=True,
         note=("Ubuntu 22.04+ 实际生成的是 autoinstall(subiquity) user-data（本工具既有实现）；"
               "installer=preseed 只表示其引导/安装器家族。"),
@@ -152,10 +167,15 @@ _OS = (
         key="kylin", display="银河麒麟 Kylin", installer=KICKSTART, auto_install=True,
         filename_keywords=("kylin",), label_keywords=("kylin",),
         kernel_dirs=("images/pxeboot",), kernel_names=("vmlinuz",), initrd_names=("initrd.img",),
-        version_hints=("v10", "v10-sp3"), verified=False,
+        version_hints=("10",), verified=False,
+        pick_exclude_keywords=("ubuntu",),
         note=("未验证：麒麟服务器版 V10 按 RHEL 系惯例填 images/pxeboot。注意：优麒麟"
               "（UbuntuKylin）文件名也含 kylin —— 按最长关键字识别会判给 ubuntu；"
-              "pick_iso(kylin) 仍可能命中优麒麟镜像（未验证此冲突的实际影响）。"),
+              "pick_iso(kylin) 则排除含 ubuntu 的文件名（优麒麟是 casper 家族，"
+              "kickstart/inst.* 装不了它），库里只有优麒麟 ISO 时返回空串、走"
+              "\"识别不出来\"的人工路径。version_hints 校准为文件名里的真实版本"
+              " token \"10\"（V10 的数字段；旧值 v10/v10-sp3 在 pick_iso 的数字段"
+              "边界匹配下永远命中不了，只会在下拉里给出选不中的死值）。"),
     ),
     OsCatalogEntry(
         key="uos", display="统信 UOS", installer=KICKSTART, auto_install=True,

@@ -41,11 +41,19 @@ def _local_ip():
     return "127.0.0.1"
 
 
+def _flag(v, default: bool) -> bool:
+    """布尔列兜底：SQLAlchemy 瞬态对象属性为 None（未落库/直构对象）时取默认值。"""
+    return default if v is None else bool(v)
+
+
 def _profile_out(p: models.PxeProfile) -> PxeProfileOut:
     return PxeProfileOut(
         id=p.id, name=p.name, os_type=p.os_type, os_version=p.os_version,
         timezone=p.timezone, locale=p.locale, keyboard=p.keyboard,
         admin_user=p.admin_user, ssh_keys=p.ssh_keys or [],
+        # 装完能 SSH：两开关走 _flag 兜底 —— 测试/直构的 PxeProfile 对象可能没带新列
+        allow_root=_flag(getattr(p, "allow_root", None), False),
+        sudo_nopasswd=_flag(getattr(p, "sudo_nopasswd", None), True),
         disk_scheme=p.disk_scheme, disk_config=p.disk_config or {},
         net_mode=p.net_mode, net_config=p.net_config or {},
         mirror=p.mirror, extra_packages=p.extra_packages or [],
@@ -232,6 +240,9 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
         admin_password=_safe_decrypt(p.admin_password_enc),
         root_password=_safe_decrypt(p.root_password_enc),
         ssh_keys=p.ssh_keys or [],
+        # 装完能 SSH：两开关进生成器（None 兜底语义同 _profile_out）
+        allow_root=_flag(getattr(p, "allow_root", None), False),
+        sudo_nopasswd=_flag(getattr(p, "sudo_nopasswd", None), True),
         disk_scheme=p.disk_scheme, disk_config=p.disk_config or {},
         net_mode=p.net_mode, net_config=p.net_config or {},
         mirror=_repo, stage2=_stage2, extra_repos=_extra,
@@ -290,6 +301,7 @@ async def create_profile(body: PxeProfileIn, db: AsyncSession = Depends(get_db),
         admin_password_enc=crypto.encrypt(body.admin_password),
         root_password_enc=crypto.encrypt(body.root_password),
         ssh_keys=body.ssh_keys,
+        allow_root=bool(body.allow_root), sudo_nopasswd=bool(body.sudo_nopasswd),
         disk_scheme=body.disk_scheme, disk_config=body.disk_config,
         net_mode=body.net_mode, net_config=body.net_config,
         mirror=body.mirror, extra_packages=body.extra_packages,
@@ -320,6 +332,8 @@ async def update_profile(pid: str, body: PxeProfileIn, db: AsyncSession = Depend
     if body.root_password is not None:
         p.root_password_enc = crypto.encrypt(body.root_password)
     p.ssh_keys = body.ssh_keys
+    p.allow_root = bool(body.allow_root)
+    p.sudo_nopasswd = bool(body.sudo_nopasswd)
     p.disk_scheme = body.disk_scheme
     p.disk_config = body.disk_config
     p.net_mode = body.net_mode

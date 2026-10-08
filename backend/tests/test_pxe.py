@@ -69,7 +69,12 @@ class PxeGeneratorTest(unittest.TestCase):
         self.assertIn("- reboot", files["user-data/00-11-22-33-44-55/user-data"])
         self.assertIn("user-data/00-11-22-33-44-55/", files["boot/00-11-22-33-44-55.ipxe"])
         dns = files["dnsmasq.conf"]
-        self.assertIn("dhcp-host=00:11:22:33:44:55,set:pxe_00-11-22-33-44-55", dns)
+        # 每机静态 IP（本单元）：装机记录登记了 ip ⇒ dnsmasq 同时下发 DHCP 预留
+        # （dhcp-host=<mac>,<ip>,set:pxe_<tag>），重装/改配置时该机不再随机取址。
+        self.assertIn(
+            "dhcp-host=00:11:22:33:44:55,10.10.10.100,set:pxe_00-11-22-33-44-55", dns)
+        self.assertIn(
+            "dhcp-host=aa:bb:cc:dd:ee:ff,10.10.10.101,set:pxe_aa-bb-cc-dd-ee-ff", dns)
         # 按 MAC 的菜单属于【第二阶段】（iPXE 自己再次 DHCP 时），用互斥 tag 下发；
         # 旧写法 dhcp-boot=tag:pxe_<mac>,<菜单URL> 会把这个脚本 URL 交给 PXE 固件，
         # 而固件执行不了 iPXE 脚本，所以它被移除了。
@@ -242,7 +247,10 @@ class PxeGeneratorTest(unittest.TestCase):
                 # YAML 层：整份 user-data 必须可解析，且该项是 str（不是 dict）
                 doc = yaml.safe_load(generate_all(cfg)["user-data"])
                 entries = self._post_script_entries(doc)
-                self.assertEqual(len(entries), 1, f"应恰好有一个 bash -c 条目: {script!r}")
+                # 本单元（装完能 SSH）起 late-commands 常驻几条 bash -c
+                # （PermitRootLogin 固化 + sudo 免密），post_script 恒为**第一条**
+                # bash -c 条目（生成顺序契约，另有专门用例钉住）。
+                self.assertGreaterEqual(len(entries), 1, f"至少应有 post_script 的 bash -c 条目: {script!r}")
                 entry = entries[0]
                 self.assertIsInstance(entry, str)
 
@@ -253,14 +261,25 @@ class PxeGeneratorTest(unittest.TestCase):
                 # shell 层：POSIX 还原后必须与原始脚本逐字相等
                 self.assertEqual(self._script_from_entry(entry), [script])
 
-    def test_post_script_empty_produces_two_commands(self):
-        """未提供 post_script 时，late-commands 只有 systemctl enable ssh 与 reboot。"""
+    def test_post_script_empty_baseline_commands(self):
+        """未提供 post_script 时，late-commands = 固化 PermitRootLogin(2 条)
+        + sudo 免密(1 条) + systemctl enable ssh + reboot（reboot 恒最后）。
+
+        本单元（装完能 SSH）起 late-commands 的基线从 2 条扩到 5 条：
+        默认模板也要把 root 登录策略与 sudo 免密落成确定性行为。
+        """
         doc = yaml.safe_load(generate_all(_cfg(post_script=""))["user-data"])
         cmds = doc["autoinstall"]["late-commands"]
-        self.assertEqual(len(cmds), 2)
-        self.assertIn("systemctl enable ssh", cmds[0])
-        self.assertEqual(cmds[1], "reboot")
-        self.assertEqual(self._post_script_entries(doc), [], "空脚本不应产生 bash -c 条目")
+        self.assertEqual(len(cmds), 5)
+        self.assertIn("PermitRootLogin no", cmds[0])
+        self.assertIn("PermitRootLogin no", cmds[1])
+        self.assertIn("90-opstk-ops", cmds[2])
+        self.assertIn("NOPASSWD", cmds[2])
+        self.assertIn("systemctl enable ssh", cmds[3])
+        self.assertEqual(cmds[4], "reboot")
+        # 新增 3 条基线命令都走 curtin in-target（改动必须发生在目标系统内）
+        for c in cmds[:3]:
+            self.assertIn("curtin in-target", c)
 
     # ---------------- 回归：iPXE 分号转义 ----------------
 
@@ -857,15 +876,30 @@ class PxeDiskRegressionTest(unittest.TestCase):
         # （本修复只碰 _rhel_ks），这一点已在重算时断言过。
         # 重新基线化的前提是真机验收已通过：VM140（scsi0/sdb 两块盘）走 legacy 路径装机，
         # 分区动作只在 /dev/sda、非目标盘 sdb 开头 1MiB 逐字节未变、从 sda 起到登录提示。
+        # ⚠️ 本单元（每机静态 IP + 装完能 SSH）重新基线化（差异已逐行核对，见 diff 结论）：
+        #   · 四个用例统一新增"装完能 SSH"的默认产物行 —— 用户已定默认值
+        #     allow_root=False（PermitRootLogin no 两行固化）与 sudo_nopasswd=True
+        #     （sudoers.d 免密覆盖文件）。Ubuntu = late-commands 多 3 条；
+        #     RHEL = 多一个最小 %post 段（6 行 + %end）。除这些行外**无任何其它变化**
+        #     （磁盘行 / storage 行 / network 行逐行 diff 复核过）。
+        #   · 旧值（改造前，存档）：
+        #     ["ubuntu","lvm",null]          6680721c74a9cefc63bdba945daa035dbf199ad6ca312c2c180ab86a64e8931a
+        #     ["ubuntu","direct",{"disk":"vda"}] f7d357d3c69052f5f4abab66dc4428b0cc368a849cafb76c8104901022223346
+        #     ["rhel","lvm",null]            bd1ff9342dbab0632fef9e7cf16dcebd393d65a19822395e75a80accb3a4d6cf
+        #     ["rhel","direct",{"disk":"nvme0n1"}] 43130dfeff8ac52adbe2be45de0a611e0341a5039e8ab1764e726e87fceb402a
+        #   · 变更来源（本单元需求，非回归）：默认 sudo_nopasswd=True 要求 sudo 配置
+        #     默认进生成物（验收⑤"用户+公钥+sudo 进生成物，两侧"），默认 allow_root=False
+        #     要求 PermitRootLogin 两态显式固化 —— 字节级"改造前不动"与本需求不可兼得，
+        #     依 §5.14 先例按新基线重算；四用例的新差异只含上述新增行。
         golden = {
             '["ubuntu","lvm",null]':
-                "6680721c74a9cefc63bdba945daa035dbf199ad6ca312c2c180ab86a64e8931a",
+                "bd7011ba9bfb41d12da354592ca00910c85ff8c79076207d3e6a968ace6efc52",
             '["ubuntu","direct",{"disk":"vda"}]':
-                "f7d357d3c69052f5f4abab66dc4428b0cc368a849cafb76c8104901022223346",
+                "a8385ca56bacc27294497e41c2bef33ef3e5eb0cefddc4968a488d23b3469b67",
             '["rhel","lvm",null]':
-                "bd1ff9342dbab0632fef9e7cf16dcebd393d65a19822395e75a80accb3a4d6cf",
+                "c3a1b7dbb9d4c271d61e02f1bb6be077e475d025241a06d86f1fb6866fe87512",
             '["rhel","direct",{"disk":"nvme0n1"}]':
-                "43130dfeff8ac52adbe2be45de0a611e0341a5039e8ab1764e726e87fceb402a",
+                "cb501602e5741af1449773686113cae394dfa389a627cb458a7edfdb9bde0d72",
         }
         cases = [
             ("ubuntu", "lvm", None),
@@ -3550,3 +3584,894 @@ class ExistingFilesystemMountTest(unittest.TestCase):
         self.assertNotIn("--onpart", ks)
         self.assertIn("ignoredisk --only-use=$target", ks)
         self.assertIn("clearpart --drives=$target --all --initlabel", ks)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 提取引导介质：loop 挂载失败时的纯 Python ISO9660 兜底
+#
+# 背景（生产实测，openEuler-24.03-LTS-SP4.iso 在应用机容器内提取失败）：
+#   server.extract_from_iso 只有一条 `mount -o loop,ro` 路径；util-linux 的
+#   mount 解析 `-o loop` 时向 /dev/loop-control **现取**空闲设备号再打开
+#   /dev/loopN，容器 /dev 里没有那个节点就报 "failed to setup loop device"。
+#   修复：挂载失败自动回退到内置 ISO9660 解析提取（app/it/pxe/iso9660.py）。
+#   这组用例里**没有任何真实挂载**：ISO 由纯 Python 按字节构造，挂载被 mock，
+#   全部落盘都在临时目录里。
+# ═══════════════════════════════════════════════════════════════════════════
+
+# 提取目标字节：故意包含 \x00 与高位字节、长度不是扇区倍数（跨扇区、补位边界
+# 都必须逐字节保真 —— 少读一个字节或多带一个补位零都算提取坏了）。
+_ISO_VMLINUZ = bytes(range(256)) * 16 + b"OPSTK-PXE-KERNEL"   # 4112B，占 3 扇区
+_ISO_INITRD = b"OPSTK-PXE-INITRD\x00" * 700                   # 19000B，占 10 扇区
+
+
+def _iso_dir_record(extent, size, flags, name):
+    """按 ECMA-119 §9.1 写一条目录记录（小端+大端双份字段；长度补到偶数）。
+
+    字段偏移：0=记录长度（**目录记录长度字段**，33+名字长 补齐到偶数）、
+    2..9=extent LBA（LE+BE 双份）、10..17=数据长度（LE+BE 双份）、
+    25=文件标志（bit1=目录、bit7=还有后续 extent）、32=文件名长度、33=名字。
+    """
+    ln = 33 + len(name)
+    if ln % 2:
+        ln += 1
+    rec = bytearray(ln)
+    rec[0] = ln
+    rec[2:6] = extent.to_bytes(4, "little")
+    rec[6:10] = extent.to_bytes(4, "big")
+    rec[10:14] = size.to_bytes(4, "little")
+    rec[14:18] = size.to_bytes(4, "big")
+    rec[25] = flags
+    rec[28:30] = (1).to_bytes(2, "little")   # 卷序号 LE
+    rec[30:32] = (1).to_bytes(2, "big")      # 卷序号 BE
+    rec[32] = len(name)
+    rec[33:33 + len(name)] = name
+    return bytes(rec)
+
+
+def _iso_pack_dir(records):
+    """目录记录序列 → 目录内容：记录不跨扇区（装不下就 0 填充换扇区），末尾补齐。"""
+    S = 2048
+    out = bytearray()
+    for rec in records:
+        ln = rec[0]
+        if (len(out) % S) + ln > S:
+            out += b"\x00" * (S - len(out) % S)
+        out += rec
+    if len(out) % S:
+        out += b"\x00" * (S - len(out) % S)
+    return bytes(out)
+
+
+def _build_minimal_iso(path, files, style="strict"):
+    """纯 Python 构造一个最小 ISO9660 镜像：PVD + 卷终结符 + 目录记录 + 文件数据。
+
+    只写被测解析器真正读取的字段（依据 ECMA-119）：
+      · 扇区 16（字节 0x8000）PVD：b"CD001"、逻辑块大小 2048（偏移 128）、
+        根目录记录（偏移 156，34 字节）；
+      · 目录记录的 extent/长度双端字段与记录长度字段（见 _iso_dir_record）；
+      · 18/19 扇区放最小根路径表（10→16 字节）让镜像在结构上完整可挂。
+    files 取值：bytes（单 extent）或 [chunk, chunk]（多 extent 文件：同名连续
+    记录、前面记录带标志位 bit7 —— 解析器必须按序拼接回原字节）。
+    style="strict"（默认）用 mkisofs 默认的主名字集形态：全大写、文件带 ";1"
+    版本后缀（VMLINUZ.;1 / INITRD.IMG;1）、目录带末尾点（IMAGES.）—— 这正是
+    ISO9660 名字匹配的坑；style="plain" 原样写小写无版本名（vmlinuz），
+    验证兜底对两种现实形态都能命中。
+    """
+    S = 2048
+    PVD, TERM, PT_L, PT_M, ROOT = 16, 17, 18, 19, 20
+
+    def iso_name(name, is_dir):
+        if style != "strict":
+            return name.encode("ascii")
+        up = name.upper()
+        if is_dir:
+            return (up + ".").encode("ascii")
+        return (up + ";1" if "." in up else up + ".;1").encode("ascii")
+
+    def fparent(rel):
+        return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+    # 中间目录全部入集合；目录 extent 在文件 extent 之前顺序分配
+    dirs = sorted({"/".join(rel.split("/")[:i]) for rel in files
+                   for i in range(1, len(rel.split("/")))},
+                  key=lambda d: (d.count("/"), d))
+    dir_extent = {}
+    nxt = ROOT + 1
+    for d in dirs:
+        dir_extent[d] = nxt
+        nxt += 1
+    file_extent = {}
+    for rel, data in files.items():
+        chunks = data if isinstance(data, list) else [data]
+        file_extent[rel] = []
+        for chunk in chunks:
+            file_extent[rel].append(nxt)
+            nxt += max(1, (len(chunk) + S - 1) // S)
+    total_sectors = nxt
+
+    def build_dir(d, sizes):
+        me = ROOT if d == "" else dir_extent[d]
+        up = ROOT if fparent(d) == "" else dir_extent[fparent(d)]
+        recs = [_iso_dir_record(me, sizes[d], 2, b"\x00"),          # "."
+                _iso_dir_record(up, sizes[fparent(d)], 2, b"\x01")]  # ".."
+        for sub in dirs:
+            if fparent(sub) == d:
+                recs.append(_iso_dir_record(
+                    dir_extent[sub], sizes[sub], 2,
+                    iso_name(sub.rsplit("/", 1)[-1], True)))
+        for rel, data in files.items():
+            if fparent(rel) != d:
+                continue
+            chunks = data if isinstance(data, list) else [data]
+            for i, chunk in enumerate(chunks):
+                more = 0x80 if i < len(chunks) - 1 else 0x00
+                recs.append(_iso_dir_record(
+                    file_extent[rel][i], len(chunk), more,
+                    iso_name(rel.rsplit("/", 1)[-1], False)))
+        return _iso_pack_dir(recs)
+
+    # 两遍构建：记录长度与"目录大小"字段无关，第二遍回填真实目录字节数
+    all_dirs = [""] + dirs
+    sizes = {d: S for d in all_dirs}
+    content = {d: build_dir(d, sizes) for d in all_dirs}
+    sizes = {d: len(content[d]) for d in all_dirs}
+    content = {d: build_dir(d, sizes) for d in all_dirs}
+
+    # 最小根路径表（9→16 字节，仅根一条）—— PVD 字段要与之自洽
+    pt = bytearray([1, 0])
+    pt += ROOT.to_bytes(4, "little") + ROOT.to_bytes(4, "big")
+    pt += (1).to_bytes(2, "little") + (1).to_bytes(2, "big") + b"\x00"
+    if len(pt) % 2:
+        pt.append(0)
+    pt = bytes(pt)
+
+    pvd = bytearray(S)
+    pvd[0] = 1
+    pvd[1:6] = b"CD001"
+    pvd[6] = 1
+    pvd[8:40] = b"OPSTK-TEST".ljust(32)                  # system identifier
+    pvd[40:72] = b"OPSTK_TEST_ISO".ljust(32)             # volume identifier
+    for off, val in ((80, total_sectors), (132, len(pt))):
+        pvd[off:off + 4] = val.to_bytes(4, "little")     # 卷空间/路径表大小 LE
+        pvd[off + 4:off + 8] = val.to_bytes(4, "big")    # 同上 BE
+    pvd[120:122] = (1).to_bytes(2, "little")             # 卷集大小 = 1
+    pvd[122:124] = (1).to_bytes(2, "big")
+    pvd[124:126] = (1).to_bytes(2, "little")             # 卷序号 = 1
+    pvd[126:128] = (1).to_bytes(2, "big")
+    pvd[128:130] = S.to_bytes(2, "little")               # 逻辑块大小 = 2048
+    pvd[130:132] = S.to_bytes(2, "big")
+    pvd[140:144] = PT_L.to_bytes(4, "little")            # L 路径表位置
+    pvd[148:152] = PT_M.to_bytes(4, "big")               # M 路径表位置
+    pvd[156:190] = _iso_dir_record(ROOT, sizes[""], 2, b"\x00")  # 根目录记录
+    pvd[881] = 1                                         # file structure version
+    term = bytearray(S)
+    term[0] = 255
+    term[1:6] = b"CD001"
+    term[6] = 1
+
+    out = bytearray(total_sectors * S)
+    for sector, data in ([(PVD, pvd), (TERM, term), (PT_L, pt), (PT_M, pt),
+                          (ROOT, content[""])]
+                         + [(dir_extent[d], content[d]) for d in dirs]):
+        out[sector * S:sector * S + len(data)] = data
+    for rel, data in files.items():
+        chunks = data if isinstance(data, list) else [data]
+        for i, chunk in enumerate(chunks):
+            out[file_extent[rel][i] * S:file_extent[rel][i] * S + len(chunk)] = chunk
+    with open(path, "wb") as fh:
+        fh.write(bytes(out))
+    return path
+
+
+class PxeIso9660ParserTest(unittest.TestCase):
+    """直接对纯 Python 构造的最小 ISO 验证内置解析器（不经 server，字节级断言）。"""
+
+    def setUp(self):
+        import os
+        import tempfile
+        from app.it.pxe import iso9660
+        self.os = os
+        self.iso9660 = iso9660
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _iso(self, files, style="strict"):
+        return _build_minimal_iso(
+            self.os.path.join(self._tmp.name, "test.iso"), files, style=style)
+
+    def _extract(self, files, wanted, style="strict"):
+        iso_path = self._iso(files, style=style)
+        dest = self.os.path.join(self._tmp.name, "out")
+        self.os.makedirs(dest, exist_ok=True)
+        log = []
+        extracted = self.iso9660.extract(iso_path, wanted, dest, log)
+        return extracted, log, iso_path
+
+    def test_strict_iso9660_names_with_version_suffix_extract_byte_exact(self):
+        """主名字集 + ";1" 后缀（VMLINUZ.;1 / INITRD.IMG;1）：逐字节保真提取。"""
+        kernel = _ISO_VMLINUZ
+        initrd = _ISO_INITRD
+        extracted, log, iso_path = self._extract(
+            {"images/pxeboot/vmlinuz": kernel,
+             "images/pxeboot/initrd.img": initrd},
+            [("vmlinuz", ["images/pxeboot/vmlinuz"]),
+             ("initrd.img", ["images/pxeboot/initrd.img"])])
+        # 夹具必须是 ";1" 形态 —— 钉住"兜底确实消化了版本后缀"这个前提
+        with open(iso_path, "rb") as fh:
+            raw = fh.read()
+        self.assertIn(b"VMLINUZ.;1", raw)
+        self.assertIn(b"INITRD.IMG;1", raw)
+        self.assertEqual(extracted, ["vmlinuz", "initrd.img"])
+        # **按字节**断言写出的两个文件
+        with open(self.os.path.join(self._tmp.name, "out", "vmlinuz"), "rb") as f:
+            self.assertEqual(f.read(), kernel)
+        with open(self.os.path.join(self._tmp.name, "out", "initrd.img"), "rb") as f:
+            self.assertEqual(f.read(), initrd)
+        self.assertTrue(any("images/pxeboot/vmlinuz" in ln for ln in log), log)
+
+    def test_plain_lowercase_names_without_version_suffix_also_match(self):
+        """小写、无 ";1" 的名字形态（genisoimage 少见变体）同样命中。"""
+        extracted, log, _ = self._extract(
+            {"images/pxeboot/vmlinuz": _ISO_VMLINUZ,
+             "images/pxeboot/initrd.img": _ISO_INITRD},
+            [("vmlinuz", ["images/pxeboot/vmlinuz"]),
+             ("initrd.img", ["images/pxeboot/initrd.img"])],
+            style="plain")
+        self.assertEqual(extracted, ["vmlinuz", "initrd.img"])
+
+    def test_missing_candidate_is_reported_and_nothing_is_invented(self):
+        """候选路径不存在：如实写日志、返回空，绝不误拷别的文件。"""
+        extracted, log, _ = self._extract(
+            {"images/pxeboot/vmlinuz": _ISO_VMLINUZ,
+             "boot.cat": b"boot catalog"},
+            [("vmlinuz", ["casper/vmlinuz", "images/pxeboot/vmlinuz"]),
+             ("initrd.img", ["images/pxeboot/initrd.img", "casper/initrd.img"])])
+        # vmlinuz 走到第二个候选才命中（顺序保留）；initrd.img 两个候选都没有
+        self.assertEqual(extracted, ["vmlinuz"])
+        self.assertTrue(any("initrd.img 未找到" in ln for ln in log), log)
+        self.assertEqual(sorted(self.os.listdir(self.os.path.join(self._tmp.name, "out"))),
+                         ["vmlinuz"])
+
+    def test_multi_extent_file_is_reassembled_byte_exact(self):
+        """多 extent 文件（同名连续记录，前面记录带 bit7）：按序拼回原字节。"""
+        part_a = bytes(range(256)) * 8          # 2048B，恰好一个扇区
+        tail = b"MULTI-EXTENT-TAIL\x00" * 5     # 95B
+        extracted, log, _ = self._extract(
+            {"images/pxeboot/vmlinuz": [part_a, tail]},
+            [("vmlinuz", ["images/pxeboot/vmlinuz"])])
+        self.assertEqual(extracted, ["vmlinuz"])
+        with open(self.os.path.join(self._tmp.name, "out", "vmlinuz"), "rb") as f:
+            self.assertEqual(f.read(), part_a + tail)
+
+    def test_non_iso_input_fails_with_iso_error(self):
+        """非 ISO9660 输入：如实抛 IsoError（server 兜底会把原因写进日志）。"""
+        junk = self.os.path.join(self._tmp.name, "junk.iso")
+        with open(junk, "wb") as f:
+            f.write(b"definitely not an iso" * 100)
+        with self.assertRaises(self.iso9660.IsoError):
+            with self.iso9660.Iso9660(junk):
+                pass
+
+
+class PxeIsoExtractFallbackTest(unittest.TestCase):
+    """挂载失败 ⇒ 自动回退纯 Python 提取仍成功；挂载成功仍走首选挂载路径。
+
+    与文件里其它"部署"用例同一套隔离手法：is_linux/sudo_ok/_run 换桩，
+    WEB_ROOT/ISO_DIR/MOUNT_BASE（含既有实现会创建的挂载点目录）全部指进
+    临时目录 —— 绝不碰 /srv/opstk 真实数据。
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        from app.it.pxe import server
+
+        self.os = os
+        self.server = server
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = self._tmp.name
+        self.iso_dir = os.path.join(self.tmp, "iso")
+        self.web = os.path.join(self.tmp, "pxe-web")
+        self.mnt = os.path.join(self.tmp, "mnt")
+        for d in (self.iso_dir, self.web, self.mnt):
+            os.makedirs(d)
+        self._run = mock.Mock(return_value=(0, "", ""))
+        for target, attr, value in (
+            (server, "ISO_DIR", self.iso_dir),
+            (server, "WEB_ROOT", self.web),
+            (server, "MOUNT_BASE", self.mnt),
+            (server._dhcp, "is_linux", lambda: True),
+            (server._dhcp, "sudo_ok", lambda: True),
+            (server._dhcp, "_run", self._run),
+        ):
+            p = mock.patch.object(target, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    # ── 桩与夹具 ──
+
+    @staticmethod
+    def _mount_failure(cmd, sudo=False, timeout=15, stdin_data=None):
+        """只让 mount 失败（复刻容器里那条 loop 报错），其余命令放行。"""
+        if cmd and cmd[0] == "mount":
+            return (1, "", "mount: /srv/opstk/mnt/x: failed to setup loop device "
+                           "for /srv/opstk/iso/x.iso")
+        return (0, "", "")
+
+    def _write_iso(self, style="strict"):
+        return _build_minimal_iso(
+            self.os.path.join(self.iso_dir, "openEuler-24.03-LTS-SP4.iso"),
+            {"images/pxeboot/vmlinuz": _ISO_VMLINUZ,
+             "images/pxeboot/initrd.img": _ISO_INITRD},
+            style=style)
+
+    def _dest(self):
+        return self.os.path.join(self.web, "openeuler", "24.03")
+
+    # ── 1. 挂载失败 ⇒ 回退 Python 提取仍成功（生产缺陷的回归用例）──
+
+    def test_mount_failure_falls_back_to_python_extraction(self):
+        self._write_iso()
+        self._run.side_effect = self._mount_failure
+        res = self.server.extract_from_iso(
+            "openEuler-24.03-LTS-SP4.iso", "openeuler", "24.03")
+        self.assertTrue(res["ok"], res["log"])
+        joined = " | ".join(res["log"])
+        # 首选挂载路径确实先试过（mock 里收到过 mount），失败原因如实进了日志
+        cmds = [c.args[0] for c in self._run.call_args_list if c.args]
+        self.assertTrue(any(c and c[0] == "mount" for c in cmds))
+        self.assertIn("Mount failed", joined)
+        # log 必须写清"用了哪条路径、为什么回退"
+        self.assertIn("回退路径", joined)
+        self.assertNotIn("Mounted ->", joined)
+        # 返回结构（API 字段）不变，且两个文件**按字节**落盘
+        self.assertEqual(res["extracted"], ["vmlinuz", "initrd.img"])
+        self.assertEqual(res["dest"], self._dest())
+        self.assertEqual(sorted(self.os.listdir(self._dest())),
+                         ["initrd.img", "vmlinuz"])
+        with open(self.os.path.join(self._dest(), "vmlinuz"), "rb") as f:
+            self.assertEqual(f.read(), _ISO_VMLINUZ)
+        with open(self.os.path.join(self._dest(), "initrd.img"), "rb") as f:
+            self.assertEqual(f.read(), _ISO_INITRD)
+
+    def test_mount_failure_falls_back_for_lowercase_iso_names(self):
+        """小写无 ";1" 名字的镜像走同一条回退路径（openEuler 镜像常见变体）。"""
+        self._write_iso(style="plain")
+        self._run.side_effect = self._mount_failure
+        res = self.server.extract_from_iso(
+            "openEuler-24.03-LTS-SP4.iso", "openeuler", "24.03")
+        self.assertTrue(res["ok"], res["log"])
+        self.assertEqual(sorted(self.os.listdir(self._dest())),
+                         ["initrd.img", "vmlinuz"])
+
+    def test_mount_failure_with_no_boot_files_reports_honestly(self):
+        """挂载失败且 ISO 里没有候选引导文件：回退后如实失败，两条原因都在日志里。"""
+        _build_minimal_iso(
+            self.os.path.join(self.iso_dir, "openEuler-24.03-LTS-SP4.iso"),
+            {"README.txt": b"not bootable"})
+        self._run.side_effect = self._mount_failure
+        res = self.server.extract_from_iso(
+            "openEuler-24.03-LTS-SP4.iso", "openeuler", "24.03")
+        self.assertFalse(res["ok"])
+        joined = " | ".join(res["log"])
+        self.assertIn("Mount failed", joined)
+        self.assertIn("回退路径", joined)
+        self.assertIn("No boot files found", joined)
+        self.assertEqual(res["extracted"], [])
+
+    # ── 2. 挂载成功 ⇒ 首选路径不变（回退不改变原有行为）──
+
+    def test_mount_success_keeps_primary_mount_path(self):
+        self._write_iso()
+
+        def _fake_run(cmd, sudo=False, timeout=15, stdin_data=None):
+            if cmd and cmd[0] == "mount":
+                mp = cmd[-1]  # mount -o loop,ro <iso> <mountpoint>
+                d = self.os.path.join(mp, "images", "pxeboot")
+                self.os.makedirs(d)
+                # 模拟"挂上了"：内核挂载后 mountpoint 里能看到这两个文件
+                with open(self.os.path.join(d, "vmlinuz"), "wb") as f:
+                    f.write(_ISO_VMLINUZ)
+                with open(self.os.path.join(d, "initrd.img"), "wb") as f:
+                    f.write(_ISO_INITRD)
+                return (0, "", "")
+            return (0, "", "")
+
+        self._run.side_effect = _fake_run
+        res = self.server.extract_from_iso(
+            "openEuler-24.03-LTS-SP4.iso", "openeuler", "24.03")
+        self.assertTrue(res["ok"], res["log"])
+        joined = " | ".join(res["log"])
+        self.assertIn("Mounted ->", joined)
+        self.assertNotIn("回退", joined)          # 挂载成功就没有回退
+        self.assertEqual(sorted(self.os.listdir(self._dest())),
+                         ["initrd.img", "vmlinuz"])
+
+
+class PerMachineStaticIPAndSSHTest(unittest.TestCase):
+    """本单元（每机静态 IP + 装完能 SSH）的用例。
+
+    覆盖：
+      ① 每机 ip 进 kickstart network 段（断言具体字符串）
+      ② 同一模板两台机器互不串台（各生成各的 ip/hostname）
+      ③ 该机没填 ip 时回退模板默认（dhcp 与模板级 static 两条都不回归）
+      ④ Ubuntu autoinstall 的 network: 静态段按该机 ip 生成
+      ⑤ 管理员用户 + wheel/sudo + sudo 免密进生成物（RHEL 与 Ubuntu 两侧）
+      ⑥ allow_root 两态（默认 no 显式固化；yes 打开时 RHEL/Ubuntu 两侧都生效）
+      ⑦ dnsmasq 预留行带/不带 ip 两态（带 ip 时只下发裸地址，不带 /N）
+    """
+
+    M1, M2 = "00:11:22:33:44:55", "aa:bb:cc:dd:ee:ff"
+    T1, T2 = "00-11-22-33-44-55", "aa-bb-cc-dd-ee-ff"
+
+    def _rhel_cfg(self, **kw):
+        kw.setdefault("os_type", "rhel")
+        kw.setdefault("os_version", "9")
+        kw.setdefault("mirror", "http://m/rocky9/")
+        kw.setdefault("http_root", "http://10.0.0.1:8000/pxe/serve")
+        return _cfg(**kw)
+
+    def _rhel_net_cfg(self, nc_extra=None, cfg_extra=None):
+        """模板级 static 的常见 net_config（有网关/DNS，方便断言"模板默认值兜底"）。"""
+        nc = {"interface": "ens33", "ip": "10.10.10.9", "netmask": "255.255.255.0",
+              "gateway": "10.10.10.1", "dns": ["10.10.10.53", "223.5.5.5"]}
+        nc.update(nc_extra or {})
+        return self._rhel_cfg(net_mode="static", net_config=nc, **(cfg_extra or {}))
+
+    # ── ① 每机 ip 进 ks 的 network 段（断言具体字符串）──
+
+    def test_per_machine_ip_lands_in_ks_network_line(self):
+        """装机记录的 ip（含 /26 掩码）展开成该机自己的 network --bootproto=static 行。"""
+        cfg = self._rhel_net_cfg()
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "web-01",
+                                    "ip": "10.10.10.100/26"}])
+        ks = files["ks/" + self.T1 + "/ks.cfg"]
+        self.assertIn(
+            "network --bootproto=static --device=ens33 --ip=10.10.10.100 "
+            "--netmask=255.255.255.192 --gateway=10.10.10.1 "
+            "--nameserver=10.10.10.53,223.5.5.5 --hostname=web-01 --activate",
+            ks.splitlines(), ks)
+        # 该机 hostname 也要展开（--hostname=<该机主机名>，不是模板的）
+        self.assertIn("--hostname=web-01 --activate", ks)
+        self.assertNotIn("--hostname=default", ks)
+        # 模板级 ks.cfg（无装机记录的那份）不得被该机 ip 污染
+        self.assertNotIn("--ip=10.10.10.100", files["ks.cfg"])
+
+    def test_per_machine_ip_without_suffix_keeps_template_mask(self):
+        """ip 不带 "/N"：掩码沿用模板 net_config（地址仍是该机自己的）。"""
+        cfg = self._rhel_net_cfg()
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "web-01",
+                                    "ip": "10.10.10.100"}])
+        ks = files["ks/" + self.T1 + "/ks.cfg"]
+        self.assertIn(
+            "network --bootproto=static --device=ens33 --ip=10.10.10.100 "
+            "--netmask=255.255.255.0 --gateway=10.10.10.1 "
+            "--nameserver=10.10.10.53,223.5.5.5 --hostname=web-01 --activate",
+            ks.splitlines())
+
+    def test_install_ip_suffix_overrides_template_mask(self):
+        """ip 自带 "/N" 优先于模板掩码（模板写 /24、该机 /26 ⇒ 用 /26）。"""
+        cfg = self._rhel_net_cfg(nc_extra={"netmask": "255.255.255.0"})
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "web-01",
+                                    "ip": "10.10.10.100/30"}])
+        self.assertIn("--netmask=255.255.255.252", files["ks/" + self.T1 + "/ks.cfg"])
+
+    # ── ② 两台机器互不串台 ──
+
+    def test_two_machines_same_template_do_not_cross(self):
+        """同一模板、两个 MAC：各自的 ks 各展开各的 ip 与主机名，互不串台。"""
+        # RHEL 侧
+        cfg = self._rhel_net_cfg()
+        files = generate_all(cfg, [
+            {"mac": self.M1, "hostname": "web-01", "ip": "10.10.10.100"},
+            {"mac": self.M2, "hostname": "db-01", "ip": "10.10.10.200"},
+        ])
+
+        def _net_line(tag):
+            lines = [l for l in files["ks/" + tag + "/ks.cfg"].splitlines()
+                     if l.startswith("network ")]
+            self.assertEqual(len(lines), 1, files["ks/" + tag + "/ks.cfg"])
+            return lines[0]
+
+        self.assertEqual(_net_line(self.T1),
+                         "network --bootproto=static --device=ens33 --ip=10.10.10.100 "
+                         "--netmask=255.255.255.0 --gateway=10.10.10.1 "
+                         "--nameserver=10.10.10.53,223.5.5.5 --hostname=web-01 --activate")
+        self.assertEqual(_net_line(self.T2),
+                         "network --bootproto=static --device=ens33 --ip=10.10.10.200 "
+                         "--netmask=255.255.255.0 --gateway=10.10.10.1 "
+                         "--nameserver=10.10.10.53,223.5.5.5 --hostname=db-01 --activate")
+        # 互斥：A 的文件里没有 B 的地址与主机名，反之亦然
+        ks1 = files["ks/" + self.T1 + "/ks.cfg"]
+        ks2 = files["ks/" + self.T2 + "/ks.cfg"]
+        self.assertNotIn("10.10.10.200", ks1)
+        self.assertNotIn("db-01", ks1)
+        self.assertNotIn("10.10.10.100", ks2)
+        self.assertNotIn("web-01", ks2)
+        # 菜单与应答文件的对应关系：boot/<mac>.ipxe 指向同一 MAC 的 ks 目录
+        self.assertIn("/ks/" + self.T1 + "/ks.cfg", files["boot/" + self.T1 + ".ipxe"])
+        self.assertIn("/ks/" + self.T2 + "/ks.cfg", files["boot/" + self.T2 + ".ipxe"])
+
+    def test_two_machines_ubuntu_do_not_cross(self):
+        """Ubuntu 侧同样互不串台：各自 user-data 的 identity/network 都是自己的。"""
+        cfg = _cfg(hostname="tpl-base",
+                   net_mode="static",
+                   net_config={"interface": "ens33", "ip": "10.20.0.9", "cidr": 24,
+                               "gateway": "10.20.0.1", "dns": ["10.20.0.53"]})
+        files = generate_all(cfg, [
+            {"mac": self.M1, "hostname": "u-web", "ip": "10.20.0.10"},
+            {"mac": self.M2, "hostname": "u-db", "ip": "10.20.0.11"},
+        ])
+        import yaml as _yaml
+        d1 = _yaml.safe_load(files["user-data/" + self.T1 + "/user-data"])
+        d2 = _yaml.safe_load(files["user-data/" + self.T2 + "/user-data"])
+        n1 = d1["autoinstall"]["network"]["ethernets"]["ens33"]
+        n2 = d2["autoinstall"]["network"]["ethernets"]["ens33"]
+        self.assertEqual(n1["addresses"], ["10.20.0.10/24"])
+        self.assertEqual(n2["addresses"], ["10.20.0.11/24"])
+        self.assertEqual(d1["autoinstall"]["identity"]["hostname"], "u-web")
+        self.assertEqual(d2["autoinstall"]["identity"]["hostname"], "u-db")
+        self.assertEqual(n1["routes"], [{"to": "default", "via": "10.20.0.1"}])
+        self.assertEqual(n1["nameservers"]["addresses"], ["10.20.0.53"])
+        # 互斥
+        self.assertNotIn("10.20.0.11", json.dumps(n1))
+        self.assertNotIn("10.20.0.10", json.dumps(n2))
+
+    # ── ③ 没填 ip 回退模板默认（不回归）──
+
+    def test_no_install_ip_falls_back_to_template_dhcp(self):
+        """该机没填 ip：ks 仍是模板的 DHCP 行（行为不回归），dnsmasq 预留也不带 ip。"""
+        cfg = self._rhel_cfg(net_mode="dhcp",
+                             net_config={"interface": "ens33", "gateway": "10.10.10.1"})
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "web-01"}])
+        ks = files["ks/" + self.T1 + "/ks.cfg"]
+        self.assertIn(
+            "network --bootproto=dhcp --hostname=web-01 --activate", ks.splitlines())
+        self.assertNotIn("--bootproto=static", ks)
+        self.assertIn("dhcp-host=" + self.M1 + ",set:pxe_" + self.T1,
+                      files["dnsmasq.conf"].splitlines())
+
+    def test_no_install_ip_keeps_template_static_values(self):
+        """该机没填 ip 且模板是 static：该机 ks 沿用模板级静态参数（地址=模板 ip）。"""
+        cfg = self._rhel_net_cfg()
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "web-01"}])
+        ks = files["ks/" + self.T1 + "/ks.cfg"]
+        self.assertIn(
+            "network --bootproto=static --device=ens33 --ip=10.10.10.9 "
+            "--netmask=255.255.255.0 --gateway=10.10.10.1 "
+            "--nameserver=10.10.10.53,223.5.5.5 --hostname=web-01 --activate",
+            ks.splitlines())
+
+    def test_dhcp_template_with_machine_ip_gets_static(self):
+        """模板 dhcp + 该机填了 ip：这台机器仍按登记的静态地址装机（ip 优先于模板）。"""
+        cfg = self._rhel_cfg(net_mode="dhcp",
+                             net_config={"interface": "ens33", "gateway": "10.10.10.1",
+                                         "dns_server": "10.10.10.53"})
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "web-01",
+                                    "ip": "10.10.10.100"}])
+        ks = files["ks/" + self.T1 + "/ks.cfg"]
+        self.assertIn(
+            "network --bootproto=static --device=ens33 --ip=10.10.10.100 "
+            "--netmask=255.255.255.0 --gateway=10.10.10.1 "
+            "--nameserver=10.10.10.53 --hostname=web-01 --activate", ks.splitlines())
+
+    # ── ④ Ubuntu 侧静态段 ──
+
+    def test_ubuntu_autoinstall_static_uses_machine_ip(self):
+        """Ubuntu autoinstall 的 network: 段按该机 ip 生成静态配置（含 /N 与网关）。"""
+        cfg = _cfg(net_mode="static",
+                   net_config={"interface": "ens33", "ip": "10.30.0.9", "cidr": 24,
+                               "gateway": "10.30.0.1", "dns": ["10.30.0.53"]})
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "u-01",
+                                    "ip": "10.30.0.42/25"}])
+        import yaml as _yaml
+        doc = _yaml.safe_load(files["user-data/" + self.T1 + "/user-data"])
+        eth = doc["autoinstall"]["network"]["ethernets"]["ens33"]
+        self.assertEqual(eth["addresses"], ["10.30.0.42/25"])
+        self.assertEqual(eth["routes"], [{"to": "default", "via": "10.30.0.1"}])
+        self.assertEqual(eth["nameservers"]["addresses"], ["10.30.0.53"])
+        self.assertEqual(doc["autoinstall"]["identity"]["hostname"], "u-01")
+
+    # ── 非法 ip 必须大声失败（绝不静默回退模板默认 → 两机同 IP）──
+
+    def test_invalid_install_ip_fails_loudly(self):
+        for bad in ("999.1.1.1", "10.0.0.300", "10.0.0.5/33", "10.0.0.5/", "abc",
+                    "10.0.0.5\nextra"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    generate_all(self._rhel_cfg(),
+                                 [{"mac": self.M1, "hostname": "web-01", "ip": bad}])
+
+    # ── ⑦ dnsmasq 预留行带/不带 ip 两态 ──
+
+    def test_dnsmasq_reservation_with_and_without_ip(self):
+        files = generate_all(self._rhel_cfg(), [
+            {"mac": self.M1, "hostname": "web-01", "ip": "10.40.0.10"},
+            {"mac": self.M2, "hostname": "db-01"},
+        ])
+        lines = files["dnsmasq.conf"].splitlines()
+        self.assertIn("dhcp-host=" + self.M1 + ",10.40.0.10,set:pxe_" + self.T1, lines)
+        self.assertIn("dhcp-host=" + self.M2 + ",set:pxe_" + self.T2, lines)
+        # 不该有 "…,set:" 的空位写法（没 ip 就保持既有拼法，不是双逗号）
+        for l in lines:
+            if l.startswith("dhcp-host="):
+                self.assertNotIn(",,", l)
+
+    def test_dnsmasq_reservation_strips_prefix_suffix(self):
+        """dnsmasq 的 dhcp-host 只吃裸地址：登记 "…/26" 时下发的是地址本身。"""
+        files = generate_all(self._rhel_cfg(), [
+            {"mac": self.M1, "hostname": "web-01", "ip": "10.40.0.10/26"}])
+        lines = files["dnsmasq.conf"].splitlines()
+        self.assertIn("dhcp-host=" + self.M1 + ",10.40.0.10,set:pxe_" + self.T1, lines)
+        self.assertFalse(any("/26" in l for l in lines if l.startswith("dhcp-host=")))
+
+    # ── 内核命令行：静态不双写（设计判断的守护断言）──
+
+    def test_kernel_cmdline_stays_dhcp_single_static_writer(self):
+        """RHEL：装机的静态声明只写 kickstart 的 network 指令一处。
+
+        内核 ip=（dracut）只作用于安装器内存阶段、不落盘；装完的系统固化静态地址
+        仍必须靠 ks network 指令 ⇒ 在内核命令行再写一份静态是纯冗余的第二处真相，
+        且 iPXE 菜单与 ks 是两个文件，漂移后更难排查。故iPXE 菜单保持既有 ip=dhcp
+        （initrd 阶段取 inst.ks/介质用），静态的唯一来源是 ks。
+        """
+        files = generate_all(self._rhel_net_cfg(),
+                             [{"mac": self.M1, "hostname": "web-01",
+                               "ip": "10.10.10.100"}])
+        menu = files["boot/" + self.T1 + ".ipxe"]
+        k = [l for l in menu.splitlines() if l.startswith("kernel")][0]
+        self.assertIn("ip=dhcp", k)
+        self.assertNotIn("ip=10.10.10.100", k)
+        # 静态参数只出现在 ks 的 network 指令里（一份 ks 恰好一条 network 指令）
+        ks = files["ks/" + self.T1 + "/ks.cfg"]
+        nets = [l for l in ks.splitlines() if l.startswith("network ")]
+        self.assertEqual(len(nets), 1)
+        self.assertIn("--bootproto=static", nets[0])
+        self.assertIn("--ip=10.10.10.100", nets[0])
+
+    def test_ubuntu_kernel_cmdline_stays_dhcp(self):
+        """Ubuntu：casper 取介质走既有 ip=dhcp；静态由 user-data 的 network: 段固化。"""
+        files = generate_all(_cfg(), [{"mac": self.M1, "hostname": "u-01",
+                                       "ip": "10.50.0.10"}])
+        menu = files["boot/" + self.T1 + ".ipxe"]
+        k = [l for l in menu.splitlines() if l.startswith("kernel")][0]
+        self.assertIn("ip=dhcp", k)
+        self.assertNotIn("ip=10.50.0.10", k)
+
+    # ── ⑤ RHEL 侧：管理员 + wheel + sudo 免密 + 公钥 ──
+
+    def test_rhel_ssh_admin_defaults_in_ks(self):
+        """默认模板：普通管理员 + wheel + sudo 免密 + PermitRootLogin no + README 说明。"""
+        cfg = self._rhel_cfg(admin_user="svcadmin",
+                             ssh_keys=["ssh-ed25519 AAAARHELTEST ops@box"])
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "web-01"}])
+        ks = files["ks/" + self.T1 + "/ks.cfg"]
+        # 管理员用户 + wheel 组（kickstart 既有 user 指令风格）
+        self.assertTrue(any(l.startswith("user --name=svcadmin ") and
+                            "--groups=wheel" in l for l in ks.splitlines()), ks)
+        # root 直登默认 no（两行：sed 固化 + 缺行时补写）
+        self.assertIn(
+            "sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config",
+            ks.splitlines())
+        self.assertIn(
+            "grep -q '^PermitRootLogin' /etc/ssh/sshd_config || "
+            "echo 'PermitRootLogin no' >> /etc/ssh/sshd_config", ks.splitlines())
+        # sudo 免密（默认是）：显式 sudoers.d 覆盖文件 + 440 权限
+        self.assertIn("echo 'svcadmin ALL=(ALL) NOPASSWD:ALL' "
+                      "> /etc/sudoers.d/90-opstk-svcadmin", ks.splitlines())
+        self.assertIn("chmod 440 /etc/sudoers.d/90-opstk-svcadmin", ks.splitlines())
+        # 公钥进 authorized_keys（既有实现风格：shlex.quote 包住，正常公钥恒等加单引号）
+        self.assertIn("mkdir -p /home/svcadmin/.ssh && echo 'ssh-ed25519 AAAARHELTEST "
+                      "ops@box' >> /home/svcadmin/.ssh/authorized_keys", ks.splitlines())
+        self.assertIn("chown -R svcadmin:svcadmin /home/svcadmin/.ssh", ks.splitlines())
+        # 配了公钥 ⇒ openssh-server 必须在装
+        self.assertIn("openssh-server", ks.splitlines())
+        # README 写明"装完用管理员账号 SSH 登录"（RHEL 系 root 默认禁用的说明）
+        readme = files["README.txt"]
+        self.assertIn("ssh svcadmin@", readme)
+        self.assertIn("PermitRootLogin no", readme)
+        self.assertIn("root 常被禁用", readme)
+
+    def test_rhel_openssh_server_not_forced_without_keys(self):
+        """没配公钥的模板：不额外加包（行为最小变更），sshd 策略仍固化。"""
+        ks = generate_all(self._rhel_cfg())["ks.cfg"]
+        self.assertNotIn("openssh-server", ks)
+        self.assertIn("PermitRootLogin no", ks)
+
+    # ── ⑤ Ubuntu 侧：identity + authorized-keys + sudo 免密 ──
+
+    def test_ubuntu_ssh_admin_defaults_in_user_data(self):
+        import yaml as _yaml
+        cfg = _cfg(admin_user="svcadmin",
+                   ssh_keys=["ssh-ed25519 AAAAUBUTEST ops@box"])
+        files = generate_all(cfg, [{"mac": self.M1, "hostname": "u-01"}])
+        ud = files["user-data/" + self.T1 + "/user-data"]
+        doc = _yaml.safe_load(ud)
+        ai = doc["autoinstall"]
+        # 管理员用户（autoinstall identity 既有风格）
+        self.assertEqual(ai["identity"]["username"], "svcadmin")
+        # 公钥注入（autoinstall ssh.authorized-keys）
+        self.assertEqual(ai["ssh"]["authorized-keys"],
+                         ["ssh-ed25519 AAAAUBUTEST ops@box"])
+        # 配了公钥 ⇒ openssh-server 自动补装（既有先例保持）
+        self.assertIn("openssh-server", ai["packages"])
+        # sudo 免密：显式 sudoers.d 覆盖（curtin in-target 里落到目标系统）
+        self.assertTrue(any("svcadmin ALL=(ALL) NOPASSWD:ALL" in c and
+                            "sudoers.d/90-opstk-svcadmin" in c for c in ai["late-commands"]),
+                        ai["late-commands"])
+        # root 直登默认关
+        self.assertTrue(any("PermitRootLogin no" in c for c in ai["late-commands"]))
+        self.assertFalse(any("PermitRootLogin yes" in c for c in ai["late-commands"]))
+        self.assertFalse(any("chpasswd" in c for c in ai["late-commands"]))
+        # README 同样写明管理员登录
+        self.assertIn("ssh svcadmin@", files["README.txt"])
+
+    def test_ubuntu_openssh_server_not_forced_without_keys(self):
+        """没配公钥的 Ubuntu 模板：不额外加包，sudo/root 策略仍固化。"""
+        import yaml as _yaml
+        ai = _yaml.safe_load(generate_all(_cfg())["user-data"])["autoinstall"]
+        self.assertNotIn("openssh-server", ai.get("packages", []))
+        self.assertTrue(any("PermitRootLogin no" in c for c in ai["late-commands"]))
+
+    def test_post_script_is_first_bash_c_entry(self):
+        """生成顺序契约：post_script 恒为 late-commands 里第一条 bash -c 条目。"""
+        doc = yaml.safe_load(generate_all(_cfg(post_script="echo hi"))["user-data"])
+        ai = doc["autoinstall"]
+        entries = [c for c in ai["late-commands"] if isinstance(c, str) and "bash -c " in c]
+        self.assertEqual(entries[0].split("bash -c ", 1)[1], "'echo hi'")
+
+    # ── ⑥ allow_root 两态 ──
+
+    def test_allow_root_true_opens_root_ssh_on_both_families(self):
+        """allow_root=True：RHEL 侧 PermitRootLogin yes；Ubuntu 侧 yes + root 置口令。"""
+        rhel = generate_all(self._rhel_cfg(allow_root=True, root_password="Root@1",
+                                           admin_password="Test@123"))["ks.cfg"]
+        self.assertIn("sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' "
+                      "/etc/ssh/sshd_config", rhel.splitlines())
+        self.assertIn("rootpw --iscrypted", rhel)      # rootpw 既有行为保持
+        self.assertNotIn("PermitRootLogin no", rhel)
+        import yaml as _yaml
+        ai = _yaml.safe_load(generate_all(
+            _cfg(allow_root=True, root_password="Root@1"))["user-data"])["autoinstall"]
+        self.assertTrue(any("PermitRootLogin yes" in c for c in ai["late-commands"]))
+        # Ubuntu root 默认锁定：打开直登必须同时给 root 置口令（root 密码优先）
+        root_pw_cmd = [c for c in ai["late-commands"] if "chpasswd" in c]
+        self.assertEqual(len(root_pw_cmd), 1)
+        self.assertIn("root:", root_pw_cmd[0])
+        # 口令以 sha512 密文交给 chpasswd -e（生成物里不落明文）
+        self.assertIn("| chpasswd -e", root_pw_cmd[0])
+        self.assertNotIn("Root@1", root_pw_cmd[0])
+
+    def test_allow_root_default_is_closed_on_both_families(self):
+        """默认（不设置）：两族都显式 PermitRootLogin no，且 Ubuntu 不给 root 置口令。"""
+        rhel = generate_all(self._rhel_cfg())["ks.cfg"]
+        self.assertIn("PermitRootLogin no", rhel)
+        self.assertNotIn("PermitRootLogin yes", rhel)
+        import yaml as _yaml
+        ai = _yaml.safe_load(generate_all(_cfg())["user-data"])["autoinstall"]
+        self.assertTrue(any("PermitRootLogin no" in c for c in ai["late-commands"]))
+        self.assertFalse(any("chpasswd" in c for c in ai["late-commands"]))
+
+    # ── sudo_nopasswd=False 两态 ──
+
+    def test_sudo_nopasswd_false_strips_passwordless_sudo(self):
+        """sudo 免密关：RHEL 不写 sudoers.d（wheel 回到默认要密码）；
+        Ubuntu 显式摘除所有 NOPASSWD 条目（subiquity 默认给安装期用户免密，
+        sudo 规则"最宽者胜"，必须显式摘除才是真正的"要密码"）。"""
+        rhel = generate_all(self._rhel_cfg(admin_user="svcadmin",
+                                           sudo_nopasswd=False))["ks.cfg"]
+        self.assertNotIn("sudoers.d/90-opstk-", rhel)
+        self.assertNotIn("NOPASSWD", rhel)
+        # 用户仍在 wheel（sudo 要密码的来源），只是没有免密覆盖文件
+        self.assertIn("--groups=wheel", rhel)
+        import yaml as _yaml
+        ai = _yaml.safe_load(generate_all(
+            _cfg(admin_user="svcadmin", sudo_nopasswd=False))["user-data"])["autoinstall"]
+        self.assertFalse(any("sudoers.d/90-opstk-" in c for c in ai["late-commands"]))
+        self.assertTrue(any("grep -rls NOPASSWD /etc/sudoers.d/" in c
+                            for c in ai["late-commands"]), ai["late-commands"])
+
+    def test_sudo_nopasswd_default_is_enabled_on_both_families(self):
+        """默认（是）：RHEL 侧 %post 落 sudoers.d；Ubuntu 侧 late-commands 落同款文件。"""
+        rhel = generate_all(self._rhel_cfg(admin_user="svcadmin"))["ks.cfg"]
+        self.assertIn("echo 'svcadmin ALL=(ALL) NOPASSWD:ALL' "
+                      "> /etc/sudoers.d/90-opstk-svcadmin", rhel.splitlines())
+        import yaml as _yaml
+        ai = _yaml.safe_load(generate_all(
+            _cfg(admin_user="svcadmin"))["user-data"])["autoinstall"]
+        self.assertTrue(any("sudoers.d/90-opstk-svcadmin" in c for c in ai["late-commands"]))
+
+    # ── 管理员用户名沿既有白名单在两族汇点一致 ──
+
+    def test_admin_username_flows_to_both_families_and_readme(self):
+        """admin_user 过 _safe_username 后，ks user/%post、autoinstall identity/
+        late-commands、README 全部用同一个名字（一处白名单，多处一致）。"""
+        cfg = self._rhel_cfg(admin_user="svc_user-01")
+        ks = generate_all(cfg, [{"mac": self.M1, "hostname": "web-01"}])[
+            "ks/" + self.T1 + "/ks.cfg"]
+        self.assertTrue(any(l.startswith("user --name=svc_user-01 ") and
+                            "--groups=wheel" in l for l in ks.splitlines()), ks)
+        self.assertIn("sudoers.d/90-opstk-svc_user-01", ks)
+        import yaml as _yaml
+        ai = _yaml.safe_load(generate_all(
+            _cfg(admin_user="svc_user-01"))["user-data"])["autoinstall"]
+        self.assertEqual(ai["identity"]["username"], "svc_user-01")
+        self.assertTrue(any("sudoers.d/90-opstk-svc_user-01" in c
+                            for c in ai["late-commands"]))
+        self.assertIn("ssh svc_user-01@", generate_all(_cfg(
+            admin_user="svc_user-01"))["README.txt"])
+
+    # ── schema 层：装机记录 ip 的两种字形（新增能力，不破坏既有裸 IPv4）──
+
+    def test_install_ip_schema_accepts_bare_and_cidr(self):
+        from app.core.schemas import PxeInstallIn, PxeInstallItem
+        for cls in (PxeInstallIn, PxeInstallItem):
+            kw = dict(profile_id="p1", hostname="web-01", mac=self.M1) \
+                if cls is PxeInstallIn else dict(mac=self.M1, hostname="web-01")
+            with self.subTest(cls=cls.__name__):
+                self.assertEqual(cls(**kw, ip="10.0.0.15").ip, "10.0.0.15")   # 既有字形
+                self.assertEqual(cls(**kw, ip="10.0.0.15/26").ip, "10.0.0.15/26")
+                self.assertIsNone(cls(**kw).ip)
+                # 空串原样透传（生成器把空串当"没填"→ 模板默认，不回归）
+                self.assertEqual(cls(**kw, ip="").ip, "")
+
+    def test_install_ip_schema_rejects_junk(self):
+        from app.core.schemas import PxeInstallIn, PxeInstallItem
+        for cls in (PxeInstallIn, PxeInstallItem):
+            kw = dict(profile_id="p1", mac=self.M1) if cls is PxeInstallIn \
+                else dict(mac=self.M1)
+            for bad in ("10.0.0.300", "10.0.0.15/33", "10.0.0.15/", "999.1.1.1",
+                        "::1", "10.0.0.15/abc", "ten-0-0-15"):
+                with self.subTest(cls=cls.__name__, bad=bad):
+                    with self.assertRaises(ValueError):
+                        cls(**kw, ip=bad)
+
+    # ── 生成器第 3 层：每机 net_config 的派生规则（模板默认值兜底）──
+
+    def test_machine_net_config_derivation(self):
+        from app.it.pxe.generator import _machine_net_config
+        base = self._rhel_net_cfg()
+        # 没填 ip ⇒ None（模板默认，不回归）
+        self.assertIsNone(_machine_net_config(base, {"mac": self.M1}, "w"))
+        self.assertIsNone(_machine_net_config(base, {"mac": self.M1, "ip": ""}, "w"))
+        self.assertIsNone(_machine_net_config(base, {"mac": self.M1, "ip": None}, "w"))
+        # 带 /N ⇒ netmask 与 cidr 同时给（kickstart 用 netmask、autoinstall 用 cidr）
+        nc = _machine_net_config(base, {"mac": self.M1, "ip": "10.10.10.100/26"}, "w")
+        self.assertEqual(nc["ip"], "10.10.10.100")
+        self.assertEqual(nc["netmask"], "255.255.255.192")
+        self.assertEqual(nc["cidr"], 26)
+        # 模板网关/DNS/网卡名兜底保留
+        self.assertEqual(nc["gateway"], "10.10.10.1")
+        self.assertEqual(nc["dns"], ["10.10.10.53", "223.5.5.5"])
+        self.assertEqual(nc["interface"], "ens33")
+        # 模板只有 dns_server（dhcp 侧单值）时换算成 dns 列表，且模板本身不动
+        dhcp_cfg = self._rhel_cfg(net_mode="dhcp",
+                                  net_config={"interface": "ens33",
+                                              "dns_server": "10.10.10.53"})
+        nc2 = _machine_net_config(dhcp_cfg, {"mac": self.M1, "ip": "10.10.10.100"}, "w")
+        self.assertEqual(nc2["dns"], ["10.10.10.53"])
+        # 调用方的模板 net_config 不被原地改写
+        self.assertEqual(dhcp_cfg.net_config, {"interface": "ens33",
+                                               "dns_server": "10.10.10.53"})
+        self.assertEqual(base.net_config["ip"], "10.10.10.9")
+        # 非法 ip 抛 ValueError（不静默回退）
+        with self.assertRaises(ValueError):
+            _machine_net_config(base, {"mac": self.M1, "ip": "10.0.0.999"}, "w")
+
+    # ── 每机静态下发的 iPXE ↔ ks 对应关系不串台 ──
+
+    def test_ipxe_menu_and_answer_file_stay_paired(self):
+        """同一模板两台机器：菜单→应答文件→network 行 一一对应，不串台。"""
+        cfg = self._rhel_net_cfg()
+        files = generate_all(cfg, [
+            {"mac": self.M1, "hostname": "web-01", "ip": "10.10.10.100"},
+            {"mac": self.M2, "hostname": "db-01", "ip": "10.10.10.200"},
+        ])
+        m1 = files["boot/" + self.T1 + ".ipxe"]
+        self.assertIn("/ks/" + self.T1 + "/ks.cfg", m1)
+        self.assertNotIn("/ks/" + self.T2, m1)
+        self.assertNotIn("--ip=10.10.10.200", files["ks/" + self.T1 + "/ks.cfg"])
+        self.assertNotIn("--ip=10.10.10.100", files["ks/" + self.T2 + "/ks.cfg"])

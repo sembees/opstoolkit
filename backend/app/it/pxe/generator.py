@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from decimal import Decimal
@@ -37,6 +38,104 @@ def _safe_mac(mac) -> str:
 def _mac_tag(mac: str) -> str:
     """MAC -> 可作为 dnsmasq tag、也可安全用作文件名的片段（只含 [0-9a-f-]）。"""
     return mac.replace(":", "-")
+
+
+# ── 每机静态 IP（本单元：PXE 装完"开箱可达"）────────────────────────────
+# 装机记录的 ip 允许两种字形："10.0.0.15"（掩码回退模板）或 "10.0.0.15/26"（自带掩码）。
+# 模型 PxeInstall.ip 是 String(64)，两种都装得下，因此不需要新列。
+# 这里是 D7 第 3 层兜底：schemas 层已校验，但生成器自己也不信任入参 ——
+# 非法 ip **绝不能**静默回退模板默认（那等于两台机器拿到同一个静态 IP，比失败更糟）。
+_IPV4_CIDR_RE = re.compile(r"^([0-9]{1,3}(?:\.[0-9]{1,3}){3})(?:/([0-9]|[12][0-9]|3[0-2]))?$")
+
+
+def _parse_install_ip(value) -> tuple:
+    """装机记录 ip -> (地址, 前缀 or None)；空/None 返回 ("", None)；形状非法返回 ("", None)。
+
+    形状合法但不是真实 IPv4（如 999.1.1.1）也返回 ("", None) —— 调用方据此区分
+    "没填 ip"（回退模板默认）与"填了非法 ip"（由调用方报错）。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return "", None
+    m = _IPV4_CIDR_RE.fullmatch(s)
+    if m is None:
+        return "", None
+    addr = m.group(1)
+    try:
+        ipaddress.IPv4Address(addr)
+    except ValueError:
+        return "", None
+    prefix = int(m.group(2)) if m.group(2) is not None else None
+    return addr, prefix
+
+
+def _prefix_to_netmask(prefix: int) -> str:
+    """/N -> 点分掩码（kickstart 的 --netmask 用点分、autoinstall 用 /N，两族都要）。"""
+    return str(ipaddress.IPv4Network("0.0.0.0/" + str(int(prefix)), strict=False).netmask)
+
+
+def _require_install_ip(inst, where) -> tuple:
+    """装机记录的 ip：没填返回 (None, None)；填了就必须可解析，否则抛 ValueError。
+
+    为什么非法要大声失败而不是静默跳过：静默跳过 = 该机器回退模板默认网络，
+    两台机器拿到同一个静态 IP（地址冲突）或 DHCP 随机地址（回到用户最初的痛点），
+    运维还以为登记的 IP 已经生效 —— 这是比"生成失败 422"严重得多的静默错误。
+    """
+    raw = (inst or {}).get("ip")
+    if raw is None or str(raw).strip() == "":
+        return None, None
+    addr, prefix = _parse_install_ip(raw)
+    if not addr:
+        raise ValueError(
+            where + " 的 ip 不合法 " + repr(str(raw)) +
+            "：只允许 a.b.c.d 或 a.b.c.d/N（N=0..32）"
+        )
+    return addr, prefix
+
+
+def _machine_net_config(c, inst, where):
+    """按装机记录派生该机的网络配置；该机没填 ip 时返回 None（模板默认，行为不回归）。
+
+    规则（用户已定：用静态）：
+      · 该机填了 ip ⇒ 这台机器按**静态**下发（装机记录的 ip 优先于模板 net_config 的 ip）；
+      · 掩码：ip 自带 "/N" 时按 N（netmask 与 cidr 同时给 —— kickstart 用 netmask、
+        autoinstall 用 cidr，两族各取所需）；没带 "/N" 时沿用模板的 netmask/cidr；
+      · 网关/DNS/网卡名沿用模板 net_config（模板默认值兜底，缺省时用模板静态分支
+        原有的默认值，行为与模板级 static 完全一致）；
+      · 模板只有 dhcp 侧的 dns_server（单值）而没有 dns 列表时，把它换算成 dns 列表
+        —— 只影响"该机有 ip"这条新路径，模板本身的输出一字不改。
+    """
+    addr, prefix = _require_install_ip(inst, where)
+    if addr is None:
+        return None
+    nc = dict(c.net_config or {})
+    nc["ip"] = addr
+    if prefix is not None:
+        nc["netmask"] = _prefix_to_netmask(prefix)
+        nc["cidr"] = prefix
+    if not nc.get("dns") and nc.get("dns_server"):
+        nc["dns"] = [nc["dns_server"]]
+    return nc
+
+
+# 装完系统后 sshd_config 的 PermitRootLogin 取值（kickstart %post / late-commands 里用）。
+# 默认禁止 root 登录（用户已定默认否）：RHEL 系安装器建的是普通用户、root 常被禁用，
+# 所以"装完能 SSH"的默认路径是 普通管理员 + sudo，而不是 root。
+def _sshd_permit_root_lines(allow_root: bool) -> list:
+    """返回把 PermitRootLogin 固化成指定值的 POSIX 命令（两态都显式写，不依赖发行版默认）。
+
+    用 sed+grep 而不是 /etc/ssh/sshd_config.d 落盘：后者只有 el8+/openEuler 等新系统
+    才有 Include，CentOS 7 没有；sed 改主配置在两代上都成立。
+    安装期改配置即可 —— sshd 在装机过程中由 anaconda/subiquity 起装，**首次启动**才
+    读取配置，所以这里不需要（也不应该）restart sshd：装机期 restart 恰恰是
+    "systemctl 返回非零 → 整个装机被判 install_fail" 的既有教训（见 _ubuntu_user_data）。
+    """
+    value = "yes" if allow_root else "no"
+    return [
+        "sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin " + value + "/' /etc/ssh/sshd_config",
+        "grep -q '^PermitRootLogin' /etc/ssh/sshd_config || echo 'PermitRootLogin "
+        + value + "' >> /etc/ssh/sshd_config",
+    ]
 
 
 def _safe_hostname(name, fallback="server01") -> str:
@@ -133,6 +232,16 @@ class PxeConfig:
     # 只用于在 README 里给出"目标机内存要多大"的具体数字。
     iso_size_mb: int = 0
     deploy_mode: str = "standalone"  # standalone(独立DHCP) / proxy(ProxyDHCP) / relay(中继模式)
+    # ── 装完能 SSH（本单元）────────────────────────────────────────────
+    # allow_root：是否允许 root 直接 SSH 登录（默认**否**，用户已定）。
+    # RHEL 系 kickstart 建的是普通管理员 + wheel，root 常被禁用；"装完能 SSH"的默认
+    # 路径必须是 普通管理员 + sudo，root 直登是显式打开的例外（PermitRootLogin yes，
+    # Ubuntu 侧还会同时给 root 置上口令，否则 Ubuntu 的 root 账号默认锁定、开了也没用）。
+    allow_root: bool = False
+    # sudo_nopasswd：管理员是否 sudo 免密（默认**是**，用户已定）。
+    # 两族都显式落盘成 /etc/sudoers.d/90-opstk-<user>（RHEL wheel 默认要密码、
+    # Ubuntu subiquity 默认免密 —— 两态都由我们显式表达，不依赖安装器默认值）。
+    sudo_nopasswd: bool = True
 
 
 # 装机流程按**安装器家族**分岔（不再是"ubuntu vs 其余"）：
@@ -177,23 +286,49 @@ def _iso_versions(name: str) -> list:
     return _ISO_VER_RE.findall(name.lower())
 
 
+# 无安装器的"纯 live/桌面"形态 token（审计 D10）：这些 ISO 里没有 anaconda/
+# subiquity 安装器，按它们生成的装机配置必然失败 —— 同版本时必须排在
+# dvd/everything/netinst/boot/minimal 等**可安装形态**之后。ubuntu 例外：它的
+# 官方安装介质本身就是 live-server（目录字段 live_is_installer 驱动，见
+# _edition_rank），保持既有"live-server 优先"。
+_UNINSTALLABLE_TOKENS = ("live", "desktop", "workstation")
+
+
+def _edition_rank(low: str, live_is_installer: bool) -> int:
+    """形态分（值大者优先）：可安装形态 > 纯 live/桌面形态。"""
+    if live_is_installer:
+        # ubuntu 的安装介质就是 live-server —— "live-server 优先"只对它适用
+        return 1 if "live-server" in low else 0
+    return 0 if any(t in low for t in _UNINSTALLABLE_TOKENS) else 1
+
+
 def pick_iso(names, os_type: str, os_version: str) -> str:
     """从 /srv/opstk/iso 的文件名列表里挑出最匹配 os_type/os_version 的那个 ISO。
 
     纯函数（不做 I/O），便于单测。返回文件名，挑不到返回 ""。
 
     匹配规则（正式环境里同目录会同时存在多个系统镜像，必须挑准）：
-      1. 必须含该 OS 类型的任一关键字；
+      1. 必须含该 OS 类型的任一关键字，且**不含**该条目的 pick_exclude_keywords
+         （审计 D9：kylin 排除含 "ubuntu" 的文件名 —— 优麒麟(UbuntuKylin) 是
+         casper 家族镜像，拿 kylin 的 kickstart/inst.* 去装必然失败，宁可不挑、
+         由上层走"识别不出来"的可读提示；银河麒麟官方 ISO 文件名不含 ubuntu，
+         正例不误伤）；
       2. 版本按**数字段边界**匹配：查询 `22.04` 命中文件名里的 `22.04` 或 `22.04.5`，
          但不命中 `24.04`；查询 `9` 命中 `9`/`9.4`，但不命中 `19.4`
          （旧实现用 `ver in low` 子串匹配，会被 `Rocky-19.x` 这类名字误配）；
       3. 只认 .iso；
-      4. 优先级：版本号段数多者优先（22.04.5 比 22.04 更精确）→ live-server 优先
-         → 文件名排序兜底，保证结果确定、可复现。
+      4. 优先级：版本号段数多者优先（22.04.5 比 22.04 更精确）→ **可安装形态
+         优先**（dvd/everything/netinst/boot/minimal 压过 live/desktop/
+         workstation；ubuntu 的 live-server 例外，见 _edition_rank）→ 文件名
+         排序兜底。排序键 (版本段数, 形态分, 文件名) 是全序，结果确定、
+         与输入顺序无关（既有守护用例不变）。
     """
     ost = (os_type or "ubuntu").strip().lower()
     ver = (os_version or "").strip().lower()
+    e = os_catalog.entry(ost)
     keys = _ISO_TYPE_KEYS.get(ost, (ost,))
+    excludes = tuple(e.pick_exclude_keywords) if e else ()
+    live_is_installer = bool(e and e.live_is_installer)
     cands = []
     for n in names or []:
         base = str(n).strip()
@@ -201,6 +336,10 @@ def pick_iso(names, os_type: str, os_version: str) -> str:
         if not low.endswith(".iso"):
             continue
         if not any(k in low for k in keys):
+            continue
+        if any(x in low for x in excludes):
+            # 跨家族镜像（审计 D9）：没有 anaconda，命中即装机必败 —— 跳过，
+            # 让上层走"挑不到镜像"的可读提示，而不是生成一份必败的装机配置。
             continue
         if not ver:
             score = 0
@@ -215,7 +354,7 @@ def pick_iso(names, os_type: str, os_version: str) -> str:
             # 段数取自**文件名里实际命中的那个版本**。旧实现写的是 len(ver.split("."))，
             # 对一次查询而言是常量，"版本段数多者优先（22.04.5 > 22.04）"实际从未生效。
             score = len(hit.split("."))
-        cands.append((score, "live-server" in low, base))
+        cands.append((score, _edition_rank(low, live_is_installer), base))
     if not cands:
         return ""
     cands.sort(key=lambda t: (t[0], t[1], t[2]))
@@ -1613,6 +1752,35 @@ def _ubuntu_user_data(c):
         shell_quoted = shlex.quote(c.post_script)
         full_cmd = "curtin in-target --target=/target -- bash -c " + shell_quoted
         lines.append("    - " + json.dumps(full_cmd))
+    # ── 装完能 SSH（本单元）──
+    # 两态都显式写 PermitRootLogin（不依赖发行版默认：Ubuntu 默认 prohibit-password、
+    # 老镜像默认过松）。sed + grep 兜底，保证无论镜像主配置里有没有注释行，
+    # 最终文件里都有一行我们指定的值。
+    for _cmd in _sshd_permit_root_lines(bool(c.allow_root)):
+        lines.append("    - " + json.dumps(
+            "curtin in-target --target=/target -- bash -c " + shlex.quote(_cmd)))
+    if c.allow_root:
+        # Ubuntu 的 root 账号默认锁定（/etc/shadow 无口令）——只放开 PermitRootLogin
+        # 还是进不去。与 RHEL 的 rootpw 同一条回退链：root_password 优先，其次管理员口令；
+        # 存的是 sha512 **密文**（chpasswd -e），不在生成物里落明文。
+        lines.append("    - " + json.dumps(
+            "curtin in-target --target=/target -- bash -c " + shlex.quote(
+                "echo " + shlex.quote("root:" + _hash_pw(c.root_password or c.admin_password))
+                + " | chpasswd -e")))
+    # sudo 免密（默认是）：显式落一个 sudoers.d 覆盖文件（subiquity 默认就给
+    # 安装期用户免密，但"默认行为"对存量镜像/后续版本是口头承诺，写出来才算数）。
+    # 关掉时显式**摘除**所有 NOPASSWD 条目 —— sudo 的多条规则是"最宽者胜"，
+    # 事后叠加一条要密码的规则抵消不了免密条目，只能删。
+    if c.sudo_nopasswd:
+        lines.append("    - " + json.dumps(
+            "curtin in-target --target=/target -- bash -c " + shlex.quote(
+                "echo " + shlex.quote(admin + " ALL=(ALL) NOPASSWD:ALL")
+                + " > /etc/sudoers.d/90-opstk-" + admin
+                + " && chmod 440 /etc/sudoers.d/90-opstk-" + admin)))
+    else:
+        lines.append("    - " + json.dumps(
+            "curtin in-target --target=/target -- bash -c " + shlex.quote(
+                "grep -rls NOPASSWD /etc/sudoers.d/ 2>/dev/null | xargs -r rm -f")))
     # 这条必须容错。真机实测（22.04 live-server 最小安装）里 ssh 单元根本不存在，
     # 命令返回 1，curtin 于是把**已经装好的系统**判成 install_fail：
     #   串口实证 "Command '[... systemctl enable ssh]' returned non-zero exit status 1"
@@ -1682,7 +1850,14 @@ def _rhel_ks(c):
         if _n and _u:
             repo += "repo --name=" + q + _n + q + " --baseurl=" + q + _u + q + "\n"
 
-    pkgs = c.extra_packages or ["vim", "net-tools", "bash-completion", "tar", "wget", "curl"]
+    pkgs = list(c.extra_packages or [])
+    if not pkgs:
+        pkgs = ["vim", "net-tools", "bash-completion", "tar", "wget", "curl"]
+    # 配了公钥就必须保证 sshd 在装（与 Ubuntu 侧"配了公钥自动补 openssh-server"
+    # 同一条规则；RHEL 最小装通常自带 openssh-server，显式列出只是把"能 SSH"
+    # 从概率变成确定，不改变其它包的选择）。
+    if c.ssh_keys and "openssh-server" not in pkgs:
+        pkgs.append("openssh-server")
 
     L = [
         "# RHEL / Rocky / Alma Linux Kickstart",
@@ -1715,18 +1890,33 @@ def _rhel_ks(c):
     ]
     L.extend(pkgs)
     L.append("%end")
-    if c.ssh_keys or c.post_script:
-        L.append("")
-        L.append("%post --interpreter=/bin/bash")
-        for k in c.ssh_keys or []:
-            # 原实现用 chr(39)+k+chr(39) 手工拼单引号：key 里含单引号即可逃出引号再注入命令。
-            # 改用 shlex.quote（对正常公钥是恒等变换，见 NC1 的恒等性论证）。
-            L.append("mkdir -p /home/" + admin + "/.ssh && echo "
-                     + shlex.quote(str(k)) + " >> /home/" + admin + "/.ssh/authorized_keys")
+    # %post 段（以 root 执行）：固化 root 登录策略 + sudo 免密 + 注入公钥。
+    # 既有实现只在 ssh_keys/post_script 时输出 %post；本单元把"装完能 SSH"变成
+    # 默认产物 —— root 登录两态与 sudo 免密默认值都是确定性行为，所以 %post
+    # 常驻（最小段 = PermitRootLogin 两行）。新增字段为默认值时多出的行已随
+    # golden 重新基线化（见 tests/test_pxe.py 的 sha256 注释）。
+    L.append("")
+    L.append("%post --interpreter=/bin/bash")
+    # root 直登策略：默认 no（用户已定默认否）。RHEL 系安装器建的是普通管理员，
+    # "装完能 SSH"的默认路径是 管理员 + sudo，root 直登必须显式打开才可用。
+    for _cmd in _sshd_permit_root_lines(bool(c.allow_root)):
+        L.append(_cmd)
+    if c.sudo_nopasswd:
+        # wheel 组默认 sudo 要密码（%wheel ALL=(ALL) ALL）—— 免密由这个覆盖文件给。
+        # sudoers.d 文件名里不能有 '.'（sudo 会忽略带点的文件），admin 白名单里没有 '.'。
+        L.append("echo " + shlex.quote(admin + " ALL=(ALL) NOPASSWD:ALL")
+                 + " > /etc/sudoers.d/90-opstk-" + admin)
+        L.append("chmod 440 /etc/sudoers.d/90-opstk-" + admin)
+    for k in c.ssh_keys or []:
+        # 原实现用 chr(39)+k+chr(39) 手工拼单引号：key 里含单引号即可逃出引号再注入命令。
+        # 改用 shlex.quote（对正常公钥是恒等变换，见 NC1 的恒等性论证）。
+        L.append("mkdir -p /home/" + admin + "/.ssh && echo "
+                 + shlex.quote(str(k)) + " >> /home/" + admin + "/.ssh/authorized_keys")
+    if c.ssh_keys:
         L.append("chown -R " + admin + ":" + admin + " /home/" + admin + "/.ssh")
-        if c.post_script:
-            L.append(c.post_script)
-        L.append("%end")
+    if c.post_script:
+        L.append(c.post_script)
+    L.append("%end")
     return "\n".join(L) + "\n"
 
 
@@ -1986,12 +2176,15 @@ def _dnsmasq(c, installs=None):
         L.insert(3, "interface=" + iface)  # 在 port=0 后插入接口绑定
 
     # D7 第 3 层：只接受合法 MAC，非法直接跳过（防注入进 dhcp-host 与文件名）
+    # 元组第 3 位 = 该机登记的静态 ip（没登记为 None）：有它 dnsmasq 才按 MAC 下发
+    # DHCP 预留（重装/改配置时该机也拿到同一地址，防止 IP 漂移）。
     reg = []
     for inst in installs:
         mac = _safe_mac(inst.get("mac"))
         if not mac:
             continue
-        reg.append((mac, _mac_tag(mac)))
+        addr, _prefix = _require_install_ip(inst, "装机记录 " + mac)
+        reg.append((mac, _mac_tag(mac), addr))
 
     if mode == "relay":
         # M6：原实现同时写了 interface=<iface> 与 no-dhcp-interface=<iface>。
@@ -2050,8 +2243,10 @@ def _dnsmasq(c, installs=None):
     L.append("dhcp-match=set:efi-x86_64,option:client-arch,9")
     L.append("dhcp-match=set:efi-ia32,option:client-arch,6")
     L.append("dhcp-match=set:ipxe,175")
-    for mac, tag in reg:
-        L.append("dhcp-host=" + mac + ",set:pxe_" + tag)
+    for mac, tag, ip in reg:
+        # 照抄同文件既有拼法：dhcp-host=<mac>,set:pxe_<tag>；该机登记了 ip 时
+        # 在中间插入 <ip>（dnsmasq 的 dhcp-host=MAC,IP,set:tag 是同一指令的预留写法）。
+        L.append("dhcp-host=" + mac + ("," + ip if ip else "") + ",set:pxe_" + tag)
     L.append("")
     L.append("# 用 tag-if 造两两互斥的 tag：每条 dhcp-boot 只带一个 tag，不依赖优先级")
     L.append("tag-if=set:fw-x64,tag:!ipxe,tag:efi-x86_64")
@@ -2079,13 +2274,13 @@ def _dnsmasq(c, installs=None):
     L.append("")
     L.append("# 第二阶段：iPXE 自己再次 DHCP 时下发【脚本 URL】（HTTP），而不是固件")
     L.append("# 按 MAC 指定 iPXE 菜单 (tag 方式, 避免 URL 被当作 hostname)")
-    for mac, tag in reg:
+    for mac, tag, _ip in reg:
         L.append("tag-if=set:fw-menu-" + tag + ",tag:fw-menu,tag:pxe_" + tag)
         L.append("dhcp-boot=tag:fw-menu-" + tag + "," + answer_base + "/boot/" + tag + ".ipxe")
     # 默认菜单对**所有**已登记 MAC 取反，从而与上面每台机的专属菜单互斥。
     # 它指向扁平的 <http_root>/boot.ipxe（全局唯一），内容见 _unregistered_default_menu()：
     # 有装机记录时那是一份"拒绝自动安装"的安全菜单，不会把没登记的机器重新分区。
-    neg = "".join(",tag:!pxe_" + t for _, t in reg)
+    neg = "".join(",tag:!pxe_" + t for _, t, _ip in reg)
     L.append("tag-if=set:fw-menu-def,tag:fw-menu" + neg)
     L.append("# 未登记机器的默认菜单：扁平全局文件（不是 profiles/<pid>/ 下的那份）")
     L.append("dhcp-boot=tag:fw-menu-def," + c.http_root + "/boot.ipxe")
@@ -2113,6 +2308,8 @@ def _mode_label(mode):
 def _readme(c, has_registered=False):
     iso_mb = int(c.iso_size_mb or 0)
     ram_mb = (iso_mb + 1536) if iso_mb else 0
+    # admin_user 会落进 README 文本；与其它汇点同一份白名单（不拒绝，只剔除）
+    admin = _safe_username(c.admin_user)
     if has_registered:
         unreg = (
             "未登记的机器（默认菜单 <http_root>/boot.ipxe）\n"
@@ -2166,6 +2363,28 @@ def _readme(c, has_registered=False):
         "----------\n"
         "本次参数: " + (c.kernel_console or "(未设置)") + "\n"
         "无显示器的机器请接串口(115200)看装机过程与失败原因。\n\n"
+        "装完怎么登录（必读）\n"
+        "--------------------\n"
+        "装好后的机器请用【管理员账号】SSH 登录，而不是 root：\n"
+        "  ssh " + admin + "@<该机IP>\n"
+        "RHEL 系（anaconda 建的是普通用户，root 常被禁用）：装完的默认路径就是\n"
+        "普通管理员 + sudo，root 直登默认是关的（PermitRootLogin no）。\n"
+        "  · sudo：管理员账号已在 wheel/sudo 组，"
+        + ("sudo 免密（/etc/sudoers.d/90-opstk-" + admin + "）。"
+           if c.sudo_nopasswd else "sudo 需要输该用户自己的密码。") + "\n"
+        "  · root 直登：本次模板" + ("已打开（PermitRootLogin yes，root 口令同 root密码/管理员密码）"
+                                       if c.allow_root else "未打开；要开请在模板里打开“允许 root 登录”后重新部署。") + "\n"
+        "  · SSH 公钥：模板里填了公钥的，已写入 /home/" + admin +
+        "/.ssh/authorized_keys，\n    并确保 openssh-server 在装（Ubuntu 侧配了公钥自动补装）。\n"
+        "登不进去时：优先接串口确认装机是否完成、该机是否拿到登记的 IP（见下）。\n\n"
+        "每机静态 IP\n"
+        "-----------\n"
+        "装机记录里登记了 ip 的机器，应答文件按该机地址生成静态网络配置\n"
+        "（RHEL：network --bootproto=static --ip=<该机ip> …；Ubuntu：autoinstall 的\n"
+        "network: 段），装完即开箱可达，不再依赖 DHCP 随机取址。\n"
+        "dnsmasq.conf 里登记了 ip 的机器还会带 DHCP 预留行\n"
+        "（dhcp-host=<mac>,<ip>,set:…）：重装或改配置时该机也拿到同一地址，IP 不漂移。\n"
+        "装机记录没填 ip 的机器仍按模板的网络配置（DHCP/模板级静态）下发。\n\n"
         + unreg +
         "部署步骤\n"
         "--------\n"
@@ -2251,6 +2470,17 @@ def generate_all(c, installs=None):
         tag = _mac_tag(mac)
         hostname = _safe_hostname(inst.get("hostname"), "") or _safe_hostname(c.hostname)
         ic = replace(c, hostname=hostname)
+        # ── 每机静态 IP（本单元核心）───────────────────────────────────
+        # 该机登记了 ip ⇒ 按【静态】生成这份机器自己的应答文件（装机记录的 ip
+        # 优先于模板 net_config 的 ip；掩码取该机 ip 的 "/N"，缺省沿用模板），
+        # hostname 也已经是该机自己的 —— ks 家族的 `network … --hostname=` 与
+        # Ubuntu 的 identity.hostname 因此各就各位。
+        # 该机**没填** ip ⇒ 不做任何覆盖，仍用模板 net_mode/net_config（不回归）。
+        # 每个只作用于 replace 出来的 ic：模板级 ks.cfg/user-data 与 dnsmasq 不受
+        # 影响，且同一模板两台机器各生成各的文件（一个 MAC 一套），不会串台。
+        mnet = _machine_net_config(c, inst, "装机记录 " + mac)
+        if mnet is not None:
+            ic = replace(ic, net_mode="static", net_config=mnet)
         if entry.key == "ubuntu":
             seed = answer_base + "/user-data/" + tag + "/"
             files["user-data/" + tag + "/user-data"] = _ubuntu_user_data(ic)

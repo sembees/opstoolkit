@@ -108,6 +108,28 @@ def _require_netmask(value: str) -> str:
     return value
 
 
+def _require_ipv4_or_cidr(value: Optional[str], kind: str) -> Optional[str]:
+    """装机记录的 ip 允许两种字形：裸 IPv4（"10.0.0.15"，掩码回退模板默认）或
+    "10.0.0.15/26"（自带掩码）。合法时原样返回（入库值与运维所填一致）。
+
+    为什么不拆成 ip + netmask 两列：模型 PxeInstall.ip 是 String(64)，"/26" 装得下；
+    装机记录侧加列 = 存量库迁移 + 界面改造，而掩码信息用后缀表达是等价且可追溯的。
+    生成器侧（generator._parse_install_ip）按同一字形解析，字形规则有测试锁住。
+    """
+    if value is None or value == "":
+        return value
+    s = str(value).strip()
+    if "/" in s:
+        try:
+            net = ipaddress.ip_network(s, strict=False)   # 校验地址+前缀（前缀缺省/超界即抛）
+        except ValueError:
+            raise ValueError(f"invalid IPv4 {kind} (a.b.c.d or a.b.c.d/N): {value!r}") from None
+        if not isinstance(net, ipaddress.IPv4Network):
+            raise ValueError(f"invalid IPv4 {kind} (a.b.c.d or a.b.c.d/N): {value!r}")
+        return value
+    return _require_ipv4(s, kind=kind)
+
+
 def _require_dns_list(value: list[str]) -> list[str]:
     """dns 列表每个元素都必须为合法 IPv4（NC2）。"""
     for item in value:
@@ -1081,6 +1103,16 @@ class PxeProfileIn(BaseModel):
     admin_password: Optional[str] = None
     root_password: Optional[str] = None
     ssh_keys: list[str] = []
+    # ── 装完能 SSH（本单元新增模板字段；既有 admin_user/ssh_keys 复用不新增清单）──
+    # allow_root：是否允许 root 直接 SSH 登录（默认**否**，用户已定）。
+    # RHEL 系安装器建的是普通用户、root 常被禁用 —— "装完能 SSH"的默认路径是
+    # 普通管理员 + sudo；打开本开关才会生成 PermitRootLogin yes（RHEL 侧 %post、
+    # Ubuntu 侧 late-commands，后者同时给 root 置上口令，否则账号默认锁定登不进）。
+    allow_root: bool = False
+    # sudo_nopasswd：管理员是否 sudo 免密（默认**是**，用户已定）。
+    # 两族都显式落盘 /etc/sudoers.d/90-opstk-<user>；关掉时显式摘除所有 NOPASSWD
+    # 条目（sudo 规则"最宽者胜"，不摘除的话其它来源的免密条目仍然生效）。
+    sudo_nopasswd: bool = True
     disk_scheme: str = "lvm"      # lvm / direct
     # 结构化磁盘配置（方案 C）。校验走 PxeDiskConfigIn（第 2 层），但**返回普通 dict**：
     # 它会原样存进 models.PxeProfile.disk_config(JSON) 并传给 generator.PxeConfig，
@@ -1207,6 +1239,9 @@ class PxeProfileOut(ORMBase):
     keyboard: str
     admin_user: str
     ssh_keys: list = []
+    # 装完能 SSH：root 直登开关（默认否）与 sudo 免密开关（默认是），语义见 PxeProfileIn
+    allow_root: bool = False
+    sudo_nopasswd: bool = True
     disk_scheme: str
     disk_config: dict = {}
     net_mode: str
@@ -1246,8 +1281,8 @@ class PxeInstallIn(BaseModel):
     @field_validator("ip")
     @classmethod
     def _check_ip(cls, v: Optional[str]) -> Optional[str]:
-        # None/空串视为未填；给了就必须是合法 IPv4（D7）
-        return _require_ipv4(v, kind="address") if v else v
+        # None/空串视为未填；给了就必须是合法 IPv4 或 "a.b.c.d/N"（D7 + 每机静态 IP）
+        return _require_ipv4_or_cidr(v, kind="address") if v else v
 
 class PxeInstallOut(ORMBase):
     id: str
@@ -1266,7 +1301,7 @@ class PxeInstallItem(BaseModel):
 
     mac: str                    # 必填，必须是 aa:bb:cc:dd:ee:ff（大小写不敏感）
     hostname: str = ""          # 可选；给了就必须是 RFC1123 单标签
-    ip: Optional[str] = None    # 可选；给了就必须是合法 IPv4
+    ip: Optional[str] = None    # 可选；给了就必须是合法 IPv4 或 "a.b.c.d/N"（每机静态 IP）
 
 
     @field_validator("mac")
@@ -1284,7 +1319,7 @@ class PxeInstallItem(BaseModel):
     @field_validator("ip")
     @classmethod
     def _check_ip(cls, v: Optional[str]) -> Optional[str]:
-        return _require_ipv4(v, kind="address") if v else v
+        return _require_ipv4_or_cidr(v, kind="address") if v else v
 
 
 class PxeNetConfigIn(BaseModel):

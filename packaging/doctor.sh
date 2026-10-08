@@ -34,6 +34,19 @@ while [ $# -gt 0 ]; do
         *) say "未知参数：$1（用 -h 看用法）"; exit 2 ;;
     esac
 done
+# 与 install.sh 同规格的端口校验（1~65535；0、65536+、非数字都拒绝）
+if [ -n "$PORT_ARG" ]; then
+    if ! printf '%s' "$PORT_ARG" | grep -qE '^[0-9]+$'; then
+        say "--port 必须是数字，收到：$PORT_ARG"; exit 2
+    fi
+    if [ "${#PORT_ARG}" -gt 5 ]; then
+        say "--port 必须在 1~65535 之间，收到：$PORT_ARG（超出范围）"; exit 2
+    fi
+    _port_num=$((10#$PORT_ARG))
+    if [ "$_port_num" -lt 1 ] || [ "$_port_num" -gt 65535 ]; then
+        say "--port 必须在 1~65535 之间，收到：$PORT_ARG（0 和 65536+ 都不是合法端口）"; exit 2
+    fi
+fi
 
 ISSUES=0
 has_issue() { ISSUES=$((ISSUES+1)); }
@@ -76,6 +89,7 @@ DATA_ROOT="$(read_env_var OPSTK_DATA_ROOT /srv/opstk)"
 TFTP_ROOT="$(read_env_var OPSTK_TFTP_ROOT /srv/tftp)"
 CNAME="$(read_env_var OPSTK_CONTAINER_NAME opstoolkit)"
 OPSTK_IMAGE="$(read_env_var OPSTK_IMAGE opstk:latest)"
+OPSTK_PROJ="$(read_env_var OPSTK_PROJECT opstk)"
 
 say "${C_B}==================== OpsToolkit 环境体检（只读） ====================${C_N}"
 say "体检对象：安装目录=${INSTALL_DIR:-（未找到，按默认值检查）}  端口=${PORT}  数据根=${DATA_ROOT}"
@@ -160,6 +174,22 @@ port_users() {  # $1=端口 → 输出 "协议 地址:端口 进程" 行
         echo ""
     fi
 }
+# ★ D8 修复②：优先用"已部署容器"判断端口归属，而不是靠猜进程名。
+#   输出：每行 "容器名|镜像|compose项目"，都是【在跑且把宿主端口 $1 映射出去】的容器。
+#   docker 不可用（没有 CLI / 是 Podman 假扮 / 守护进程没起）时输出空、返回 0，
+#   此时 describe_port 退回进程名启发式（见下）。
+docker_port_publishers() {  # $1=宿主端口
+    [ "${FAKE_DOCKER:-1}" = "0" ] || return 0
+    command -v docker >/dev/null 2>&1 || return 0
+    docker info >/dev/null 2>&1 || return 0
+    docker ps --format '{{.Names}}|{{.Image}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}' 2>/dev/null \
+        | awk -F'|' -v P=":${1}->" '
+            NF>=3 {
+                n = split($3, a, ",")
+                for (i = 1; i <= n; i++) if (index(a[i], P) > 0) { print $1 "|" $2 "|" $4; break }
+            }'
+    return 0
+}
 describe_port() {  # $1=端口 $2=用途说明 $3=算正常的进程名(正则,如 'dnsmasq|python')
     local p="$1" label="$2" friendly_re="$3" users
     users="$(port_users "$p")"
@@ -167,7 +197,7 @@ describe_port() {  # $1=端口 $2=用途说明 $3=算正常的进程名(正则,�
         good "端口 ${p} 空闲（${label}可用）"
         return
     fi
-    local resolved_flag=0 friendly_line=""
+    local resolved_flag=0 friendly_line="" friendly_is_docker=0 foreign_line=""
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         if printf '%s' "$line" | grep -Eq 'systemd-resolv'; then
@@ -175,6 +205,11 @@ describe_port() {  # $1=端口 $2=用途说明 $3=算正常的进程名(正则,�
         fi
         if printf '%s' "$line" | grep -Eq "$friendly_re"; then
             friendly_line="$line"
+            if printf '%s' "$line" | grep -Eq 'docker-proxy|rootlesskit'; then
+                friendly_is_docker=1
+            fi
+        elif [ -z "$foreign_line" ]; then
+            foreign_line="$line"
         fi
     done <<< "$users"
     if [ "$resolved_flag" = "1" ]; then
@@ -186,20 +221,62 @@ describe_port() {  # $1=端口 $2=用途说明 $3=算正常的进程名(正则,�
         has_issue
         return
     fi
-    if [ -n "$friendly_line" ]; then
-        good "端口 ${p} 由 OpsToolkit 自己的服务提供（${label}正常）：${friendly_line}"
+    # ★ D8 修复②：优先问 Docker —— 在跑容器里谁发布了宿主端口 $1？
+    #   · 是我们自己的（容器名/镜像/compose 项目与安装目录 .env 对得上）⇒ 本产品自己的发布端口，[正常]；
+    #   · 是**别的**容器发布 ⇒ 真占用，[需处理]，检查不做废。
+    #   Docker 问不出来（没装/没起/假 docker）时才退回进程名启发式：
+    #   ★ D8 修复①：docker-proxy（Docker 的端口转发进程）就是"发布端口"的标志，
+    #     生产机 8000 正是它在监听 —— 绝不能再把自家健康部署误判成"端口被占"。
+    local own_pub="" other_pub="" pname pimage pproj
+    while IFS='|' read -r pname pimage pproj; do
+        [ -n "$pname" ] || continue
+        if [ "$pname" = "$CNAME" ] || [ "$pimage" = "$OPSTK_IMAGE" ] \
+           || { [ -n "$OPSTK_PROJ" ] && [ "$pproj" = "$OPSTK_PROJ" ]; }; then
+            own_pub="$pname"
+        elif [ -z "$other_pub" ]; then
+            other_pub="${pname}（镜像 ${pimage}）"
+        fi
+    done < <(docker_port_publishers "$p")
+    if [ -n "$own_pub" ]; then
+        good "端口 ${p} 由本产品容器 ${own_pub} 发布（docker 的端口转发属正常）—— ${label}正常：$(printf '%s' "$users" | head -n1)"
         return
     fi
-    warn "端口 ${p} 被占用：$(printf '%s' "$users" | head -n1)"
-    say "        是谁：用 lsof -i :${p} 或 systemctl status <上面括号里的进程名> 确认；"
-    say "        若不是 OpsToolkit 自己的进程，需要停掉/迁移该服务后才能用${label}。"
-    [ "$p" = "$PORT" ] && has_issue
+    if [ -n "$other_pub" ]; then
+        if [ "$p" = "$PORT" ]; then
+            bad "端口 ${p} 被【别的】容器发布占用：${other_pub}（不是本产品）—— 停掉/迁移它，或改安装目录 .env 的 OPSTK_PORT 换端口"
+            has_issue
+        else
+            warn "端口 ${p} 被其它容器发布占用：${other_pub} —— 需要停掉/迁移它才能用${label}"
+        fi
+        return
+    fi
+    if [ -n "$friendly_line" ]; then
+        if [ "$friendly_is_docker" = "1" ]; then
+            good "端口 ${p} 由 docker-proxy（Docker 端口转发，本产品发布端口走的就是它）提供 —— ${label}正常：${friendly_line}"
+        else
+            good "端口 ${p} 由 OpsToolkit 自己的服务提供（${label}正常）：${friendly_line}"
+        fi
+        return
+    fi
+    # 都不是：被无关进程占用（对网页端口是硬伤 ⇒ [需处理]；53/67/69 只提示不阻塞）
+    if [ "$p" = "$PORT" ]; then
+        bad "端口 ${p} 被其它进程占用（${label}起不来）：$(printf '%s' "$users" | head -n1)"
+        say "        是谁：用 lsof -i :${p} 或 systemctl status <上面括号里的进程名> 确认；"
+        say "        若不是 OpsToolkit 自己的进程，需要停掉/迁移该服务，或改安装目录 .env 的 OPSTK_PORT 换端口。"
+        has_issue
+    else
+        warn "端口 ${p} 被占用：$(printf '%s' "$users" | head -n1)"
+        say "        是谁：用 lsof -i :${p} 或 systemctl status <上面括号里的进程名> 确认；"
+        say "        若不是 OpsToolkit 自己的进程，需要停掉/迁移该服务后才能用${label}。"
+    fi
     return 0
 }
 describe_port 53  "DNS 服务"        'dnsmasq'
 describe_port 67  "DHCP 服务"       'dnsmasq'
 describe_port 69  "TFTP 服务"       'dnsmasq'
-describe_port "$PORT" "OpsToolkit 网页" 'python|uvicorn|dnsmasq'
+# ★ D8 修复①：docker-proxy（以及 rootless docker 的 rootlesskit）加入"自己人"名单 ——
+#   文档让用户 sudo bash doctor.sh 在宿主机跑，自家发布端口必然命中 docker-proxy。
+describe_port "$PORT" "OpsToolkit 网页" 'python|uvicorn|gunicorn|dnsmasq|docker-proxy|rootlesskit'
 
 # ---------- 4. 数据目录 ----------
 section "4 / 数据目录（存在性 / 可写性）"

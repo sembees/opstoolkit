@@ -7,6 +7,11 @@
     不留"可以一直改设置的后门"；/setup/status 永远可用（只回状态，不泄配置）；
   · needs_setup 的口径是数据面判据（2026-10-08 误判修正）：完成标记不存在
     **且** 库看起来全新才算"未安装"，详见 db_looks_fresh 上方的注释块。
+  · 老库容错（缺表加固）：app_meta 表本身可能不存在（老库在新版本第一次启动前
+    被直接指过来 / 迁移半途 / create_all 还没跑）—— 读 meta 一律按"无记录"
+    降级、绝不抛（get_meta / _get_meta_checked），needs_setup 按与计数查询
+    同款"读不到 ⇒ 未知 ⇒ 可能在用"的口径降级：/setup/status 这条登录后的
+    第一跳绝不因缺表 500，checks / complete 也只给可读结果。
   · 路径如实展示：容器内路径是固定的（/srv/opstk/iso、/srv/tftp、/etc/dnsmasq.d、
     /var/lib/dnsmasq），换盘由 compose 变量解决 —— 向导**不改路径**，只如实报告。
 
@@ -21,6 +26,7 @@ import os
 import shutil
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 from app.core import dhcp as _dhcp
 from app.core import models
@@ -63,14 +69,56 @@ DISK_WARN_BYTES = 5 * 1024**3
 
 # ── app_meta 读写 ────────────────────────────────────────────────────────────
 
+def _is_missing_table_error(exc: BaseException) -> bool:
+    """识别"表不存在"这一类 DBAPI 错误（SQLite 报 `no such table: <表名>`）。
+
+    什么时候真的会发生：老库在新版本第一次启动前被直接指过来（create_all 还没跑）、
+    迁移半途 —— app_meta 物理缺失是**结构性**状态，不是瞬时故障；而 "database
+    is locked" 等瞬时错误不含这个特征，继续大声抛出（写失败尤其必须响）。
+    """
+    orig = getattr(exc, "orig", None)
+    for text in (str(exc), "" if orig is None else str(orig)):
+        if "no such table" in text.lower():
+            return True
+    return False
+
+
+async def _get_meta_checked(db, key: str) -> tuple[str | None, bool]:
+    """读一个 meta 键，并如实回报"meta 面读不读得到"。
+
+    返回 (value, readable)：
+      · 表在、行不在 ⇒ (None, True) —— "没做过这件事"与"值为空"要分开，语义不变；
+      · app_meta 表本身不存在（老库/迁移半途）⇒ (None, False)，**绝不抛**。
+
+    为什么必须降级：/setup/status 是登录后的第一跳，模块承诺"绝不让状态接口
+    打挂"—— _count_rows 已把计数查询按失败降级处理，这里补上读 meta 的同款
+    容错（此前 setup_state 第一行就会抛 OperationalError，把第一跳打成 500）。
+    readable 供 setup_state 并入 needs_setup 的降级口径；其余读路径
+    （password_changed、api/setup.py 的 _setup_done 等）经由 get_meta 自动免疫。
+    非"缺表"类 DBAPI 错误（锁冲突等）不在本口径内，原样上抛 —— 瞬时故障该响。
+    """
+    try:
+        row = await db.get(AppMeta, key)
+    except OperationalError as exc:
+        if _is_missing_table_error(exc):
+            return None, False
+        raise
+    return (row.value if row is not None else None), True
+
+
 async def get_meta(db, key: str) -> str | None:
-    """读一个 meta 键；不存在返回 None（"没做过这件事"与"值为空"要分开）。"""
-    row = await db.get(AppMeta, key)
-    return row.value if row is not None else None
+    """读一个 meta 键；不存在返回 None；app_meta 表缺失同样按"无记录"降级（不抛）。"""
+    return (await _get_meta_checked(db, key))[0]
 
 
 async def set_meta(db, key: str, value: str | None = None) -> None:
-    """upsert 一个 meta 键；value 缺省 = 当前 UTC 时刻（完成类标记的惯例）。"""
+    """upsert 一个 meta 键；value 缺省 = 当前 UTC 时刻（完成类标记的惯例）。
+
+    写路径**不做**缺表降级：标记没写成却装作写成了，比让这次写请求失败更危险
+    （mark_completed 若吞掉错误，会拿读不回来的 None 编一个假完成时间戳）。
+    读路径的降级在 get_meta；写是否容错由调用方决定 —— 缺表库上唯一可达的写
+    路径（record_admin_password_changed 改密埋点）自己按"如实返回 False"降级。
+    """
     row = await db.get(AppMeta, key)
     if row is None:
         row = AppMeta(key=key, value=value if value is not None else _stamp())
@@ -100,13 +148,22 @@ async def record_admin_password_changed(db, username: str) -> bool:
 
     为什么限定 username：向导关心的是"安装脚本建的那个 admin 的初始口令换掉没有"，
     其它管理员/操作员改自己的口令与此无关，不能把向导第一步"冒充"成已完成。
-    返回是否真的写了标记（供接口层/用例核对）。
+    返回是否真的写了标记（供接口层/用例核对）；app_meta 表缺失时标记确实写不上，
+    如实返回 False 而不是把改密响应打成 500（缺表库上可达的写路径的容错口径，
+    见实现内注释；应用重启跑完 create_all 后再改一次即可补上标记）。
     """
     from app.config import settings
 
     if (username or "") != settings.admin_username:
         return False
-    await set_meta(db, KEY_ADMIN_PASSWORD_CHANGED_AT)
+    try:
+        await set_meta(db, KEY_ADMIN_PASSWORD_CHANGED_AT)
+    except OperationalError as exc:
+        if not _is_missing_table_error(exc):
+            raise
+        # 老库还没有 app_meta 表：标记写不上是事实，但改密主流程（users 表）已成功
+        # —— 不让一个辅助标记把改密接口打成 500；如实返回 False（"标记没记上"）。
+        return False
     return True
 
 
@@ -222,12 +279,20 @@ async def setup_state(db) -> dict:
         (setup_completed_at 不存在) AND (库看起来全新)
     旧口径"(未完成) OR (初始口令未更换)"废弃：它把"人工设口令、没走改密接口"的
     在用实例永远钉成 needs_setup=True。steps_done 仍如实回报两步状态，供向导页展示。
+    缺 app_meta 表的库（老库/迁移半途）：标记面按"未知"降级 ⇒ needs_setup=False，
+    其余字段照常（两步未做、时间戳为 None）—— 第一跳 200 正常 JSON，绝不 500。
     """
-    completed_at = await get_meta(db, KEY_SETUP_COMPLETED_AT)
+    completed_at, meta_readable = await _get_meta_checked(db, KEY_SETUP_COMPLETED_AT)
     changed = await password_changed(db)
     # 短路：有完成标记 ⇒ 一定完成过引导（标记只能由 POST /setup/complete 写入），
     # 连业务表的计数查询都不必跑。
-    needs_setup = completed_at is None and await db_looks_fresh(db)
+    # 缺 app_meta 表（老库/迁移半途/首次启动前）：meta 面读不到 = 标记面"未知"，
+    # 按 _count_rows 同款"读不到 ⇒ 未知 ⇒ 可能在用"的口径降级（宁可少弹一条
+    # 横幅，也绝不误把在用系统拽进向导），第一跳照常返回 200 —— 绝不 500。
+    # 语义没有被"缺表硬编码"替换：meta 表在时（正常库），needs_setup 仍完全由
+    # (完成标记, 数据面判据) 决定，与 2026-10-08 修正后的语义逐字一致。
+    needs_setup = (completed_at is None and meta_readable
+                   and await db_looks_fresh(db))
     return {
         "needs_setup": needs_setup,
         "steps_done": {

@@ -57,6 +57,13 @@ EOF
 }
 
 # 本机全局 IPv4（排除 docker/网桥/虚拟接口），用于打印访问地址
+# ★ D7 修复：本函数在"探测不到任何 IP"时也必须返回 0。
+#   原先末尾 `printf | grep -v '^$' | sort -u` 在空输入下 grep 返回 1，
+#   配上 set -euo pipefail 会让函数返回 1 ⇒ IP_LIST="$(detect_ips)" 处脚本
+#   直接自杀（服务已就绪、收尾指引一行没打就 exit 1）。现在：
+#   ① 管道兜 `|| true`；② 函数显式 return 0；③ 调用处再兜一层 `|| IP_LIST=""`。
+#   同类排查：install.sh 内其余 `... | grep ...` 管道要么在 if/&& 条件位，
+#   要么已带 `|| true`（如 _existing_cfg / INIT_PW_LINE / IMG_TAR），无同类裸露。
 detect_ips() {
     local ips=""
     if command -v ip >/dev/null 2>&1; then
@@ -67,7 +74,8 @@ detect_ips() {
     if [ -z "$ips" ] && command -v hostname >/dev/null 2>&1; then
         ips="$(hostname -I 2>/dev/null || true)"
     fi
-    printf '%s\n' $ips | grep -v '^$' | sort -u
+    printf '%s\n' $ips | grep -v '^$' | sort -u || true
+    return 0
 }
 
 # 从已有 .env 读某变量的值（没有则给默认值）——升级/重跑时"已配置优先"
@@ -114,6 +122,7 @@ check_firewall() {
 
 # ---------- 参数解析（先于一切使用） ----------
 DATA_ROOT_ARG=""; TFTP_ROOT_ARG=""; PORT_ARG=""; IMAGE_ARG=""; CNAME_ARG=""
+PORT_GIVEN=0
 INSTALL_DIR="/opt/opstk"; UPGRADE=0; NO_START=0; OPEN_FIREWALL=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -121,8 +130,8 @@ while [ $# -gt 0 ]; do
         --data-root=*)   DATA_ROOT_ARG="${1#*=}"; shift   ;;
         --tftp-root)     TFTP_ROOT_ARG="${2:-}";  shift 2 ;;
         --tftp-root=*)   TFTP_ROOT_ARG="${1#*=}"; shift   ;;
-        --port)          PORT_ARG="${2:-}";       shift 2 ;;
-        --port=*)        PORT_ARG="${1#*=}";      shift   ;;
+        --port)          PORT_ARG="${2:-}"; PORT_GIVEN=1; shift 2 ;;
+        --port=*)        PORT_ARG="${1#*=}"; PORT_GIVEN=1; shift   ;;
         --image)         IMAGE_ARG="${2:-}";      shift 2 ;;
         --image=*)       IMAGE_ARG="${1#*=}";     shift   ;;
         --install-dir)   INSTALL_DIR="${2:-}";    shift 2 ;;
@@ -136,8 +145,22 @@ while [ $# -gt 0 ]; do
         *)               install_die "未知参数：$1（用 -h 看用法）" ;;
     esac
 done
+# 端口校验：必须 1~65535 的数字（0、65536+、非数字、显式空值都拒绝）
+# （审计顺手项：原先只查了"是数字"，0 与 65536 这类越界值会一路写进 .env 才炸）
+if [ "${PORT_GIVEN:-0}" = "1" ] && [ -z "$PORT_ARG" ]; then
+    install_die "--port 需要一个端口号（1~65535），收到空值"
+fi
 if [ -n "$PORT_ARG" ] && ! printf '%s' "$PORT_ARG" | grep -qE '^[0-9]+$'; then
     install_die "--port 必须是数字，收到：$PORT_ARG"
+fi
+if [ -n "$PORT_ARG" ]; then
+    if [ "${#PORT_ARG}" -gt 5 ]; then   # 先卡长度，避免超长数字串进算术运算炸出难懂报错
+        install_die "--port 必须在 1~65535 之间，收到：$PORT_ARG（超出范围）"
+    fi
+    _port_num=$((10#$PORT_ARG))
+    if [ "$_port_num" -lt 1 ] || [ "$_port_num" -gt 65535 ]; then
+        install_die "--port 必须在 1~65535 之间，收到：$PORT_ARG（0 和 65536+ 都不是合法端口）"
+    fi
 fi
 if [ ! -d "$(dirname "$INSTALL_DIR")" ]; then
     install_die "--install-dir 的父目录不存在：$(dirname "$INSTALL_DIR")"
@@ -433,7 +456,8 @@ if [ "$OPEN_FIREWALL" = "1" ] && [ -n "$FIREWALL_TOOL" ]; then
 fi
 
 # ---------- 8. 收尾：告诉小白下一步干什么 ----------
-IP_LIST="$(detect_ips)"
+# ★ D7 修复：调用处兜底 —— detect_ips 已保证返回 0，这里再兜一层，双保险。
+IP_LIST="$(detect_ips)" || IP_LIST=""
 if [ -f "$BUNDLE/doctor.sh" ]; then DOCTOR_PATH="$BUNDLE/doctor.sh"; else DOCTOR_PATH="$BUNDLE/packaging/doctor.sh"; fi
 UPGRADE_SUFFIX=""
 [ "$UPGRADE" = "1" ] && UPGRADE_SUFFIX="（升级）"
@@ -444,11 +468,19 @@ say "${C_B}==============================================================${C_N}"
 say ""
 if [ "$NO_START" = "1" ]; then
     say "  （--no-start：未启动。手动启动命令见下方「以后手动启动」。）"
-else
+    if [ -z "$IP_LIST" ]; then
+        say "  未自动探测到本机 IP —— 启动后想从别的机器访问，先在目标机执行：hostname -I"
+    fi
+elif [ -n "$IP_LIST" ]; then
     say "  用浏览器打开："
     for ip in $IP_LIST; do
         say "    ${C_G}http://${ip}:${PORT}${C_N}"
     done
+else
+    # ★ D7 修复②：探不到 IP 时给小白一句能懂的话，而不是什么都不说
+    say "  未自动探测到本机 IP（可能：无全局 IPv4 / 缺 ip 命令 / 网卡全是网桥/虚拟网卡）。"
+    say "  请在目标机执行：  hostname -I    （输出里第一个地址一般就是本机 IP）"
+    say "  然后用浏览器打开：  ${C_G}http://<本机IP>:${PORT}${C_N}"
 fi
 if [ -n "$FIREWALL_TOOL" ]; then
     say ""
