@@ -306,6 +306,10 @@ def appstream_warning(os_type, mirror, extra_repos) -> str:
     key = (e.key if e else str(os_type or "").strip().lower())
     if key not in _APPSTREAM_SPLIT_TYPES:
         return ""
+    # 空 mirror 且没有任何额外仓库 = **还没配置安装源**（模板新建/Ubuntu 形态）⇒ 此时无可奉告：
+    #   既不产生噪音警告，也不去探测任何东西（这里是"尚未配置"，不是"配错了"）。
+    if not str(mirror or "").strip() and not (extra_repos or []):
+        return ""
     urls = [str(mirror or "")]
     for r in (extra_repos or []):
         if isinstance(r, dict):
@@ -318,6 +322,54 @@ def appstream_warning(os_type, mirror, extra_repos) -> str:
     return ("仓库集合里没有 AppStream：本系统的 `wget` 与 `vim`（由 vim-enhanced 提供）都只存在于 "
             "AppStream，`%packages --ignoremissing` 会**静默跳过**它们（不报错、只是少装）。"
             "请在「额外仓库」里补上 AppStream（例如 http://<服务端>/…/AppStream/）后重新部署。")
+
+
+def appstream_sibling_url(mirror) -> str:
+    """从 `…/BaseOS[ /]` 形态的安装源推出**同级** AppStream URL；其它形态一律返回空串。
+
+    依据（2026-10-09 实测矩阵，RUNBOOK §5.83.62）：RHEL 8+ 及其克隆的介质/镜像站都把
+    `BaseOS/` 与 `AppStream/` 放在**同一层**（本地已发布树与远端镜像都成立）。
+    这里只在"路径明确以 /BaseOS 结尾"时才推同级，**不做别的猜测**
+    （树根形态已由 `_detect_rhel_media` 自动识别成 AppStream+BaseOS，不走这条）。
+    """
+    m = str(mirror or "").strip().rstrip("/")
+    if "/BaseOS" not in m:
+        return ""
+    # 两种真实形态都要覆盖（RHEL 8+ 及其克隆的介质与镜像站通用约定）：
+    #   ① `…/BaseOS`（仓库根，常见于自建发布树）
+    #   ② `…/BaseOS/x86_64/os`（**官方镜像站的标准嵌套**，如 rocky/9/BaseOS/x86_64/os/）
+    # ⇒ 把路径里的 `/BaseOS` 这一段整体换成 `/AppStream`，其余保持不变。
+    head, _, tail = m.partition("/BaseOS")
+    if tail and not tail.startswith("/"):
+        return ""
+    return head + "/AppStream" + tail + "/"
+
+
+def complete_appstream(os_type, mirror, extra_repos, exists):
+    """方案 B：RHEL 系缺 AppStream 时，**确认兄弟仓库存在**才自动补进 extra_repos。
+
+    :param exists: 形如 ``exists(url) -> bool`` 的存在性探针，由调用方注入
+        （本地已发布路径用 stat、远端镜像用短超时 HTTP 探测；单测里注入假探针）。
+    :returns: ``(新的 extra_repos, 补进去的 URL)``；未补时第二项为空串。
+
+    设计要点（来自 §5.83.62 的矩阵与教训）：
+      · **绝不凭约定猜** —— 给一个不存在的 repo 可能让装机硬失败，所以必须先"确认存在"；
+      · 探测抛异常/超时一律**降级为不补**（保留警示 A），不让探测本身成为新的失败面；
+      · 已经有 AppStream（本地识别或用户自配）时**一次探针都不发**（省时且无副作用）。
+    """
+    if not appstream_warning(os_type, mirror, extra_repos):
+        return extra_repos, ""
+    sib = appstream_sibling_url(mirror)
+    if not sib:
+        return extra_repos, ""
+    try:
+        if not exists(sib):
+            return extra_repos, ""
+    except Exception:
+        return extra_repos, ""
+    extra = list(extra_repos or [])
+    extra.append({"name": "AppStream", "url": sib})
+    return extra, sib
 
 
 # Ubuntu ISO 文件名里 OS 类型的关键字（用于自动挑选镜像）。

@@ -28,6 +28,7 @@ from app.it.pxe.generator import (
     LVM_SIZE_WARNING,
     PxeConfig,
     appstream_warning,
+    complete_appstream,
     generate_all,
     is_rhel_family,
     pick_iso,
@@ -590,11 +591,43 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession,
         cfg.warn_serve_binding = _bind_warn
         if out_warnings is not None:
             out_warnings.append(_bind_warn)
+    # ★ 方案 B（2026-10-09，RUNBOOK §5.83.62）：RHEL 系缺 AppStream 时，**确认兄弟仓库存在**才自动补。
+    #   为什么必须"确认"：给一个不存在的 repo 可能让装机硬失败 —— 宁可只警示（A），不可猜。
+    #   探测顺序：① 本地已发布路径直接 stat（快、无网络）；② 其余（远端镜像）短超时 HTTP 探测 repomd.xml。
+    #   探测失败/超时一律降级为"不补"（保留警示），探测本身不得成为新的失败面。
+    def _appstream_exists(url: str) -> bool:
+        _lp = ""
+        try:
+            _lp = _local_served_path(url) or ""
+        except Exception:
+            _lp = ""
+        # ★ 只有**真的存在 repodata** 才算本地命中；否则继续走 HTTP ——
+        #   2026-10-09 实测教训：`_local_served_path` 对"非本站发布前缀"的 URL 也会给出一个映射，
+        #   若就此返回 False，远端镜像那条分支（方案 B 的核心场景）就永远不会被走到。
+        if _lp and os.path.isdir(os.path.join(_lp, "repodata")):
+            return True
+        _u = str(url or "").rstrip("/") + "/repodata/repomd.xml"
+        try:
+            import urllib.request as _ureq
+            _req = _ureq.Request(_u, method="HEAD")
+            with _ureq.urlopen(_req, timeout=3) as _r:
+                return 200 <= int(getattr(_r, "status", 0) or 0) < 400
+        except Exception:
+            return False
+
+    _new_extra, _added_as = complete_appstream(
+        body.get("os_type") or getattr(p, "os_type", None),
+        cfg.mirror, cfg.extra_repos, _appstream_exists)
+    if _added_as:
+        cfg.extra_repos = _new_extra
+
     # ★ 2026-10-09（RUNBOOK §5.83.60）：RHEL 系若生效仓库集合里没有 AppStream，
     #   `wget` 与 `vim`（唯一 provider vim-enhanced）会被 `%packages --ignoremissing`
     #   **静默跳过**（不报错、只是少装）⇒ 与绑卡警告同样口径：生成侧不硬拒，但必须显式交付出去。
+    #   注意：必须在方案 B 的自动补齐**之后**再判断，否则刚补上的情况也会被误报。
     _as_warn = appstream_warning(
-        body.get("os_type"), cfg.mirror, cfg.extra_repos)
+        body.get("os_type") or getattr(p, "os_type", None),
+        cfg.mirror, cfg.extra_repos)
     if _as_warn and out_warnings is not None:
         out_warnings.append(_as_warn)
     installs = list(body.get("installs", []))

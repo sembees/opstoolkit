@@ -607,7 +607,11 @@ class PxeServeBindingWarningTest(_DbCase):
             r2 = c.post("/api/it/pxe/profiles/" + pid + "/generate",
                         json={"server_ip": "192.168.199.1"})
             self.assertEqual(r2.status_code, 200, r2.text)
-            self.assertEqual(r2.json().get("warnings"), [])
+            # 绑卡没问题时**不该出现绑卡警告**（用 membership 而不是整体相等：
+            # 2026-10-09 起 RHEL 系还可能带一条"仓库集合里没有 AppStream"的静默少装警告，
+            # 本用例的 mirror 形如 …/BaseOS/x86_64/os/ ⇒ 那条警告是**预期内**的正确行为）。
+            self.assertFalse([w for w in (r2.json().get("warnings") or []) if "绑卡" in w],
+                             r2.json().get("warnings"))
             self.assertNotIn("【服务端绑卡警告】", r2.json()["files"]["README.txt"])
 
 
