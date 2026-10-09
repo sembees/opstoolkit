@@ -256,16 +256,18 @@ class KickstartFamilyGenerationTest(unittest.TestCase):
 
 
 class UnsupportedFamilyTest(unittest.TestCase):
-    """debian/openSUSE：只支持识别 + 提取引导介质，生成配置时明确拒绝（不硬凑）。"""
+    """openSUSE 仍不支持自动装机：只支持识别 + 提取引导介质，生成时明确拒绝（不硬凑假应答文件）。
+    Debian 自 2026-10-09 起已支持 preseed 自动装机（见 test_pxe_debian_preseed.py）。
+    """
 
-    def test_debian_generate_rejected_with_clear_message(self):
-        with self.assertRaises(ValueError) as cm:
-            generate_all(_ks(os_type="debian", os_version="12.5"))
-        msg = str(cm.exception)
-        self.assertIn("暂不支持", msg)
-        self.assertIn("Debian", msg)
-        self.assertIn("提取引导介质", msg)
-
+    def test_debian_now_generates_preseed(self):
+        """★ 2026-10-09：Debian 已实现 preseed 自动装机（generator._debian_preseed）——
+        本用例由原先的「必须被明确拒绝」改为正向断言；仍不支持的家族见 openSUSE 那条。
+        """
+        files = generate_all(_ks(os_type="debian", os_version="12.5"))
+        self.assertIn("preseed.cfg", files, "debian 现在应产出 preseed.cfg")
+        self.assertNotIn("ks.cfg", files)
+        self.assertNotIn("user-data", files)
     def test_opensuse_generate_rejected_with_clear_message(self):
         with self.assertRaises(ValueError) as cm:
             generate_all(_ks(os_type="opensuse", os_version="15.6"))
@@ -275,13 +277,12 @@ class UnsupportedFamilyTest(unittest.TestCase):
         self.assertIn("AutoYaST", msg)
 
     def test_rejection_happens_before_any_answer_file_is_written(self):
-        """拒绝必须发生在生成任何应答文件之前（不能产出一半的 ks/boot.ipxe）。"""
+        """拒绝必须发生在写任何应答文件之前（改用仍不支持的 openSUSE 守这条性质）。"""
         from app.it.pxe.generator import _ipxe_menu
         with self.assertRaises(ValueError):
-            _ipxe_menu(_ks(os_type="debian", os_version="12.5"))
+            _ipxe_menu(_ks(os_type="opensuse", os_version="15.6"))
         with self.assertRaises(ValueError):
-            generate_all(_ks(os_type="debian", os_version="12.5"))
-
+            generate_all(_ks(os_type="opensuse", os_version="15.6"))
     def test_unsupported_can_still_be_detected_and_extracted(self):
         """不支持自动安装 ≠ 不能识别/提取：debian/openSUSE 仍过识别与提取白名单。"""
         # detect 取文件名里第一个数字段（12.5.0 是 Debian 官方命名的真实形状）

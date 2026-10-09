@@ -203,7 +203,7 @@ _OS = (
     ),
     # ── 只识别 + 提取，暂不支持自动安装（生成配置时明确拒绝）────────────
     OsCatalogEntry(
-        key="debian", display="Debian", installer=PRESEED, auto_install=False,
+        key="debian", display="Debian", installer=PRESEED, auto_install=True,  # ★ 2026-10-09：preseed 家族已实现（generator._debian_preseed）；verified 待真机装机通过后再翻
         filename_keywords=("debian",), label_keywords=("debian",),
         kernel_dirs=("install.amd", "install", "install.386"),
         kernel_names=("vmlinuz", "linux"), initrd_names=("initrd.gz", "initrd.img", "initrd"),

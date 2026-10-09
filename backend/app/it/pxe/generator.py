@@ -1940,6 +1940,139 @@ def _ubuntu_user_data(c):
     return "\n".join(lines) + "\n"
 
 
+# ===== Debian preseed (debian-installer) =====
+def _debian_preseed(c):
+    """生成 Debian（d-i）preseed.cfg。
+
+    指令来源（**每条都取自官方 example-preseed，见 mimo/ref/debian-example-preseed.txt**）：
+      · 本地化/时钟：debian-installer/locale、keyboard-configuration/xkb-keymap、time/zone、clock-setup/utc
+      · 静态网络：netcfg/choose_interface、netcfg/disable_autoconfig、netcfg/get_ipaddress、
+        netcfg/get_netmask、netcfg/get_gateway、netcfg/get_nameservers、netcfg/confirm_static、
+        netcfg/get_hostname、netcfg/get_domain
+      · 包源：mirror/country、mirror/protocol、mirror/http/hostname、mirror/http/directory、mirror/http/proxy
+      · 账户：passwd/root-login、passwd/make-user、passwd/user-fullname、passwd/username、
+        passwd/user-password-crypted、passwd/user-default-groups
+      · 分区：partman-auto/method、partman-auto/disk、partman-auto/choose_recipe、partman-lvm/device_remove_lvm、
+        partman-md/device_remove_md、partman-lvm/confirm、partman/choose_partition、partman/confirm、
+        partman/confirm_write_new_label
+      · 引导：grub-installer/only_debian、grub-installer/bootdev
+      · 软件：tasksel/first、pkgsel/include、pkgsel/upgrade、popularity-contest/participate
+      · 收尾：finish-install/reboot_in_progress、preseed/late_command
+
+    与其它两个家族（Ubuntu user-data / RHEL ks.cfg）保持同一套语义：
+    静态 IP、ops 用户 + SSH 公钥、sudo 免密、装完回调（c.done_url，走 late_command）。
+    口令一律落 **crypted**（_hash_pw），生成物里不出现明文。
+    """
+    nc = c.net_config or {}
+    iface = (nc.get("interface") or "ens18").strip()
+    ip = (nc.get("ip") or "").split("/")[0].strip()
+    mask = (nc.get("netmask") or "255.255.255.0").strip()
+    gw = (nc.get("gateway") or "").strip()
+    dns = nc.get("dns") or ([nc.get("dns_server")] if nc.get("dns_server") else [])
+    dns_s = " ".join([str(d).strip() for d in dns if str(d or "").strip()])
+    admin = (c.admin_user or "ops").strip()
+    # 本地包源：c.mirror 形如 http://192.168.199.1:8000/pxe/serve/<token>/repo/debian-13.7.0/
+    _m = str(c.mirror or "")
+    _mm = re.match(r"^(https?)://([^/]+)(/.*)?$", _m)
+    m_proto = _mm.group(1) if _mm else "http"
+    m_host = _mm.group(2) if _mm else str(c.server_ip or "")
+    m_dir = (_mm.group(3) or "/") if _mm else "/"
+    # 磁盘：disk_config 里的盘名优先
+    disk = str((c.disk_config or {}).get("disk") or "sda").strip()
+    if not disk.startswith("/dev/"):
+        disk = "/dev/" + disk
+    # 软件包：SSH 公钥配了就必须装 openssh-server（与 Ubuntu 家族同一条理由）
+    pkgs = list(c.extra_packages or [])
+    if c.ssh_keys and "openssh-server" not in pkgs:
+        pkgs.append("openssh-server")
+    if "sudo" not in pkgs:
+        pkgs.append("sudo")
+    L = []
+    L.append("#_preseed_V1")
+    L.append("# 由 OpsToolkit 生成（Debian d-i preseed）")
+    L.append("")
+    L.append("### 本地化与时钟")
+    L.append("d-i debian-installer/locale string " + (c.locale or "en_US.UTF-8"))
+    L.append("d-i keyboard-configuration/xkb-keymap select " + (c.keyboard or "us"))
+    L.append("d-i time/zone string " + (c.timezone or "Asia/Shanghai"))
+    L.append("d-i clock-setup/utc boolean true")
+    L.append("")
+    L.append("### 网络（静态；iPXE 侧必须同时给 interface=" + iface + "）")
+    L.append("d-i netcfg/choose_interface select " + iface)
+    L.append("d-i netcfg/disable_autoconfig boolean true")
+    if ip:
+        L.append("d-i netcfg/get_ipaddress string " + ip)
+    L.append("d-i netcfg/get_netmask string " + mask)
+    if gw:
+        L.append("d-i netcfg/get_gateway string " + gw)
+    if dns_s:
+        L.append("d-i netcfg/get_nameservers string " + dns_s)
+    L.append("d-i netcfg/confirm_static boolean true")
+    L.append("d-i netcfg/get_hostname string " + (c.hostname or "debian"))
+    L.append("d-i netcfg/get_domain string localdomain")
+    L.append("")
+    L.append("### 包源（本地 HTTP 仓库，离线装机用）")
+    L.append("d-i mirror/country string manual")
+    L.append("d-i mirror/protocol string " + m_proto)
+    L.append("d-i mirror/http/hostname string " + m_host)
+    L.append("d-i mirror/http/directory string " + m_dir)
+    L.append("d-i mirror/http/proxy string")
+    L.append("")
+    L.append("### 账户")
+    L.append("d-i passwd/root-login boolean " + ("true" if c.allow_root else "false"))
+    L.append("d-i passwd/make-user boolean true")
+    L.append("d-i passwd/user-fullname string " + admin)
+    L.append("d-i passwd/username string " + admin)
+    L.append("d-i passwd/user-password-crypted password " + _hash_pw(c.admin_password))
+    L.append("d-i passwd/user-default-groups string audio cdrom video sudo")
+    L.append("")
+    L.append("### 分区")
+    if (c.disk_scheme or "direct") == "lvm":
+        L.append("d-i partman-auto/method string lvm")
+        L.append("d-i partman-lvm/device_remove_lvm boolean true")
+        L.append("d-i partman-lvm/confirm boolean true")
+        L.append("d-i partman-lvm/confirm_nooverwrite boolean true")
+    else:
+        L.append("d-i partman-auto/method string regular")
+    L.append("d-i partman-md/device_remove_md boolean true")
+    L.append("d-i partman-auto/disk string " + disk)
+    L.append("d-i partman-auto/choose_recipe select atomic")
+    L.append("d-i partman/choose_partition select finish")
+    L.append("d-i partman/confirm boolean true")
+    L.append("d-i partman/confirm_nooverwrite boolean true")
+    L.append("")
+    L.append("### 引导")
+    L.append("d-i grub-installer/only_debian boolean true")
+    L.append("d-i grub-installer/bootdev string " + disk)
+    L.append("")
+    L.append("### 软件选择")
+    L.append("tasksel tasksel/first multiselect standard, ssh-server")
+    L.append("d-i pkgsel/include string " + " ".join(pkgs))
+    L.append("d-i pkgsel/upgrade select none")
+    L.append("popularity-contest popularity-contest/participate boolean false")
+    L.append("")
+    L.append("### 收尾")
+    L.append("d-i finish-install/reboot_in_progress note")
+    _late = []
+    # SSH 公钥 + sudo 免密：只在 target 里落文件（d-i 没有 authorized_keys 指令）
+    _keys = [k.strip() for k in (c.ssh_keys or []) if str(k or "").strip()]
+    if _keys:
+        _mk = "mkdir -p /target/home/" + admin + "/.ssh && chmod 700 /target/home/" + admin + "/.ssh"
+        _wr = ("printf '%s\\n' " + " ".join([shlex.quote(k) for k in _keys])
+               + " >> /target/home/" + admin + "/.ssh/authorized_keys"
+               + " && chmod 600 /target/home/" + admin + "/.ssh/authorized_keys"
+               + " && chown -R 1000:1000 /target/home/" + admin + "/.ssh")
+        _late.append(_mk + " && " + _wr)
+    if c.sudo_nopasswd:
+        _late.append("echo " + shlex.quote(admin + " ALL=(ALL) NOPASSWD:ALL")
+                     + " > /target/etc/sudoers.d/90-opstk-" + admin
+                     + " && chmod 440 /target/etc/sudoers.d/90-opstk-" + admin)
+    _done = _safe_done_url(c.done_url)
+    if _done:
+        _late.append("curl -s -m 10 -X POST " + chr(34) + _done + chr(34) + " >/dev/null 2>&1 || true")
+    if _late:
+        L.append("d-i preseed/late_command string " + "; ".join(_late))
+    return "\n".join(L) + "\n"
 # ===== RHEL Kickstart =====
 def _rhel_ks(c):
     dc = c.disk_config or {}
@@ -2305,6 +2438,18 @@ def _ipxe_menu(c, mac="", answer_url=""):
             cmdline += " " + kernel_console
         L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")",
              "kernel " + kernel + " root=/dev/ram0 initrd=" + initrd_name + " " + cmdline,
+             "initrd " + initrd, "boot"]
+    elif entry.key == "debian":
+        # ★ Debian（d-i）：preseed 用 url= 取；静态网络靠 preseed 内的 netcfg/* 加这里的 interface=
+        #   auto=true priority=critical 是无人值守的标准组合（见官方 example-preseed 顶部说明）
+        answer = _safe_line(answer_url, "answer_url") or (answer_base + "/preseed.cfg")
+        _iface = ((c.net_config or {}).get("interface") or "ens18").strip()
+        cmdline = ("auto=true priority=critical interface=" + _iface
+                   + " netcfg/disable_autoconfig=true url=" + answer)
+        if kernel_console:
+            cmdline += " " + kernel_console
+        L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")",
+             "kernel " + kernel + " initrd=" + initrd_name + " " + cmdline,
              "initrd " + initrd, "boot"]
     else:
         # D17：RHEL 装机必须有可用的安装源。本机**从不**发布 ISO 仓库树
@@ -2687,6 +2832,9 @@ def generate_all(c, installs=None):
     if entry.key == "ubuntu":
         files["user-data"] = _ubuntu_user_data(c)
         files["meta-data"] = "local-hostname: " + _safe_hostname(c.hostname) + "\n"
+    elif entry.key == "debian":
+        # ★ Debian（d-i preseed）：与 Ubuntu/RHEL 同级的第四家族
+        files["preseed.cfg"] = _debian_preseed(c)
     else:
         files["ks.cfg"] = _rhel_ks(c)
     # 默认菜单（= dnsmasq 里 tag:fw-menu-def 指向的那份扁平 boot.ipxe）取什么内容：
