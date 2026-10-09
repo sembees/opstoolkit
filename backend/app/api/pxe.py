@@ -27,6 +27,7 @@ from app.it.pxe.generator import (
     DEFAULT_KERNEL_CONSOLE,
     LVM_SIZE_WARNING,
     PxeConfig,
+    appstream_warning,
     generate_all,
     is_rhel_family,
     pick_iso,
@@ -589,6 +590,13 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession,
         cfg.warn_serve_binding = _bind_warn
         if out_warnings is not None:
             out_warnings.append(_bind_warn)
+    # ★ 2026-10-09（RUNBOOK §5.83.60）：RHEL 系若生效仓库集合里没有 AppStream，
+    #   `wget` 与 `vim`（唯一 provider vim-enhanced）会被 `%packages --ignoremissing`
+    #   **静默跳过**（不报错、只是少装）⇒ 与绑卡警告同样口径：生成侧不硬拒，但必须显式交付出去。
+    _as_warn = appstream_warning(
+        body.get("os_type"), cfg.mirror, cfg.extra_repos)
+    if _as_warn and out_warnings is not None:
+        out_warnings.append(_as_warn)
     installs = list(body.get("installs", []))
     # ★ 装完防重复抹盘（2026-10-08 真机实证）：装机记录的 id / status 以**库里**为准。
     # 为什么显式传入 installs 也必须过这一步 —— 前端的 PxeInstallItem 只有

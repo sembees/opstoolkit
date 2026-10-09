@@ -283,6 +283,43 @@ def is_rhel_family(os_type) -> bool:
     return os_catalog.is_kickstart(os_type)
 
 
+# ── AppStream 缺失护栏（2026-10-09 核查结论，见 RUNBOOK §5.83.60）───────────────
+# BaseOS/AppStream 的拆分**只**对 RHEL 8+ 及其克隆成立：
+#   · openEuler 24.03 是单仓库（实测 repodata 里没有 AppStream）——不适用，避免误报；
+#   · 库里那份 CentOS 7 也是单仓库（没有 AppStream）——同样排除；CentOS Stream 8+ 的
+#     版本判定本函数暂不覆盖（如实记在注释里，不猜）。
+_APPSTREAM_SPLIT_TYPES = ("rhel", "rocky", "almalinux", "oraclelinux")
+
+
+def appstream_warning(os_type, mirror, extra_repos) -> str:
+    """RHEL 系：生效仓库集合里找不到 AppStream 时给出警告，否则 vim / wget 会被**静默跳过**。
+
+    证据（2026-10-09 核查；取 repomd.xml 声明的 primary，XML 与 sqlite 两条独立路径均过 sha256 校验）：
+      · ``wget`` 只存在于 AppStream；
+      · ``vim`` 不是真包名，其**唯一** provider ``vim-enhanced`` 也只在 AppStream；
+      · 两者都没有被依赖反拉 ⇒ ``%packages --ignoremissing`` 会**安静地少装**，装机不报错；
+      · 对比：同属 AppStream 的 ``authconfig`` 当年因有依赖反拉而硬失败，所以那次能发现。
+    所以"漏配 AppStream"必须显式提示 —— 本函数只产出提示文本，**不改变生成内容**
+    （是否补仓库由使用者决定；自动补齐见 RUNBOOK §5.83.60 的方案 B，需更多介质布局验证）。
+    """
+    e = os_catalog.entry(os_type)
+    key = (e.key if e else str(os_type or "").strip().lower())
+    if key not in _APPSTREAM_SPLIT_TYPES:
+        return ""
+    urls = [str(mirror or "")]
+    for r in (extra_repos or []):
+        if isinstance(r, dict):
+            urls.append(str(r.get("url") or ""))
+            urls.append(str(r.get("name") or ""))
+        else:
+            urls.append(str(r or ""))
+    if any("appstream" in u.lower() for u in urls):
+        return ""
+    return ("仓库集合里没有 AppStream：本系统的 `wget` 与 `vim`（由 vim-enhanced 提供）都只存在于 "
+            "AppStream，`%packages --ignoremissing` 会**静默跳过**它们（不报错、只是少装）。"
+            "请在「额外仓库」里补上 AppStream（例如 http://<服务端>/…/AppStream/）后重新部署。")
+
+
 # Ubuntu ISO 文件名里 OS 类型的关键字（用于自动挑选镜像）。
 # 旧实现是一张手抄的两键表（"ubuntu" / "rhel 家族联合"）；现在派生自 os_catalog：
 # 每个系统用自己的文件名关键字，只有 rhel 保留"家族联合关键字"的伞语义
