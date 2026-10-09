@@ -606,11 +606,14 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession,
         #   若就此返回 False，远端镜像那条分支（方案 B 的核心场景）就永远不会被走到。
         if _lp and os.path.isdir(os.path.join(_lp, "repodata")):
             return True
+        # ② 远端探测：HEAD repomd.xml，任何异常/超时都算"探不到"（降级为只警示）。
+        #    超时 3→5 秒（2026-10-09 调整）：3 秒在慢镜像站上偏紧、会退化成"只警示不补"；
+        #    再大则拖慢部署响应（该探测只在 RHEL 系缺 AppStream 时发生一次，失败即放弃）。
         _u = str(url or "").rstrip("/") + "/repodata/repomd.xml"
         try:
             import urllib.request as _ureq
             _req = _ureq.Request(_u, method="HEAD")
-            with _ureq.urlopen(_req, timeout=3) as _r:
+            with _ureq.urlopen(_req, timeout=5) as _r:
                 return 200 <= int(getattr(_r, "status", 0) or 0) < 400
         except Exception:
             return False
