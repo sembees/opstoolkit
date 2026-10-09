@@ -2444,8 +2444,11 @@ def _ipxe_menu(c, mac="", answer_url=""):
         #   auto=true priority=critical 是无人值守的标准组合（见官方 example-preseed 顶部说明）
         answer = _safe_line(answer_url, "answer_url") or (answer_base + "/preseed.cfg")
         _iface = ((c.net_config or {}).get("interface") or "ens18").strip()
+        # ★ 2026-10-09 真机实证：preseed 的 URL 必须用 **preseed/url=**；
+        #   先前写成 url= 被 d-i 当成"安装介质(ISO)位置" -> 挂载失败 -> 停在
+        #   "Retry mounting installation media?" 提问上（无人应答 => 装机不动）。
         cmdline = ("auto=true priority=critical interface=" + _iface
-                   + " netcfg/disable_autoconfig=true url=" + answer)
+                   + " netcfg/disable_autoconfig=true preseed/url=" + answer)
         if kernel_console:
             cmdline += " " + kernel_console
         L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")",
@@ -2879,6 +2882,11 @@ def generate_all(c, installs=None):
             files["user-data/" + tag + "/user-data"] = _ubuntu_user_data(ic)
             files["user-data/" + tag + "/meta-data"] = "local-hostname: " + hostname + "\n"
             answer = seed
+        elif entry.key == "debian":
+            # Debian(d-i preseed)：每机应答文件与 answer_url 都必须按家族给
+            # （此前只有 ubuntu/ks 两种分支，debian 会落到 ks 的每机路径 -> d-i 取到 ks.cfg -> 装不动；2026-10-09 真机实证）
+            files["preseed/" + tag + "/preseed.cfg"] = _debian_preseed(ic)
+            answer = answer_base + "/preseed/" + tag + "/preseed.cfg"
         else:
             answer = answer_base + "/ks/" + tag + "/ks.cfg"
             files["ks/" + tag + "/ks.cfg"] = _rhel_ks(ic)

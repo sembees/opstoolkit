@@ -97,7 +97,7 @@ class TestDebianWiring:
         line = kl[0]
         assert "auto=true" in line and "priority=critical" in line
         assert "interface=ens18" in line and "netcfg/disable_autoconfig=true" in line
-        assert "url=http://192.168.199.1:8000/pxe/serve/T/preseed.cfg" in line
+        assert "preseed/url=http://192.168.199.1:8000/pxe/serve/T/preseed.cfg" in line, "必须是 preseed/url=（url= 会被 d-i 当成介质位置，真机实证 2026-10-09）"
         assert "debian/13.7.0/vmlinuz" in line and "initrd=initrd" in line
 
     def test_catalog_auto_install_enabled(self):

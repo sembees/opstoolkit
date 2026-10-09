@@ -596,7 +596,7 @@ _FLAT_DEFAULT_LOCK = threading.Lock()
 # 生成器产出的**扁平文件键**（顶层）。只有它们可能需要"把同名目录迁移成文件"；
 # 媒体（<os_type>/<version>/）与仓库树（repo/）的名字不在这里 —— 迁移代码绝不碰它们。
 _GENERATED_FLAT_FILES = frozenset(
-    {"boot.ipxe", "user-data", "meta-data", "ks.cfg", "README.txt", "dnsmasq.conf"}
+    {"boot.ipxe", "user-data", "meta-data", "ks.cfg", "preseed.cfg", "README.txt", "dnsmasq.conf"}
 )
 
 
