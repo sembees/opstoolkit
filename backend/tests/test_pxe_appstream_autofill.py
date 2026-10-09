@@ -27,6 +27,13 @@ class TestSiblingUrl:
                     "http://m/rocky/9.4/everything/", "", None):
             assert appstream_sibling_url(bad) == ""
 
+    def test_query_and_fragment_stripped(self):
+        """审计 D2：带 query/fragment 的镜像 URL 必须切掉再推导，否则 repomd.xml 会落进 query。"""
+        assert appstream_sibling_url(
+            "http://m/repo/BaseOS/?arch=x86_64") == "http://m/repo/AppStream/"
+        assert appstream_sibling_url(
+            "http://m/repo/BaseOS/#frag") == "http://m/repo/AppStream/"
+
     def test_official_mirror_nested_shape(self):
         """官方镜像站的标准嵌套形态（rocky/9/BaseOS/x86_64/os/）也要能推出同级 AppStream。
 
@@ -102,3 +109,26 @@ class TestCompleteAppstream:
         extra, added = complete_appstream("rocky", self.BASEOS, base, lambda u: True)
         assert [e["name"] for e in extra] == ["Extras", "AppStream"]
         assert [e["name"] for e in base] == ["Extras"], "不得就地改动传入列表"
+
+
+class TestNormalizeExtraRepos:
+    """审计 D1：schema 只收**字符串**形态，而发射器按 dict 取 .get ⇒ 必须归一，否则合法请求 500。"""
+
+    def test_string_form_becomes_dict(self):
+        from app.api.pxe import _normalize_extra_repos
+        out = _normalize_extra_repos(["http://m/rocky/9.4/AppStream/"])
+        assert out == [{"name": "AppStream", "url": "http://m/rocky/9.4/AppStream/"}]
+
+    def test_dict_passthrough(self):
+        from app.api.pxe import _normalize_extra_repos
+        d = {"name": "X", "url": "http://m/x/"}
+        assert _normalize_extra_repos([d]) == [d]
+
+    def test_garbage_dropped(self):
+        from app.api.pxe import _normalize_extra_repos
+        assert _normalize_extra_repos(["", "   ", None, 123, {}]) == []
+
+    def test_name_from_url_last_segment(self):
+        from app.api.pxe import _normalize_extra_repos
+        assert _normalize_extra_repos(["http://m/rocky/9/BaseOS/x86_64/os"])[0]["name"] == "os"
+        assert _normalize_extra_repos(["http://m/"])[0]["name"] == "m"

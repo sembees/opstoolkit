@@ -311,10 +311,11 @@ def appstream_warning(os_type, mirror, extra_repos) -> str:
     if not str(mirror or "").strip() and not (extra_repos or []):
         return ""
     urls = [str(mirror or "")]
+    # ★ 只看 **URL**，不看 name（2026-10-09 审计 D6）：name 恰好叫 "appstream" 但 url 指向别处时，
+    #   原先会把警示 A 与补齐 B **双双静音**，结果装出一个静默缺 wget/vim 的系统。
     for r in (extra_repos or []):
         if isinstance(r, dict):
             urls.append(str(r.get("url") or ""))
-            urls.append(str(r.get("name") or ""))
         else:
             urls.append(str(r or ""))
     if any("appstream" in u.lower() for u in urls):
@@ -327,12 +328,21 @@ def appstream_warning(os_type, mirror, extra_repos) -> str:
 def appstream_sibling_url(mirror) -> str:
     """从 `…/BaseOS[ /]` 形态的安装源推出**同级** AppStream URL；其它形态一律返回空串。
 
+    实际规则（2026-10-09 审计 D3 澄清）：只要路径里含 `/BaseOS` 段，就把该段整体换成
+    `/AppStream` 并保持其余路径不变 —— 因此 `…/BaseOS/x86_64/os` 与 `…/BaseOS/任意子路径`
+    都会推同级；是否真的采用由调用方的「确认存在」探针兜底。query/fragment 会先被切掉
+    （审计 D2：否则会推出 `…/AppStream/?q/` 这种失真 URL，探测时 repomd.xml 落进 query、
+    等于只探了裸目录，可能假阳性补进一个装不动的仓库）。
+
     依据（2026-10-09 实测矩阵，RUNBOOK §5.83.62）：RHEL 8+ 及其克隆的介质/镜像站都把
     `BaseOS/` 与 `AppStream/` 放在**同一层**（本地已发布树与远端镜像都成立）。
     这里只在"路径明确以 /BaseOS 结尾"时才推同级，**不做别的猜测**
     （树根形态已由 `_detect_rhel_media` 自动识别成 AppStream+BaseOS，不走这条）。
     """
-    m = str(mirror or "").strip().rstrip("/")
+    _raw = str(mirror or "").strip()
+    for _sep in ("?", "#"):
+        _raw = _raw.split(_sep, 1)[0]
+    m = _raw.rstrip("/")
     if "/BaseOS" not in m:
         return ""
     # 两种真实形态都要覆盖（RHEL 8+ 及其克隆的介质与镜像站通用约定）：

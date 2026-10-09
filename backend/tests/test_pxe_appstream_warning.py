@@ -50,6 +50,12 @@ class TestAppStreamWarning:
         """非 kickstart 家族（apt 系）不适用本条规则。"""
         assert appstream_warning("ubuntu", "http://s/ubuntu/22.04/", []) == ""
 
+    def test_name_only_appstream_does_not_silence(self):
+        """审计 D6：name 叫 appstream 但 url 指向别处 ⇒ **仍应警示**（原先会双双静音）。"""
+        w = appstream_warning("rocky", "http://m/repo/BaseOS/",
+                              [{"name": "appstream", "url": "http://m/other/"}])
+        assert w, "只看 name 就静音会让 wget/vim 静默缺失"
+
     def test_none_and_empty_are_safe(self):
         assert appstream_warning(None, None, None) == ""
         assert appstream_warning("", "", []) == ""

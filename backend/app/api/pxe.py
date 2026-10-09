@@ -27,6 +27,7 @@ from app.it.pxe.generator import (
     DEFAULT_KERNEL_CONSOLE,
     LVM_SIZE_WARNING,
     PxeConfig,
+    appstream_sibling_url,
     appstream_warning,
     complete_appstream,
     generate_all,
@@ -241,6 +242,28 @@ def _detect_rhel_media(mirror, server_ip):
     return repo_url, stage2, extra
 
 
+def _normalize_extra_repos(items):
+    """把 extra_repos 统一成生成器要的 `{"name","url"}` 形态。
+
+    ★ 为什么必须归一（2026-10-09 审计 D1 实证）：schema 只接受**字符串**
+      （schemas.py「extra_repos[i] 必须是字符串」），而 ks/iPXE 发射器按 **dict** 取
+      `.get("name")/.get("url")`（generator.py 两处）—— 字符串是 truthy，`str.get` 不存在，
+      于是 **schema 合法**的请求会在生成时抛 AttributeError → HTTP 500。
+    字符串形态的 name 取 URL 末段（如 …/AppStream/ → AppStream），保证过 `_safe_ident`。
+    """
+    out = []
+    for i, r in enumerate(items or []):
+        if isinstance(r, dict):
+            # 空/缺 url 的 dict 不带走：它们在发射器里会拼出空 baseurl（更坏的是可能直接抛错）
+            if str(r.get("url") or "").strip():
+                out.append(r)
+        elif isinstance(r, str) and r.strip():
+            u = r.strip()
+            slug = u.rstrip("/").rsplit("/", 1)[-1] or ("extra%d" % i)
+            out.append({"name": slug, "url": u})
+    return out
+
+
 def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
                   kernel_path="", initrd_path="", squashfs_path="",
                   deploy_mode="standalone", iso_url="", kernel_console="",
@@ -253,7 +276,7 @@ def _to_pxeconfig(p: models.PxeProfile, server_ip="", http_root="",
     if stage2:
         _stage2 = stage2
     if extra_repos:
-        _extra = extra_repos
+        _extra = _normalize_extra_repos(extra_repos)
     return PxeConfig(
         # 归一化：库里可能存在历史写入的大小写/空白差异，而分支判断与介质路径都依赖它
         os_type=(p.os_type or "ubuntu").strip().lower(), os_version=p.os_version,
@@ -618,9 +641,17 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession,
         except Exception:
             return False
 
+    # ★ D5（2026-10-09 审计实证）：探测是**同步网络 IO**，直接在 async 路由里调用会阻塞整个
+    #   事件循环 —— 同一循环还挂着 /pxe/serve 静态服务，装机客户端正靠它取 ks/仓库文件；
+    #   本项目在 deploy_files/上传处已用 asyncio.to_thread 处理同类问题，这里同样如此：
+    #   先判断"是否真的需要探"，需要才**丢到线程**探一次，再把结果当常量探针交给纯函数。
+    _os_as = body.get("os_type") or getattr(p, "os_type", None)
+    _sib_rel = appstream_sibling_url(cfg.mirror)
+    _sib_ok = False
+    if _sib_rel and appstream_warning(_os_as, cfg.mirror, cfg.extra_repos):
+        _sib_ok = await asyncio.to_thread(_appstream_exists, _sib_rel)
     _new_extra, _added_as = complete_appstream(
-        body.get("os_type") or getattr(p, "os_type", None),
-        cfg.mirror, cfg.extra_repos, _appstream_exists)
+        _os_as, cfg.mirror, cfg.extra_repos, lambda _u: _sib_ok)
     if _added_as:
         cfg.extra_repos = _new_extra
 
@@ -631,8 +662,14 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession,
     _as_warn = appstream_warning(
         body.get("os_type") or getattr(p, "os_type", None),
         cfg.mirror, cfg.extra_repos)
-    if _as_warn and out_warnings is not None:
-        out_warnings.append(_as_warn)
+    if _as_warn:
+        if out_warnings is not None:
+            out_warnings.append(_as_warn)
+        else:
+            # ★ D4（2026-10-09 审计实证）：部署路径原先不接 warnings ⇒「探测失败只警示」这条
+            #   安全网在主路径上等于失效（装出来的系统会静默缺 wget/vim）。这里至少写日志。
+            #   更完整的做法是把 warnings 一路带回 deploy 响应（留待后续）。
+            logging.getLogger(__name__).warning("PXE AppStream 缺失警告（部署路径）: %s", _as_warn)
     installs = list(body.get("installs", []))
     # ★ 装完防重复抹盘（2026-10-08 真机实证）：装机记录的 id / status 以**库里**为准。
     # 为什么显式传入 installs 也必须过这一步 —— 前端的 PxeInstallItem 只有
