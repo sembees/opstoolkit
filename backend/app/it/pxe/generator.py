@@ -2477,7 +2477,11 @@ def _ipxe_menu(c, mac="", answer_url=""):
         #   实测退步 —— api 侧 _iso_url_for 会挑中 **netinst**（而非 DVD），于是介质又变成
         #   "需要外网镜像"的光盘版，装机反而取不到 preseed。已回退，保留 preseed/url= 与内核网络参数。
         #   候选（未实施）：让介质显式选 DVD/everything，或给本地仓库补 Release/InRelease 索引。
-        _iso = ""  # noqa: F841  （保留变量名，便于将来按 profile 显式指定 DVD）
+        # 【2026-10-10 二次实证后回退】Debian d-i 的 `url=` **不是** Ubuntu/casper 那种
+        #   "ISO 介质"语义：带上它之后装机连 preseed 都不取（两次真机都如此，10 分钟 0 请求）。
+        #   走得最远的是**不带 url=** 的配置（已取到 preseed、进到镜像校验，只差 Release.gpg）。
+        #   保留变量名占位，将来若要试"ISO 当介质"应显式验证 d-i 是否支持该参数。
+        _iso = ""  # noqa: F841
         if kernel_console:
             cmdline += " " + kernel_console
         L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")",

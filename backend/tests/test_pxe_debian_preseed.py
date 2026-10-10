@@ -103,8 +103,8 @@ class TestDebianWiring:
         assert "netcfg/get_gateway=192.168.199.1" in line
         assert "netcfg/get_nameservers=192.168.199.1" in line
         assert "netcfg/confirm_static=true" in line
-        # 已回退 url=<ISO>：内核行**不得**再出现 ` url=`（只允许 preseed/url=）
-        assert " url=" not in line, "不得出现裸 url=（api 会挑中 netinst，真机实证退步）"
+        # 不带裸 url=（真机两次实证：带了它连 preseed 都不取）；只允许 preseed/url=
+        assert " url=" not in line
         assert "preseed/url=http://" in line
         assert "preseed/url=http://192.168.199.1:8000/pxe/serve/T/preseed.cfg" in line, "必须是 preseed/url=（url= 会被 d-i 当成介质位置，真机实证 2026-10-09）"
         assert "debian/13.7.0/vmlinuz" in line and "initrd=initrd" in line
