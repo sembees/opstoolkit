@@ -97,6 +97,15 @@ class TestDebianWiring:
         line = kl[0]
         assert "auto=true" in line and "priority=critical" in line
         assert "interface=ens18" in line and "netcfg/disable_autoconfig=true" in line
+        # 静态网络必须同时在内核命令行（否则 preseed 取不到 -> 网络死锁，真机实证 2026-10-09）
+        assert "netcfg/get_ipaddress=192.168.199.140" in line
+        assert "netcfg/get_netmask=255.255.255.0" in line
+        assert "netcfg/get_gateway=192.168.199.1" in line
+        assert "netcfg/get_nameservers=192.168.199.1" in line
+        assert "netcfg/confirm_static=true" in line
+        # 已回退 url=<ISO>：内核行**不得**再出现 ` url=`（只允许 preseed/url=）
+        assert " url=" not in line, "不得出现裸 url=（api 会挑中 netinst，真机实证退步）"
+        assert "preseed/url=http://" in line
         assert "preseed/url=http://192.168.199.1:8000/pxe/serve/T/preseed.cfg" in line, "必须是 preseed/url=（url= 会被 d-i 当成介质位置，真机实证 2026-10-09）"
         assert "debian/13.7.0/vmlinuz" in line and "initrd=initrd" in line
 

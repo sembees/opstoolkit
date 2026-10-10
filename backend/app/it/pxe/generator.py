@@ -2447,8 +2447,37 @@ def _ipxe_menu(c, mac="", answer_url=""):
         # ★ 2026-10-09 真机实证：preseed 的 URL 必须用 **preseed/url=**；
         #   先前写成 url= 被 d-i 当成"安装介质(ISO)位置" -> 挂载失败 -> 停在
         #   "Retry mounting installation media?" 提问上（无人应答 => 装机不动）。
+        # ★ 2026-10-09 真机实证 2：静态网络**必须同时出现在内核命令行**里。
+        #   只写在 preseed 里会死锁：preseed 本身要走网络取，而内核参数又关掉了 DHCP
+        #   => 装机器无网络 => 取不到 preseed => d-i 回头交互式问 IP/掩码/网关/DNS => 无人应答卡住。
+        #   取值与 preseed 内 netcfg/* 同源（都用 c.net_config），避免两处漂移。
+        #   多个 DNS 在内核命令行不能用空格分隔（会被拆成独立参数），这里用逗号。
+        _nc = c.net_config or {}
+        _ip = str(_nc.get("ip") or "").split("/")[0].strip()
+        _mask = str(_nc.get("netmask") or "").strip()
+        _gw = str(_nc.get("gateway") or "").strip()
+        _dns = _nc.get("dns") or ([_nc.get("dns_server")] if _nc.get("dns_server") else [])
+        _dns_s = ",".join([str(d).strip() for d in _dns if str(d or "").strip()])
         cmdline = ("auto=true priority=critical interface=" + _iface
                    + " netcfg/disable_autoconfig=true preseed/url=" + answer)
+        if _ip:
+            cmdline += " netcfg/get_ipaddress=" + _ip + " netcfg/confirm_static=true"
+        if _mask:
+            cmdline += " netcfg/get_netmask=" + _mask
+        if _gw:
+            cmdline += " netcfg/get_gateway=" + _gw
+        if _dns_s:
+            cmdline += " netcfg/get_nameservers=" + _dns_s
+        # ★ 2026-10-09 真机实证 3：把 DVD ISO 也交给 d-i 当**光盘介质**。
+        #   我们的本地 HTTP 仓库是从 DVD 拷 dists/+pool/ 得来的、**没有 Release.gpg**，
+        #   d-i 校验镜像签名时会因 Release.gpg 404 判为致命失败并停在 <Change mirror>；
+        #   而 apt 对 cdrom 源按 trusted 处理、不做该校验 => 用 ISO 当介质即可绕开。
+        #   `url=`(介质) 与 `preseed/url=`(预置) 是两个不同的键，可共存。
+        # 【2026-10-10 回退】曾尝试 `url=<ISO>`（把 ISO 当光盘介质，绕开仓库缺 Release.gpg）：
+        #   实测退步 —— api 侧 _iso_url_for 会挑中 **netinst**（而非 DVD），于是介质又变成
+        #   "需要外网镜像"的光盘版，装机反而取不到 preseed。已回退，保留 preseed/url= 与内核网络参数。
+        #   候选（未实施）：让介质显式选 DVD/everything，或给本地仓库补 Release/InRelease 索引。
+        _iso = ""  # noqa: F841  （保留变量名，便于将来按 profile 显式指定 DVD）
         if kernel_console:
             cmdline += " " + kernel_console
         L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")",
