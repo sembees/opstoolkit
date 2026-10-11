@@ -1957,10 +1957,16 @@ def _debian_preseed(c):
         partman/confirm_write_new_label
       · 引导：grub-installer/only_debian、grub-installer/bootdev
       · 软件：tasksel/first、pkgsel/include、pkgsel/upgrade、popularity-contest/participate
+      · 额外仓库：apt-setup/localN/repository、apt-setup/localN/comment、apt-setup/localN/source
+      · root 口令（allow_root 时）：passwd/root-password-crypted —— 与 RHEL rootpw / Ubuntu
+        chpasswd -e 同一条回退链（root_password 优先，其次管理员口令），一律 _hash_pw 落 crypted
       · 收尾：finish-install/reboot_in_progress、preseed/late_command
+        （c.post_script 也走 late_command：先逐行落 /target/tmp/opstk-post.sh，再
+        in-target bash 执行；顺序为 公钥/sudo → post_script → done_url 回调，与 RHEL %post 一致）
 
     与其它两个家族（Ubuntu user-data / RHEL ks.cfg）保持同一套语义：
-    静态 IP、ops 用户 + SSH 公钥、sudo 免密、装完回调（c.done_url，走 late_command）。
+    静态 IP、ops 用户 + SSH 公钥、sudo 免密、装后脚本（c.post_script）、
+    额外仓库（c.extra_repos）、装完回调（c.done_url，走 late_command）。
     口令一律落 **crypted**（_hash_pw），生成物里不出现明文。
     """
     nc = c.net_config or {}
@@ -1977,10 +1983,24 @@ def _debian_preseed(c):
     m_proto = _mm.group(1) if _mm else "http"
     m_host = _mm.group(2) if _mm else str(c.server_ip or "")
     m_dir = (_mm.group(3) or "/") if _mm else "/"
-    # 磁盘：disk_config 里的盘名优先
+    # 磁盘：disk_config 里的盘名优先。盘名会被拼进三处 shell/配置 ——
+    # partman/early_command（由 d-i 用 sh 执行）、partman-auto/disk、grub-installer/bootdev，
+    # 不做白名单时 disk="sda; <任意命令>" 会被 d-i 当 shell 执行（注入面）。
+    # 校验复用现成的 _safe_ident（[A-Za-z0-9._-] 白名单、非法 raise ValueError），不另写正则：
+    #   · 对"剥掉 /dev/ 前缀后的裸盘名"校验、再统一补前缀 —— 与要求字形
+    #     ^/dev/[A-Za-z0-9._-]+$ 等价（空白/分号/$/反引号/引号都不在白名单内）；
+    #   · 不把带前缀的整串交给 _safe_ident（"/" 不在其白名单内，会误杀
+    #     "/dev/sda" 这种本来就带前缀的合法写法 —— 即"复用破坏 /dev/ 前缀语义"的情形）；
+    #   · 空/未填沿用旧默认 sda；其余不合法一律 ValueError，明确报错、绝不静默回退。
     disk = str((c.disk_config or {}).get("disk") or "sda").strip()
-    if not disk.startswith("/dev/"):
-        disk = "/dev/" + disk
+    _disk_bare = disk[len("/dev/"):] if disk.startswith("/dev/") else disk
+    if not _safe_ident(_disk_bare, "disk_config.disk"):
+        raise ValueError(
+            "disk_config.disk 不合法 " + repr(disk)
+            + "：盘名只允许 /dev/ 加字母数字与 . _ -"
+            + "（该值会进入 partman/early_command 等 shell 串）"
+        )
+    disk = "/dev/" + _disk_bare
     # 软件包：SSH 公钥配了就必须装 openssh-server（与 Ubuntu 家族同一条理由）
     pkgs = list(c.extra_packages or [])
     if c.ssh_keys and "openssh-server" not in pkgs:
@@ -1997,17 +2017,33 @@ def _debian_preseed(c):
     L.append("d-i time/zone string " + (c.timezone or "Asia/Shanghai"))
     L.append("d-i clock-setup/utc boolean true")
     L.append("")
-    L.append("### 网络（静态；iPXE 侧必须同时给 interface=" + iface + "）")
+    # net_mode 分岔（缺陷修复：此前 net_mode 在本函数出现 0 次 —— disable_autoconfig
+    # 与静态值恒发，DHCP 模板被强制静态又没有值 => d-i 回头交互提问）：
+    #   · dhcp   → 不发 disable_autoconfig / get_ipaddress / get_netmask / get_gateway /
+    #     get_nameservers / confirm_static（choose_interface / get_hostname / get_domain
+    #     保留，语义同 RHEL dhcp 分支的 "network --bootproto=dhcp"：地址全交给 DHCP）；
+    #   · static → 静态指令保持现状；缺失值兜底**照抄 RHEL/Ubuntu 同一套**：
+    #     10.0.0.10 / 255.255.255.0 / 10.0.0.1 / 8.8.8.8
+    #     （_rhel_ks 静态段：nc.get("ip", "10.0.0.10")、nc.get("netmask", "255.255.255.0")、
+    #       nc.get("gateway", "10.0.0.1")、nc.get("dns", ["8.8.8.8"])；
+    #       _ubuntu_user_data 静态分支同源。netmask 的兜底本函数构造处本来就有
+    #       （or "255.255.255.0"），这里补齐 ip / gw / dns 三处。
+    _net_static = (c.net_mode == "static")
+    if _net_static:
+        ip = ip or "10.0.0.10"
+        gw = gw or "10.0.0.1"
+        if not dns_s:
+            dns_s = "8.8.8.8"
+    L.append("### 网络（" + ("静态" if _net_static else "DHCP")
+             + "；iPXE 侧必须同时给 interface=" + iface + "）")
     L.append("d-i netcfg/choose_interface select " + iface)
-    L.append("d-i netcfg/disable_autoconfig boolean true")
-    if ip:
+    if _net_static:
+        L.append("d-i netcfg/disable_autoconfig boolean true")
         L.append("d-i netcfg/get_ipaddress string " + ip)
-    L.append("d-i netcfg/get_netmask string " + mask)
-    if gw:
+        L.append("d-i netcfg/get_netmask string " + mask)
         L.append("d-i netcfg/get_gateway string " + gw)
-    if dns_s:
         L.append("d-i netcfg/get_nameservers string " + dns_s)
-    L.append("d-i netcfg/confirm_static boolean true")
+        L.append("d-i netcfg/confirm_static boolean true")
     L.append("d-i netcfg/get_hostname string " + (c.hostname or "debian"))
     L.append("d-i netcfg/get_domain string localdomain")
     L.append("")
@@ -2017,9 +2053,58 @@ def _debian_preseed(c):
     L.append("d-i mirror/http/hostname string " + m_host)
     L.append("d-i mirror/http/directory string " + m_dir)
     L.append("d-i mirror/http/proxy string")
+    # suite 钉死，别让 d-i 去探测 oldstable/testing/sid（真机日志里全是它们的 404）。
+    # **必须是代号**（trixie）而不是版本号（13.7.0）—— 这一点被本文件的用例当场抓住过。
+    _suite = {"11": "bullseye", "12": "bookworm", "13": "trixie", "14": "forky"}.get(
+        str(c.os_version or "").strip().split(".")[0], "")
+    if _suite:
+        L.append("d-i mirror/suite string " + _suite)
+        L.append("d-i mirror/udeb/suite string " + _suite)
+    # 隔离网内到不了 security.debian.org（真机在 apt-setup 阶段就卡在"下载失败/Retry"）：
+    # 官方参考里的键 apt-setup/services-select，只启用 updates（我们已镜像 trixie-updates）。
+    L.append("d-i apt-setup/services-select multiselect updates")
+    # ── 额外仓库（c.extra_repos → apt-setup/localN/*，官方参考 356-371 行）──
+    # 与 RHEL 家族（repo --name=… --baseurl=…）同源同形：dict {"name","url"} 为主
+    # （api 层 _normalize_extra_repos 已把字符串 URL 归一成 dict），但生成器自己也
+    # 不信任入参 —— 字符串形态直接兜住（name 取 URL 末段，与 _normalize_extra_repos
+    # 的 slug 规则一致）。repository 的值是**整行 sources.list 条目**（参考示例值
+    # "http://local.server/debian stable main" = URI + suite + 组件）：suite 与上面
+    # mirror/suite 同源（同一代号，本地 DVD 树的 dists/<代号>/ 正好对得上）；代号钉
+    # 不出来时按参考示例回退 stable；组件钉 main（要 contrib/non-free 的仓库目前
+    # 表达不了，见报告"需监工确认"）。comment 用仓库名；source 显式落 **false**
+    # （=参考默认）：本仓库的 mirror 是从 DVD 拷 dists/+pool/ 的（见 _ipxe_menu 注释），
+    # 通常没有 main/source 索引，启用 deb-src 会让 apt-setup 校验失败、无人值守装机
+    # 卡在 <Go Back> —— 与 services-select 只留 updates 是同一类取舍。
+    _repo_i = 0
+    for _r in (c.extra_repos or []):
+        if isinstance(_r, dict):
+            _rn = str(_r.get("name") or "").strip()
+            _ru = str(_r.get("url") or "").strip()
+        else:
+            _ru = str(_r or "").strip()
+            _rn = _ru.rstrip("/").rsplit("/", 1)[-1] if _ru else ""
+        _rn = _safe_ident(_rn, "extra_repos[].name") if _rn else ""
+        _ru = _safe_ident(_ru, "extra_repos[].url", extra=":/?&=%+")
+        if not _ru:
+            continue              # 空 url 的条目不带（与 api 层 _normalize_extra_repos 同规则）
+        L.append("d-i apt-setup/local%d/repository string %s %s main"
+                 % (_repo_i, _ru, _suite or "stable"))
+        if _rn:
+            L.append("d-i apt-setup/local%d/comment string %s" % (_repo_i, _rn))
+        L.append("d-i apt-setup/local%d/source boolean false" % _repo_i)
+        _repo_i += 1
     L.append("")
     L.append("### 账户")
     L.append("d-i passwd/root-login boolean " + ("true" if c.allow_root else "false"))
+    if c.allow_root:
+        # root 口令：root-login 打开时就必须给，否则 d-i 会**交互式**追问 root 口令
+        # （无人应答 => 无人值守装机卡死），root 也始终登不进去。键取自官方参考
+        # "passwd/root-password-crypted"（只发 crypted 形态，绝不落明文）；取值与
+        # RHEL rootpw / Ubuntu chpasswd -e 同一条回退链：root_password 优先，其次
+        # 管理员口令；两者都空时 _hash_pw 抛 ValueError（不代填任何默认口令）。
+        # root-login=false（默认）时不发：d-i 此时跳过 root 账户口令，该键本来就不生效。
+        L.append("d-i passwd/root-password-crypted password "
+                 + _hash_pw(c.root_password or c.admin_password))
     L.append("d-i passwd/make-user boolean true")
     L.append("d-i passwd/user-fullname string " + admin)
     L.append("d-i passwd/username string " + admin)
@@ -2035,11 +2120,29 @@ def _debian_preseed(c):
     else:
         L.append("d-i partman-auto/method string regular")
     L.append("d-i partman-md/device_remove_md boolean true")
+    L.append("d-i partman-md/confirm boolean true")   # 官方参考里的键（软 RAID 确认）
     L.append("d-i partman-auto/disk string " + disk)
+    # ★ 2026-10-10 真机实证：盘上残留旧 LVM 时 d-i 会问 "Volume group name already in use"
+    #   （无人应答 => 卡在 [!!] Partition disks 的 <Go Back>/<Continue>）。
+    #   官方参考里：partman-auto-lvm/guided_size 指定用满；
+    #   抹掉旧分区表/旧 LVM 元数据的正确钩子是 **partman/early_command**
+    #   （参考原文注释：preseed/early_command 运行时磁盘可能还不可见）。
+    L.append("d-i partman-auto-lvm/guided_size string max")
+    # 2026-10-10 二次修正：只抹开头无效（LVM 在**磁盘尾部**还有一份元数据备份）=> 首尾都抹，
+    #   并先试 wipefs（有就顺手清签名）。命令串由 d-i 用 sh 执行，故可直接用 ; 和 $( )。
+    _wipe = ("wipefs -a " + disk + " 2>/dev/null || true; "
+             + "dd if=/dev/zero of=" + disk + " bs=1M count=200 conv=notrunc; "
+             + "_SZ=$(blockdev --getsz " + disk + " 2>/dev/null || echo 0); "
+             + "[ \"$_SZ\" -gt 409600 ] && dd if=/dev/zero of=" + disk
+             + " bs=512 seek=$((_SZ-204800)) count=204800 conv=notrunc; true")
+    L.append("d-i partman/early_command string " + _wipe)
     L.append("d-i partman-auto/choose_recipe select atomic")
     L.append("d-i partman/choose_partition select finish")
     L.append("d-i partman/confirm boolean true")
     L.append("d-i partman/confirm_nooverwrite boolean true")
+    # 官方 example-preseed 里的属主是 partman-partitioning（先前我按 partman/ 写、被自检拦下）：
+    # 不加这条时，盘上有旧分区表会**问**"写入新的分区表吗"，无人应答 => 无人值守卡住。
+    L.append("d-i partman-partitioning/confirm_write_new_label boolean true")
     L.append("")
     L.append("### 引导")
     L.append("d-i grub-installer/only_debian boolean true")
@@ -2067,6 +2170,21 @@ def _debian_preseed(c):
         _late.append("echo " + shlex.quote(admin + " ALL=(ALL) NOPASSWD:ALL")
                      + " > /target/etc/sudoers.d/90-opstk-" + admin
                      + " && chmod 440 /target/etc/sudoers.d/90-opstk-" + admin)
+    # ── 装后脚本（c.post_script，与 Ubuntu curtin in-target / RHEL %post 同语义）──
+    # late_command 是**单逻辑行**，多行脚本不能直接塞（preseed 值里裸换行会截断条目）。
+    # 做法：先把脚本**逐行原样**写进 target 的 /tmp/opstk-post.sh
+    # （printf '%s\n' 每行一个参数，shlex.quote 逐行上引号，脚本内容分毫不差），
+    # 再 in-target bash 执行（in-target = chroot /target，官方参考 484-488 行明示的
+    # target 内执行方式；路径在 target 内即 /tmp/opstk-post.sh）。
+    # 顺序与 RHEL %post 一致：公钥/sudo → post_script → done_url 回调（回调最后，
+    # 自带 || true 容错：post_script 失败也不会把装好的系统判成装机失败）。
+    _ps = str(c.post_script or "").strip()
+    if _ps:
+        _ps_lines = str(c.post_script).replace("\r\n", "\n").split("\n")
+        _late.append("printf '%s\\n' "
+                     + " ".join(shlex.quote(ln) for ln in _ps_lines)
+                     + " > /target/tmp/opstk-post.sh"
+                     + " && in-target bash /tmp/opstk-post.sh")
     _done = _safe_done_url(c.done_url)
     if _done:
         _late.append("curl -s -m 10 -X POST " + chr(34) + _done + chr(34) + " >/dev/null 2>&1 || true")
