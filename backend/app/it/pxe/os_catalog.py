@@ -25,8 +25,10 @@
                      autoyast(YaST)。**生成逻辑按家族复用，不按发行版复制**。
   auto_install       本工具是否实现了该家族的自动装机生成。
                      目前 kickstart(RHEL 系) 与 ubuntu(autoinstall) 为 True；
-                     debian(presseed)/opensuse(autoyast) 为 False —— 只支持
-                     识别 ISO + 提取引导介质，生成配置时会给出明确拒绝提示。
+                     debian(preseed) 亦为 True（generator._debian_preseed，
+                     2026-10-09 起实现，见 tests/test_pxe_debian_preseed.py）；
+                     opensuse(autoyast) 为 False —— 只支持识别 ISO + 提取
+                     引导介质，生成配置时会给出明确拒绝提示。
   filename_keywords  ISO **文件名**关键字（pick_iso 与前端"从文件名识别"共用）。
   label_keywords     ISO **卷标**关键字。ISO9660 卷标不含 '.'，匹配前先把
                      '-'/'_' 归一化成 '.'（归一化实现在 transfers.detect_os_from_label）。
@@ -201,20 +203,20 @@ _OS = (
         note=("未验证：Fedora 为 RHEL 上游（anaconda），引导文件按惯例在 images/pxeboot；"
               "版本迭代快，kickstart 语法偶有变化，装机前请先小范围验证。"),
     ),
-    # ── Debian：preseed 全自动装机已实现，2026-10-14 VM140(BIOS) 真机端到端验收通过 ──
+    # ── Debian：preseed 全自动装机已实现，2026-10-14 真机端到端验收通过（VM140 BIOS + VM141 UEFI）──
     OsCatalogEntry(
-        key="debian", display="Debian", installer=PRESEED, auto_install=True,  # ★ 2026-10-09 实现；2026-10-14 真机验收通过后 verified 翻 True
+        key="debian", display="Debian", installer=PRESEED, auto_install=True,  # ★ 2026-10-09 实现；2026-10-14 BIOS/UEFI 两台真机验收通过后 verified 翻 True
         filename_keywords=("debian",), label_keywords=("debian",),
         kernel_dirs=("install.amd", "install", "install.386"),
         kernel_names=("vmlinuz", "linux"), initrd_names=("initrd.gz", "initrd.img", "initrd"),
         dest_initrd="initrd", dest_squashfs="",
         version_hints=("11", "12", "13"), verified=True,
-        note=("已支持 preseed 全自动装机（generator._debian_preseed）：2026-10-14 在 VM140(BIOS) "
-              "真机端到端验收通过 —— 装完回调标 installed、静态 IP、SSH、sudo 免密、LVM 分区、"
-              "post_script 六项全过。两条前提：① 隔离网内需一份**带官方签名的**本地 Debian 仓库"
-              "（官方 DVD 的 dists/ 不带 Release.gpg，d-i 会停在 <Change mirror>；可用 "
-              "backend/scripts/sync_signed_debian_repo.py 从有签名的镜像站同步子集）；"
-              "② UEFI 目标机尚未实测（BIOS 已验）。"),
+        note=("已支持 preseed 全自动装机（generator._debian_preseed）：2026-10-14 真机端到端"
+              "验收通过 —— VM140(BIOS) 与 VM141(UEFI) 两台各六项全过（装完回调标 installed、"
+              "静态 IP、SSH、sudo 免密、LVM/分区、post_script；UEFI 台另有 /boot/efi ESP 与 "
+              "ls /sys/firmware/efi 确认）。唯一前提：隔离网内需一份**带官方签名的**本地 "
+              "Debian 仓库（官方 DVD 的 dists/ 不带 Release.gpg，d-i 会停在 <Change mirror>；"
+              "可用 backend/scripts/sync_signed_debian_repo.py 从有签名的镜像站同步子集）。"),
     ),
     OsCatalogEntry(
         key="opensuse", display="openSUSE", installer=AUTOYAST, auto_install=False,

@@ -265,8 +265,12 @@ class PxeConfig:
 #     openeuler/kylin/uos/anolis/fedora，复用同一套 inst.* 参数与 kickstart 生成器，
 #     介质文件名也一样是 initrd.img（不是 Ubuntu 的 initrd）；
 #   · ubuntu —— autoinstall(subiquity)/casper 分支（既有实现不变）；
-#   · debian(preseed)/opensuse(autoyast) —— auto_install=False：只支持识别 ISO 与
-#     提取引导介质，生成配置时给出明确拒绝提示（见 _unsupported_auto_install_msg）。
+#   · debian —— preseed(d-i) 分支：_debian_preseed 已实现（2026-10-09 起），生成
+#     preseed.cfg；离线前提：本地 HTTP 仓库必须带官方签名索引（dists/<suite>/InRelease
+#     或 Release+Release.gpg），DVD 直拷的 dists/+pool/ 缺 Release.gpg 时 d-i 停在
+#     <Change mirror>（真机实证见 _ipxe_menu 内 2026-10-09/10 注释）；
+#   · opensuse(autoyast) —— auto_install=False：只支持识别 ISO 与提取引导介质，
+#     生成配置时给出明确拒绝提示（见 _unsupported_auto_install_msg）。
 # 家族成员的**唯一**定义点在 os_catalog.py；这里的常量都从目录派生，绝不再手抄一份。
 # 校验层 schemas._OS_TYPE_ALLOWED 必须与 os_catalog 派生的白名单一致，有测试锁住两者不漂移。
 RHEL_FAMILY = os_catalog.kickstart_family() + tuple(
@@ -604,11 +608,15 @@ def _size_mb(v):
 def _disk_config_active(dc) -> bool:
     """disk_config 是否启用了【结构化】磁盘配置。
 
-    只有历史键 "disk"（或空/缺省）→ False，走既有路径（规格 §5.1 回归红线）。
+    只有历史键 "disk"（或空/缺省，以及仅追加 wipe_disks）→ False，走既有路径
+    （规格 §5.1 回归红线）。wipe_disks（遗留 B：显式声明要一并清理的盘）不是
+    结构化布局键 —— 它只被 _debian_preseed 的 partman/early_command 消费；
+    若把它当结构化键，仅有 {disk, wipe_disks} 的存量模板会被错误切进结构化路径，
+    改变 RHEL/Ubuntu 家族的产物形态。
     """
     if not dc:
         return False
-    return any(k != "disk" for k in dc)
+    return any(k != "disk" and k != "wipe_disks" for k in dc)
 
 
 def _raid_part_ref(tok, field):
@@ -2128,13 +2136,60 @@ def _debian_preseed(c):
     #   抹掉旧分区表/旧 LVM 元数据的正确钩子是 **partman/early_command**
     #   （参考原文注释：preseed/early_command 运行时磁盘可能还不可见）。
     L.append("d-i partman-auto-lvm/guided_size string max")
+    # 键名出处（权威，2026-10-14 取得）：partman-auto-lvm 103 = trixie（本仓库 Debian
+    #   13.7.0 对应的发行版）的 debian/partman-auto-lvm.templates —— 见
+    #   https://sources.debian.org/src/partman-auto-lvm/103/debian/partman-auto-lvm.templates/
+    #   同文件里的相关键（逐字抄录模板名与 Description）：
+    #     · partman-auto-lvm/guided_size  (string) "Amount of volume group to use for
+    #       guided partitioning:" —— 本行用的键，模板原文说明 max 是"用满"的快捷写法。
+    #     · partman-auto-lvm/vg_exists    (error)  "Volume group name already in use /
+    #       The volume group name used to automatically partition using LVM is already
+    #       in use. Lowering the priority for configuration questions will allow you to
+    #       specify an alternative name." —— 2026-10-10 真机停在这一问的原文出处，
+    #       根因（别盘残留同名 VG）由 disk_config.wipe_disks 清理解决，见下。
+    #     · partman-auto-lvm/new_vg_name  (string) "Name of the volume group for the new
+    #       system:" —— VG 名键。**刻意不下发**：VG 名由 partman-auto-lvm 按主机名自动
+    #       派生，wipe_disks 已消除同名冲突；暴力改名会连带改掉存量机器的 VG 命名，
+    #       属于超出本任务的破坏性变更（要改须另立条目并同步 golden）。
+    #     · partman-auto-lvm/no_boot      (boolean) "Continue installation without /boot
+    #       partition?" —— 仅当所选 recipe 不含独立 /boot 时才会问。本实现固定用
+    #       atomic recipe，真机（BIOS/UEFI 两台）实测产物均含 /boot，故该问不会出现，
+    #       不下发该键（下发反而会在真正缺 /boot 时把问题静默吞掉）。
     # 2026-10-10 二次修正：只抹开头无效（LVM 在**磁盘尾部**还有一份元数据备份）=> 首尾都抹，
     #   并先试 wipefs（有就顺手清签名）。命令串由 d-i 用 sh 执行，故可直接用 ; 和 $( )。
-    _wipe = ("wipefs -a " + disk + " 2>/dev/null || true; "
-             + "dd if=/dev/zero of=" + disk + " bs=1M count=200 conv=notrunc; "
-             + "_SZ=$(blockdev --getsz " + disk + " 2>/dev/null || echo 0); "
-             + "[ \"$_SZ\" -gt 409600 ] && dd if=/dev/zero of=" + disk
-             + " bs=512 seek=$((_SZ-204800)) count=204800 conv=notrunc; true")
+    # ── 遗留 B：disk_config.wipe_disks —— 显式声明"本次装机要一并清理的盘" ──
+    # 2026-10-10 真机实证：机器上第二块盘残留旧 LVM 卷组时，d-i 停在
+    #   "Volume group name already in use"（无人应答 => 装机不动），当时的临时
+    #   处置是把第二块盘从测试机上摘掉。产品化：profile 显式声明**额外**要清理的盘
+    #   （不含目标盘；目标盘本来就清）。默认空 = 只清目标盘，绝不默认全抹（防误删数据盘）。
+    # 盘名与目标盘同一份 _safe_ident 白名单（该值会拼进 d-i 用 sh 执行的命令串，
+    # 注入面同源）；"/dev/" 前缀容忍并剥掉（与上面目标盘同规则）；
+    # 与目标盘重复的条目忽略（幂等，不报错）。
+    # 2026-10-14 修正：**先剥前缀再判空**。`_safe_ident("")` 返回空串而不报错（空串没有
+    #   非法字符），原顺序下 wipe_disks=["/dev/"] 会剥成一个空盘名、生成
+    #   "wipefs -a /dev/" 与 "dd ... of=/dev/"（对 /dev 目录动手，无意义且日志噪声）。
+    #   schema 保存期已把 "/dev/" 判 422，这里是不信任入参的第 2 层兜底，两层口径一致。
+    _extra_wipe = []
+    for _w in ((c.disk_config or {}).get("wipe_disks") or []):
+        _wb = str(_w or "").strip()
+        _wb = _wb[len("/dev/"):] if _wb.startswith("/dev/") else _wb
+        if not _wb:
+            continue
+        _wdev = "/dev/" + _safe_ident(_wb, "disk_config.wipe_disks[]")
+        if _wdev != disk and _wdev not in _extra_wipe:
+            _extra_wipe.append(_wdev)
+    # 目标盘保持原样（wipefs + 首尾各 200MB）；声明了的额外盘套用同一串命令 ——
+    # 同样要"首尾都抹"：LVM 在磁盘尾部还有一份元数据备份（2026-10-10 二次实证）。
+    # _extra_wipe 为空时，下面的 join 结果与改造前的单盘命令串逐字节一致。
+    _wipe_blocks = []
+    for _d in [disk] + _extra_wipe:
+        _wipe_blocks.append(
+            "wipefs -a " + _d + " 2>/dev/null || true; "
+            + "dd if=/dev/zero of=" + _d + " bs=1M count=200 conv=notrunc; "
+            + "_SZ=$(blockdev --getsz " + _d + " 2>/dev/null || echo 0); "
+            + "[ \"$_SZ\" -gt 409600 ] && dd if=/dev/zero of=" + _d
+            + " bs=512 seek=$((_SZ-204800)) count=204800 conv=notrunc")
+    _wipe = "; ".join(_wipe_blocks) + "; true"
     L.append("d-i partman/early_command string " + _wipe)
     L.append("d-i partman-auto/choose_recipe select atomic")
     L.append("d-i partman/choose_partition select finish")
@@ -2587,16 +2642,38 @@ def _ipxe_menu(c, mac="", answer_url=""):
         _gw = str(_nc.get("gateway") or "").strip()
         _dns = _nc.get("dns") or ([_nc.get("dns_server")] if _nc.get("dns_server") else [])
         _dns_s = ",".join([str(d).strip() for d in _dns if str(d or "").strip()])
-        cmdline = ("auto=true priority=critical interface=" + _iface
-                   + " netcfg/disable_autoconfig=true preseed/url=" + answer)
-        if _ip:
-            cmdline += " netcfg/get_ipaddress=" + _ip + " netcfg/confirm_static=true"
-        if _mask:
-            cmdline += " netcfg/get_netmask=" + _mask
-        if _gw:
-            cmdline += " netcfg/get_gateway=" + _gw
-        if _dns_s:
-            cmdline += " netcfg/get_nameservers=" + _dns_s
+        # net_mode 分岔（遗留 A 修复）：与三族应答文件侧的同一谓词对齐 ——
+        #   _debian_preseed:     _net_static = (c.net_mode == "static")
+        #   _rhel_ks:            if c.net_mode == "static": … else: dhcp
+        #   _ubuntu_user_data:   if c.net_mode == "static": … else: dhcp
+        # 即只有字面 "static" 走静态，dhcp / 缺失 / 其它值一律按 DHCP
+        # （schemas.PxeProfileIn._check_net_mode 的 docstring 同口径：
+        #   "未知值会被当成 DHCP 静默处理"）。官方 example-preseed 49-52 行：
+        #   自动(DHCP)配置是默认，只有手动/静态才需要 netcfg/disable_autoconfig。
+        #   · static：保持既有输出（disable_autoconfig + 静态值 + confirm_static）
+        #     —— 本分支逐字节不变；
+        #   · dhcp / 非 static：不发 netcfg/disable_autoconfig=true，也不发任何
+        #     netcfg/get_*=（地址全交 DHCP，语义同 RHEL dhcp 分支
+        #     network --bootproto=dhcp 与 Ubuntu 分支 ip=dhcp）；interface= 保留
+        #     （多网卡仍要钉住装机网卡，与 preseed 无条件下发的
+        #     netcfg/choose_interface 同源）。
+        # 由此 preseed 侧（已按同一谓词分岔）与 iPXE 内核参数侧不再自相矛盾：
+        # DHCP 模板不会再被拉回"静态但无值"的死局。
+        _net_static = (c.net_mode == "static")
+        if _net_static:
+            cmdline = ("auto=true priority=critical interface=" + _iface
+                       + " netcfg/disable_autoconfig=true preseed/url=" + answer)
+            if _ip:
+                cmdline += " netcfg/get_ipaddress=" + _ip + " netcfg/confirm_static=true"
+            if _mask:
+                cmdline += " netcfg/get_netmask=" + _mask
+            if _gw:
+                cmdline += " netcfg/get_gateway=" + _gw
+            if _dns_s:
+                cmdline += " netcfg/get_nameservers=" + _dns_s
+        else:
+            cmdline = ("auto=true priority=critical interface=" + _iface
+                       + " preseed/url=" + answer)
         # ★ 2026-10-09 真机实证 3：把 DVD ISO 也交给 d-i 当**光盘介质**。
         #   我们的本地 HTTP 仓库是从 DVD 拷 dists/+pool/ 得来的、**没有 Release.gpg**，
         #   d-i 校验镜像签名时会因 Release.gpg 404 判为致命失败并停在 <Change mirror>；
@@ -2866,6 +2943,20 @@ def _readme(c, has_registered=False):
             "同样没有装机记录的模板，会把它覆盖成那个模板 —— 多模板请为机器\n"
             "建装机记录（每个 MAC 会拿到自己的 boot/<mac>.ipxe）。\n\n"
         )
+    # Debian 离线装机前提（真机实证：官方 DVD 直拷的仓库没有 Release.gpg，
+    # d-i 校验镜像签名失败停在 <Change mirror>，见 _ipxe_menu 2026-10-09/10 注释）。
+    # 仅 debian 模板打印本段；其它家族为空串，README.txt 输出逐字不变。
+    _debian_repo_note = (
+        "Debian 离线仓库（必读，仅 debian 模板）\n"
+        "----------------\n"
+        "Debian 装机从模板「镜像源」指向的本地 HTTP 仓库取包。该仓库必须带官方签名索引\n"
+        "（dists/<suite>/InRelease 或 Release + Release.gpg）：从官方 DVD 直接拷出的\n"
+        "dists/+pool/ 没有这些签名文件，d-i 校验镜像签名会报\n"
+        "  'The installer failed to download a file from the mirror'\n"
+        "并停在 <Change mirror>，无人值守装机卡死。请从带官方签名的镜像站\n"
+        "（如清华 TUNA https://mirrors.tuna.tsinghua.edu.cn/debian/）同步所需子集，\n"
+        "或改用内网已有带签名镜像。\n\n"
+        if str(c.os_type or "").strip().lower() == "debian" else "")
     return (
         "OpsToolkit PXE 部署说明\n"
         "========================\n\n"
@@ -2877,7 +2968,8 @@ def _readme(c, has_registered=False):
         "Ubuntu 用 casper 的 url= 直接挂载 ISO，不需要手工解包 squashfs。\n"
         "把 ISO 放到服务端 /srv/opstk/iso/（应用发布在 http://<server>:8000/pxe/iso/）。\n"
         "旧的相对位置写法 `--- .../installer.squashfs` 会以\n"
-        "  \"Unable to find a medium containing a live file system\" 失败。\n\n"
+        "  \"Unable to find a medium containing a live file system\" 失败。\n\n" +
+        _debian_repo_note +
         "内存要求（必读）\n"
         "----------------\n"
         "casper 走 HTTP 取介质时，会把**整份 ISO 读进内存**（/cdrom 是 tmpfs），\n"

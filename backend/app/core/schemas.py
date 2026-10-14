@@ -593,7 +593,11 @@ def _disk_check_layout_rules(dc: dict, os_type: str, disk_scheme: str = "lvm") -
     # 只有历史键 disk（或空）时生成器走【既有路径】，layout 根本不参与生成 —— 这里也不能按
     # layout 报错，否则老模板（例如 disk_scheme=custom + {"disk": "sda"}）会被误拒，
     # 而它们原本生成得好好的（既有路径把未知 scheme 当 lvm 处理）。
-    if not any(k != "disk" for k in dc):
+    # wipe_disks 同为非结构化键（遗留 B）：它只被 Debian preseed 消费，不该把仅有
+    # {disk, wipe_disks} 的模板切进布局规则 —— 否则 disk_scheme=custom + 只声明
+    # wipe_disks 的模板会被下方 custom 分支的"必须有 / 分区"误拒
+    # （generator._disk_config_active 的 HUNK_C 已按同一谓词放行，两层口径一致）。
+    if not any(k != "disk" and k != "wipe_disks" for k in dc):
         return
     target = dc.get("target") or {}
     mode = (target.get("mode") or "").strip().lower()
@@ -757,6 +761,13 @@ class PxeDiskConfigIn(BaseModel):
     partitions: list[PxePartitionIn] = []
     raid: list[PxeRaidIn] = []
     data_disks: list[PxeDataDiskIn] = []
+    # 遗留 B：本次装机**额外**要一并清理的盘（不含目标盘；目标盘本来就清）。
+    # 默认 [] = 只清目标盘 —— 绝不默认全抹（防误删数据盘，红线）；缺省时
+    # model_dump(exclude_unset=True) 不含该键，存量模板保存/回显/生成逐字节不变。
+    # 消费方：generator._debian_preseed 的 partman/early_command（清掉别盘残留的
+    # LVM 卷组元数据，防 d-i 停在 "Volume group name already in use"）。
+    # RHEL(kickstart) / Ubuntu(autoinstall) 家族不消费该键（透传保存、生成期忽略）。
+    wipe_disks: list[str] = []
 
 
     @field_validator("disk")
@@ -769,6 +780,49 @@ class PxeDiskConfigIn(BaseModel):
         把第二块（数据）盘一起抹掉。合法盘名恒等，所以既有模板的输出一个字节都不变。
         """
         return _disk_ident_check(v, "disk")
+
+
+    # 遗留 B：wipe_disks 保存期白名单（第 2 层）—— 该值会被拼进 d-i 用 sh 执行的
+    # early_command（注入面与历史键 disk 同源），而且是破坏性操作（清盘），
+    # 故保存期就 422，不等生成期的 _safe_ident 兜底。写法与既有 partitions/raid/
+    # data_disks 校验器同款：mode="before" 逐条点名（报错直接显示给运维）。
+    @field_validator("wipe_disks", mode="before")
+    @classmethod
+    def _check_wipe_disks(cls, v):
+        """盘名白名单 + 重复条目 422（监工拍板：明确报错优于静默去重）。
+
+        · 元素必须是字符串盘名：[A-Za-z0-9._-]（复用 _disk_ident_check —— 与历史键
+          disk 同一份白名单；; / $ / 引号 / 空白 / * 等一切其它字符都在此 422）；
+        · "/dev/" 前缀容忍并剥掉（与目标盘同规则）；剥完为空同样 422；
+        · 重复条目（剥前缀归一后同名）422 —— 静默去重会把"运维以为清了两块盘"
+          的笔误藏起来；与目标盘 disk 同名的条目**不在 schema 拒**，由生成器幂等
+          忽略（目标盘本来就要清，语义上不算配置矛盾）。
+        · 默认 [] = 只清目标盘：缺省 / None 都不改变任何既有行为。
+        """
+        if v is None:
+            return []                       # null 与缺省同义：只清目标盘
+        if not isinstance(v, list):
+            raise ValueError(
+                'wipe_disks 必须是数组（如 ["sdb", "/dev/nvme0n1"]）')
+        out = []
+        seen: dict = {}
+        for i, w in enumerate(v):
+            if not isinstance(w, str):
+                raise ValueError(
+                    f"wipe_disks[{i}] 必须是字符串盘名（如 \"sdb\" 或 \"/dev/sdb\"）"
+                )
+            s = w[len("/dev/"):] if w.startswith("/dev/") else w
+            if not s:
+                raise ValueError(f"wipe_disks[{i}] 不能为空（收到 {w!r}）")
+            s = _disk_ident_check(s, f"wipe_disks[{i}]")
+            if s in seen:
+                raise ValueError(
+                    f"wipe_disks[{i}]：{s!r} 与 wipe_disks[{seen[s]}] 重复"
+                    "（同一块盘只声明一次；明确报错优于静默去重）"
+                )
+            seen[s] = i
+            out.append(s)
+        return out
 
 
     @field_validator("layout")

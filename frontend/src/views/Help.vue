@@ -469,7 +469,7 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
         <!-- ===== PXE ===== -->
         <el-tab-pane label="PXE 装机" name="pxe">
           <h3>PXE 装机手册</h3>
-          <p>全自动网络安装 Ubuntu 与 RHEL 系系统（含 RHEL 克隆/近亲：openEuler、银河麒麟、统信 UOS、Anolis、Fedora、Oracle Linux 等，完整清单以「系统目录」为准；debian/openSUSE 目前仅支持识别 ISO 与提取引导介质，生成配置时明确拒绝自动装机）。裸机接上网线，开机即可自动安装操作系统，全程无人值守。OpsToolkit 本机可直接作为完整 PXE 服务器。</p>
+          <p>全自动网络安装 Ubuntu 与 RHEL 系系统（含 RHEL 克隆/近亲：openEuler、银河麒麟、统信 UOS、Anolis、Fedora、Oracle Linux 等，完整清单以「系统目录」为准）；Debian 走 debian-installer preseed 全自动装机。<b>Debian 离线装机前提（不做这步必卡死）</b>：模板「镜像源」指向的本地 HTTP 仓库必须带官方签名索引（<code>dists/&lt;suite&gt;/InRelease</code> 或 <code>Release</code> + <code>Release.gpg</code>）——直接从官方 DVD 拷出的 <code>dists/</code> + <code>pool/</code> 没有这些签名文件，装机在校验镜像签名时报 'The installer failed to download a file from the mirror' 并停在 <code>&lt;Change mirror&gt;</code>；请先从带官方签名的镜像站（如清华 TUNA https://mirrors.tuna.tsinghua.edu.cn/debian/）同步所需套件子集到本机 HTTP 目录，或改用内网已有带签名镜像。openSUSE 目前仅支持识别 ISO 与提取引导介质，生成配置时明确拒绝自动装机。裸机接上网线，开机即可自动安装操作系统，全程无人值守。OpsToolkit 本机可直接作为完整 PXE 服务器。</p>
 
           <el-collapse v-model="pxeActive" class="mt-3">
 
@@ -588,7 +588,7 @@ scp Rocky-9.5-x86_64-dvd.iso yang@服务器IP:/srv/opstk/iso/</pre>
             <el-collapse-item title="目标盘选择：三种模式与语义" name="p5">
               <ul>
                 <li><b>自动（最大盘）</b>：换硬件不用改模板。RHEL 系在 %pre 里按「非可移动、非光驱、容量达标（可用“最小容量”过滤）、按盘名排序取第一块」现场选盘，再 %include 生成的分区片段 —— NVMe(nvme0n1)/virtio(vda) 都能装。<b>Ubuntu 不支持自动选盘</b>：subiquity 没有“自动挑最大盘”的写法，Ubuntu + 自动选盘会被 422 拒绝，必须按盘名指定。</li>
-                <li><b>按盘名指定</b>：直接写设备名（sda / vda / nvme0n1）。注意盘名由内核探测顺序决定，同一台机器两次启动都可能互换；好处是填错会明确报错、不会错装。</li>
+                <li><b>按盘名指定</b>：直接写设备名（sda / vda / nvme0n1）。<b>盘名格式（硬性）</b>：只接受 <code>/dev/&lt;盘名&gt;</code>，盘名剥掉 <code>/dev/</code> 前缀后必须只含字母、数字、点、下划线、中划线（<code>sda</code>/<code>nvme0n1</code> 合法；<code>sda,sdb</code>、含 <code>$</code>/引号/空白/分号的值会在生成期明确报错——此前这类值会被静默接受；该值会进 preseed 的 <code>partman/early_command</code> 等 shell 串，按白名单挡注入）。注意盘名由内核探测顺序决定，同一台机器两次启动都可能互换；好处是填错会明确报错、不会错装。</li>
                 <li><b>按序列号/型号</b>：序列号最稳（如 S3Z1NB0K123456），型号做兜底。Ubuntu 侧 subiquity 取的序列号来自 sysfs，QEMU/虚拟化下常为空（报 matched no disk）——虚拟机请用按盘名。</li>
                 <li><b>「清空目标盘」开关</b>：只清空目标盘本身（ignoredisk --only-use 把安装范围钉死在这块盘上），其它盘一律不碰；关掉则保留目标盘既有分区表（仅 Ubuntu 的自定义布局等场景需要）。</li>
               </ul>
@@ -1111,7 +1111,7 @@ const netValidation = [
 ]
 const pxeFields = [
   { field: "名称", required: "是", desc: "自定义模板名，方便区分" },
-  { field: "系统类型", required: "是", desc: "按安装器家族分岔：kickstart 家族（rhel/centos/rocky/almalinux/oraclelinux/openeuler/kylin/uos/anolis/fedora）生成 Kickstart；ubuntu 生成 autoinstall；debian/openSUSE 保存允许但生成时明确拒绝（暂不支持自动装机，仅识别与提取）" },
+  { field: "系统类型", required: "是", desc: "按安装器家族分岔：kickstart 家族（rhel/centos/rocky/almalinux/oraclelinux/openeuler/kylin/uos/anolis/fedora）生成 Kickstart；ubuntu 生成 autoinstall；debian 生成 d-i preseed.cfg 全自动装机（离线前提：镜像源指向的本地仓库必须带官方签名索引 InRelease/Release.gpg，官方 DVD 直拷的 dists/+pool/ 没有签名文件、装机必卡 <Change mirror>）；openSUSE 保存允许但生成时明确拒绝（暂不支持自动装机，仅识别与提取）" },
   { field: "系统版本", required: "是", desc: "需与 ISO 提取目录一致（ubuntu/22.04），决定内核/应答文件 URL" },
   { field: "管理员", required: "是", desc: "安装后的管理用户名（字母/数字/下划线，不以 - 开头），已加入 sudo" },
   { field: "管理员密码", required: "新建必填", desc: "加密存储，生成 shadow 哈希；编辑时留空 = 不修改；绝不代填默认口令" },
@@ -1119,7 +1119,7 @@ const pxeFields = [
   { field: "时区/语言/键盘", required: "否", desc: "默认 Asia/Shanghai / en_US.UTF-8 / us" },
   { field: "SSH 公钥", required: "否", desc: "每行一个公钥，写入 authorized_keys 免密登录" },
   { field: "分区方案", required: "是", desc: "LVM（推荐）/ 直通分区 / 自定义分区表（ZFS 暂未支持：后端未实现，选项已移除）" },
-  { field: "目标磁盘", required: "是", desc: "自动（最大盘，仅 RHEL 系）/ 按盘名 / 按序列号或型号" },
+  { field: "目标磁盘", required: "是", desc: "自动（最大盘，仅 RHEL 系）/ 按盘名 / 按序列号或型号；按盘名只接受 /dev/<盘名>，盘名剥掉 /dev/ 前缀后仅字母数字与 . _ -（sda、nvme0n1 合法；sda,sdb 或含 $/引号/空白/分号 → 生成期明确报错，不再静默接受）" },
   { field: "最小容量 (GB)", required: "否", desc: "自动选盘时过滤小盘（如排除装了引导的 U 盘）" },
   { field: "清空目标盘", required: "否", desc: "默认开：只清空目标盘，其它盘一律不碰" },
   { field: "自定义分区表", required: "custom", desc: "逐行定义挂载点/大小/fstype/VG+LV；必须含 / 分区；rest 只能最后一行" },

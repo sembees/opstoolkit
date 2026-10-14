@@ -33,5 +33,11 @@ Thumbs.db
 # 临时运维脚本与生成物：不入库。
 # 注意 backend/scripts/ 里有脚本带过明文 SSH 口令（remote_check.py），
 # 推上去等于把凭据写进公开仓库，所以在清理干净之前先整体忽略。
-backend/scripts/
+# 用 `dir/*` + 否定项而不是忽略整个目录：git 不会进入被忽略的目录，
+# 因此 `backend/scripts/` + `!backend/scripts/x.py` 式的例外**不生效**。
+backend/scripts/*
+# 例外：本脚本经逐行审查不含任何凭据（纯标准库 + curl 子进程，镜像 URL 由命令行传入），
+# 且是 Debian 离线装机的运维入口 —— os_catalog 的 debian note 与随部署下发的
+# README.txt 都直接点名这个路径，不入库就等于文档指向一个不存在的文件。
+!backend/scripts/sync_signed_debian_repo.py
 netconfig_tests/

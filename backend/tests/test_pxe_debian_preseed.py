@@ -1,10 +1,13 @@
 """Debian preseed 家族用例（2026-10-09）。
 
-锁住四件事：
+锁住五件事：
 1. `_debian_preseed(c)` 的内容（关键 d-i 指令、静态网络、分区两态、回调、crypted 口令）；
 2. 家族分发：debian → `preseed.cfg`（不再走 kickstart/ubuntu 的产物名）；
-3. iPXE 内核参数：`auto=true priority=critical interface=… netcfg/disable_autoconfig=true url=…`；
-4. `os_catalog` 的 debian 已打开 `auto_install`（不再命中"不支持自动装机"的拒绝分支）。
+3. iPXE 内核参数：`auto=true priority=critical interface=… [netcfg/*] preseed/url=…`
+   —— 静态才带 netcfg/disable_autoconfig 与 netcfg/get_*（遗留 A）；不带裸 `url=`；
+4. `disk_config.wipe_disks`：默认只清目标盘（逐字节不变）、显式盘并入 early_command、
+   白名单拦注入、其它家族不消费（遗留 B）；
+5. `os_catalog` 的 debian 已打开 `auto_install`（不再命中"不支持自动装机"的拒绝分支）。
 
 另外**安全断言**：生成物里不得出现明文管理员口令（只允许 crypted 形态）。
 """
@@ -218,3 +221,134 @@ class TestDebianPreseedGaps:
         i_done = lc.find(DONE)
         assert -1 < i_keys < i_sudo < i_post < i_done, (
             "顺序必须是 公钥 → sudo → post_script → done 回调")
+
+
+# ══ 遗留 A/B 用例（2026-10-14 落地）═════════════════════════════════════════
+# 遗留 A：_ipxe_menu 的 debian 分支此前**恒发** netcfg/disable_autoconfig=true 与
+#   netcfg/get_*，DHCP 模板被拉回"静态但无值"（d-i 停在静态网络提问，无人应答的死局）。
+#   修复 = 与三族应答文件侧同一谓词 (c.net_mode == "static")：只有字面 static 走静态。
+# 遗留 B：disk_config.wipe_disks —— 显式声明"本次装机要一并清理的盘"（不含目标盘），
+#   用于清掉别盘残留的 LVM 卷组元数据（真机实证：d-i 停在
+#   "Volume group name already in use"）。默认 [] = 只清目标盘，绝不默认全抹。
+import re as _re
+
+from app.it.pxe.generator import _disk_config_active, _rhel_ks, _ubuntu_user_data
+
+_MASK_RE = _re.compile(r"\$6\$[^\s'\"]+")
+
+
+def _mask(t: str) -> str:
+    return _MASK_RE.sub("$6$MASK", t)
+
+
+class TestDebianIpxeNetModeBranch:
+    """遗留 A：iPXE debian 分支按 net_mode 分岔。
+
+    注意两层优先级（generate_all 第 3108-3110 行）：装机记录**自带 ip** 时，
+    每机菜单会被强制按静态生成（`replace(ic, net_mode="static", net_config=mnet)`）
+    —— 这是每机静态 IP 的正道，与模板 net_mode 无关。所以要看模板级 net_mode 分岔，
+    装机记录必须**不带 ip**（INST_NOIP），否则量到的是"该机自己的静态优先"。
+    """
+
+    TAG = "bc-24-11-66-8b-ea"
+    # 与 TestDebianWiring.INST 同形，但**不带 ip** ⇒ 不触发每机静态覆盖
+    INST_NOIP = [{"id": "abc", "mac": "BC:24:11:66:8B:EA",
+                  "hostname": "pxe140-debian", "status": "pending"}]
+
+    def _kernel_line(self, insts=None, **over):
+        files = generate_all(_cfg(**over), self.INST_NOIP if insts is None else insts)
+        boot = files["boot/" + self.TAG + ".ipxe"]
+        return [l for l in boot.splitlines() if l.startswith("kernel ")][0]
+
+    def test_static_keeps_netcfg_args(self):
+        line = self._kernel_line()          # BASE_KW 就是 static
+        assert "netcfg/disable_autoconfig=true" in line
+        assert "netcfg/get_ipaddress=192.168.199.140" in line
+        assert "netcfg/get_netmask=255.255.255.0" in line
+        assert "netcfg/get_gateway=192.168.199.1" in line
+        assert "netcfg/get_nameservers=192.168.199.1" in line
+        assert "netcfg/confirm_static=true" in line
+
+    def test_dhcp_drops_all_netcfg_args(self):
+        # net_config 里仍带着静态值（前端可能只翻了 net_mode）—— 也必须一个 netcfg/ 都不发
+        line = self._kernel_line(net_mode="dhcp")
+        assert "netcfg/" not in line, "DHCP 模板不得再带任何 netcfg/ 参数（否则被拉回静态死局）"
+        # 装机网卡仍要钉住（多网卡），preseed 取用路径不变
+        assert "interface=ens18" in line
+        assert "auto=true" in line and "priority=critical" in line
+        assert "preseed/url=http://192.168.199.1:8000/pxe/serve/T/preseed/" + self.TAG + "/preseed.cfg" in line
+
+    def test_unknown_net_mode_falls_back_to_dhcp(self):
+        # 与四族同一口径：只有字面 "static" 走静态，其余（含非法/缺失）一律 DHCP
+        for mode in ("", "DHCP", "bogus", None):
+            line = self._kernel_line(net_mode=mode)
+            assert "netcfg/" not in line, "net_mode=%r 必须落 DHCP" % (mode,)
+
+    def test_registered_machine_ip_still_wins_over_template_dhcp(self):
+        # 反向锁定：装机记录自带 ip 时，即便模板是 dhcp，每机菜单仍按该机静态生成
+        # （否则"每机静态 IP"能力会被模板的 net_mode 吃掉）
+        line = self._kernel_line(insts=TestDebianWiring.INST, net_mode="dhcp")
+        assert "netcfg/get_ipaddress=192.168.199.140" in line
+        assert "netcfg/disable_autoconfig=true" in line
+        assert "netcfg/confirm_static=true" in line
+
+
+class TestDebianWipeDisks:
+    """遗留 B：disk_config.wipe_disks 的生成器消费与闭集边界。"""
+
+    PS_A = "http://192.168.199.1:8000/pxe/serve/T/preseed/bc-24-11-66-8b-ea/preseed.cfg"
+
+    @staticmethod
+    def _early(ps):
+        return [l for l in ps.splitlines()
+                if l.startswith("d-i partman/early_command string ")][0]
+
+    def test_default_absent_is_byte_identical(self):
+        # 不声明 wipe_disks ⇒ 产物与"只有目标盘"逐字节相同（存量模板零变化）。
+        # 口令密文盐随机会导致明文比较假红，按既有 golden 惯例掩码后比。
+        assert _mask(_debian_preseed(_cfg())) == _mask(_debian_preseed(_cfg(disk_config={"disk": "sda"})))
+
+    def test_wipe_disks_added_to_early_command(self):
+        ps = _debian_preseed(_cfg(disk_config={"disk": "sda", "wipe_disks": ["sdb", "/dev/nvme0n1"]}))
+        e = self._early(ps)
+        for d in ("/dev/sda", "/dev/sdb", "/dev/nvme0n1"):
+            assert ("wipefs -a " + d + " ") in e, "每个盘都要 wipefs: " + d
+            assert ("of=" + d + " bs=1M count=200") in e, "每个盘都要抹首 200MB: " + d
+        assert e.rstrip().endswith("; true"), "整行必须以 ; true 收尾（与目标盘同形）"
+
+    def test_wipe_disks_dedup_and_target_skip(self):
+        # 与目标盘同名 / 列表内重复 ⇒ 幂等忽略，不对同一盘重复 dd
+        ps = _debian_preseed(_cfg(disk_config={"disk": "sda",
+                                               "wipe_disks": ["sda", "sdb", "sdb", "/dev/sdb"]}))
+        e = self._early(ps)
+        assert e.count("wipefs -a /dev/sda ") == 1
+        assert e.count("wipefs -a /dev/sdb ") == 1
+
+    def test_illegal_wipe_disk_name_rejected(self):
+        # 盘名会拼进 d-i 用 sh 执行的命令串 ⇒ 白名单外一律 ValueError（不生成产物）
+        for bad in ("sdb; rm -rf /", "sd*", "sdb$(reboot)", "sdb x", 'sdb"x'):
+            with pytest.raises(ValueError):
+                _debian_preseed(_cfg(disk_config={"disk": "sda", "wipe_disks": [bad]}))
+
+    def test_empty_wipe_disk_entry_skipped_not_raised(self):
+        # 空串/纯空白是"没填"而不是"填错了"：生成器跳过（与 api 层 _normalize_extra_repos
+        # 对空 url 同规则）。致命面由 schema 保存期 422 兜住（见 test_pxe_wipe_disks_schema）。
+        for empty in ("", "   ", "/dev/"):
+            ps = _debian_preseed(_cfg(disk_config={"disk": "sda", "wipe_disks": [empty]}))
+            e = self._early(ps)
+            assert e.count("wipefs -a ") == 1, "空条目不得产出额外清理盘: %r" % (empty,)
+
+    def test_only_debian_consumes_wipe_disks(self):
+        # 闭集边界：RHEL/Ubuntu 家族不消费该键（v1 只接 preseed）。同一份 disk_config
+        # 加不加 wipe_disks，两族产物掩码后逐字节相同 —— 且守卫不让它误切结构化路径。
+        dc_plain = {"disk": "sda"}
+        dc_wipe = {"disk": "sda", "wipe_disks": ["sdb"]}
+        assert _disk_config_active(dc_plain) is False
+        assert _disk_config_active(dc_wipe) is False, \
+            "wipe_disks 不是结构化键，不得把存量模板切进结构化路径"
+        assert _disk_config_active({"disk": "sda", "target": {"mode": "name", "name": "sda"}}) is True
+        assert _mask(_rhel_ks(_cfg(os_type="rocky", disk_config=dc_plain))) == \
+            _mask(_rhel_ks(_cfg(os_type="rocky", disk_config=dc_wipe)))
+        assert _mask(_ubuntu_user_data(_cfg(os_type="ubuntu", disk_config=dc_plain))) == \
+            _mask(_ubuntu_user_data(_cfg(os_type="ubuntu", disk_config=dc_wipe)))
+
