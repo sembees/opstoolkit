@@ -1952,11 +1952,13 @@ def _ubuntu_user_data(c):
 def _debian_preseed(c):
     """生成 Debian（d-i）preseed.cfg。
 
-    指令来源（**每条都取自官方 example-preseed，见 mimo/ref/debian-example-preseed.txt**）：
+    指令来源（**每条都取自官方 example-preseed，见 mimo/ref/debian-example-preseed.txt**；
+    例外一处已逐字注明出处：netcfg/hostname 不在 example-preseed 里，取自 netcfg 1.197
+    的 debian/netcfg-common.templates —— 见下方"主机名：两个键都要下"整段注释）：
       · 本地化/时钟：debian-installer/locale、keyboard-configuration/xkb-keymap、time/zone、clock-setup/utc
       · 静态网络：netcfg/choose_interface、netcfg/disable_autoconfig、netcfg/get_ipaddress、
         netcfg/get_netmask、netcfg/get_gateway、netcfg/get_nameservers、netcfg/confirm_static、
-        netcfg/get_hostname、netcfg/get_domain
+        netcfg/get_hostname（提问）+ netcfg/hostname（真正落盘）、netcfg/get_domain
       · 包源：mirror/country、mirror/protocol、mirror/http/hostname、mirror/http/directory、mirror/http/proxy
       · 账户：passwd/root-login、passwd/make-user、passwd/user-fullname、passwd/username、
         passwd/user-password-crypted、passwd/user-default-groups
@@ -2052,7 +2054,38 @@ def _debian_preseed(c):
         L.append("d-i netcfg/get_gateway string " + gw)
         L.append("d-i netcfg/get_nameservers string " + dns_s)
         L.append("d-i netcfg/confirm_static boolean true")
-    L.append("d-i netcfg/get_hostname string " + (c.hostname or "debian"))
+    # ── 主机名：netcfg 侧两个键都下，但**不依赖它们**（2026-10-14 两轮真机定案）──
+    # 作者出处（权威，逐个读过源码，不是只看模板描述）：
+    #   · netcfg 1.197（= trixie）debian/netcfg-common.templates
+    #     https://sources.debian.org/src/netcfg/1.197/debian/netcfg-common.templates
+    #       Template: netcfg/get_hostname / Type: string / **Default: debian** /
+    #       _Description: Hostname:            —— 这是**提问模板**（问句的默认答案）。
+    #       Template: netcfg/hostname / Description: for internal use; can be preseeded /
+    #       "Hostname to set for the system; ignores names provided by DHCP or DNS."
+    #   · netcfg 1.197 netcfg.c / netcfg-static.c（主流程）**通篇没有读 netcfg/hostname**
+    #     —— 该模板自称"can be preseeded"，但这条路径上是**遗留物**，下了也不生效。
+    #     https://sources.debian.org/data/main/n/netcfg/1.197/netcfg.c
+    #     https://sources.debian.org/data/main/n/netcfg/1.197/netcfg-static.c
+    #     主流程只调 netcfg_get_hostname(client, "netcfg/get_hostname", …)；
+    #     而 netcfg-common.c 的 netcfg_write_common() 开头是
+    #     `if (empty_str(hostname)) return;` —— 一旦该值没被取到，就**什么都不写**，
+    #     目标系统的 /etc/hostname 于是留着安装器环境自己的主机名，也就是 debian。
+    # 真机证据（VM140 BIOS 与 VM141 UEFI 两台一致）：
+    #   只下发 netcfg/get_hostname 时 /etc/hostname = debian、/etc/hosts 第 2 行
+    #   = "192.168.199.140  debian"；
+    #   再把 netcfg/hostname 也下发、容器重启后重装一台，**仍是 debian**
+    #   （安装器 syslog 只有一行 netcfg 相关的调试：
+    #    "Getting default hostname from rDNS lookup of static-configured address
+    #     192.168.199.140"，从头到尾没有一句"hostname 已设置"）。
+    # 结论：RHEL(kickstart `network --hostname=`) 与 Ubuntu(autoinstall
+    #   `identity.hostname`) 都生效，只有 Debian 这条链不可靠 —— 属于
+    #   "与 ubuntu/rocky/openeuler 一样全自动装机"要求的家族不等价。
+    # 处置：两个键照下（无害，且若将来 netcfg 恢复读取就能生效），
+    #   **真正的落地点是 preseed/late_command**（见下"收尾"段的 hostname 写入），
+    #   与公钥/sudoers 同一处、同一种确定性写法，可被真机验收机械核对。
+    _hn = _safe_hostname(c.hostname, "debian")
+    L.append("d-i netcfg/get_hostname string " + _hn)   # 预答提问，避免无人值守时被问
+    L.append("d-i netcfg/hostname string " + _hn)       # 模板自称可 preseed；实测不生效，留作前向兼容
     L.append("d-i netcfg/get_domain string localdomain")
     L.append("")
     L.append("### 包源（本地 HTTP 仓库，离线装机用）")
@@ -2212,6 +2245,27 @@ def _debian_preseed(c):
     L.append("### 收尾")
     L.append("d-i finish-install/reboot_in_progress note")
     _late = []
+    # ── 主机名确定性落地（**这是 Debian 家族真正生效的那一步**）──────────────
+    # 为什么放在这里：netcfg 的 netcfg/get_hostname（提问模板，Default: debian）与
+    #   netcfg/hostname（模板自称可 preseed，但 netcfg 1.197 主流程根本不读）都试过，
+    #   两轮真机装完 /etc/hostname 恒为 debian（依据与源码出处见上面"主机名"整段注释）。
+    #   故不再依赖 netcfg：像公钥/sudoers 一样，直接在 late_command 里写进 target。
+    # 写法要点：
+    #   · /etc/hostname：单值直接落盘。
+    #   · /etc/hosts：按 d-i 自己的规范格式整体重写（该文件就是本次安装刚生成的，
+    #     重写不丢任何信息）—— 有静态 IP 用静态 IP，没有就按惯例用 127.0.1.1。
+    #   · 整条命令必须保持**单逻辑行**：换行一律走 printf 的 \n 转义，
+    #     绝不把裸换行塞进 preseed 值（那会截断条目，是既有教训）。
+    #   · 值以 printf 的**参数**传入（%s），不拼进格式串 —— 数据不可能被当成格式指令。
+    _hn_ip = ip if _net_static and ip else "127.0.1.1"
+    _late.append(
+        "printf '%s\\n' " + shlex.quote(_hn) + " > /target/etc/hostname"
+        + " && printf '127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n"
+          "# The following lines are desirable for IPv6 capable hosts\\n"
+          "::1     localhost ip6-localhost ip6-loopback\\n"
+          "ff02::1 ip6-allnodes\\n"
+          "ff02::2 ip6-allrouters\\n' "
+        + shlex.quote(_hn_ip) + " " + shlex.quote(_hn) + " > /target/etc/hosts")
     # SSH 公钥 + sudo 免密：只在 target 里落文件（d-i 没有 authorized_keys 指令）
     _keys = [k.strip() for k in (c.ssh_keys or []) if str(k or "").strip()]
     if _keys:

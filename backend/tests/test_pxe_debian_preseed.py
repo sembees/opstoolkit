@@ -90,6 +90,57 @@ class TestDebianPreseedContent:
         assert PLAIN_PW not in ps, "生成物里绝不能出现明文口令"
         assert "passwd/user-password-crypted password $6$" in ps
 
+    def test_hostname_both_keys_emitted(self):
+        """主机名必须**两个键都下**（2026-10-14 真机回归发现的缺口）。
+
+        只写 netcfg/get_hostname（提问模板，Default: debian）时装完 /etc/hostname 恒为
+        debian —— VM140(BIOS) 与 VM141(UEFI) 两台实测一致；netcfg 1.197 的
+        debian/netcfg-common.templates 里真正落盘的是 netcfg/hostname
+        （"Hostname to set for the system; ignores names provided by DHCP or DNS"）。
+        这是与 RHEL(`network --hostname=`) / Ubuntu(`identity.hostname`) 的家族等价要求。
+        """
+        ps = _debian_preseed(_cfg())
+        assert "d-i netcfg/get_hostname string pxe140-debian" in ps
+        assert "d-i netcfg/hostname string pxe140-debian" in ps, \
+            "缺 netcfg/hostname ⇒ 装完主机名会落回 d-i 默认值 debian（真机实证）"
+        # 两行同值，且不得出现第三个主机名来源
+        hn = [l for l in ps.splitlines() if "netcfg/hostname" in l or "netcfg/get_hostname" in l]
+        assert len(hn) == 2, hn
+
+    def test_hostname_sanitized_at_generator_layer(self):
+        # 该值落进 d-i 命令串：生成器不信任入参，第 2 层白名单（schema 层是第 1 层）
+        ps = _debian_preseed(_cfg(hostname="pxe 140;evil\nx"))
+        for l in ps.splitlines():
+            if "netcfg/hostname" in l or "netcfg/get_hostname" in l:
+                assert l.endswith(" string pxe140evilx"), l
+        # 空主机名落回 debian（与 netcfg/get_hostname 的 Default 一致），绝不留空串
+        ps2 = _debian_preseed(_cfg(hostname=""))
+        assert "d-i netcfg/hostname string debian" in ps2
+
+    def test_hostname_written_in_late_command(self):
+        """真正生效的是 late_command 里那次写入（netcfg 侧两个键实测都不生效）。
+
+        依据见 generator._debian_preseed 内"主机名：netcfg 侧两个键都下，但不依赖它们"
+        整段注释：netcfg 1.197 主流程从不读 netcfg/hostname，而 netcfg_write_common()
+        在 hostname 为空时直接 return —— 两轮真机装完 /etc/hostname 都是 debian。
+        """
+        lc = [l for l in _debian_preseed(_cfg()).splitlines()
+              if l.startswith("d-i preseed/late_command string ")][0]
+        assert "> /target/etc/hostname" in lc, "必须在 late_command 里落主机名"
+        assert "printf '%s\\n' pxe140-debian > /target/etc/hostname" in lc
+        assert "> /target/etc/hosts" in lc
+        # 静态 IP 那台：/etc/hosts 的第二行必须是 "静态IP  主机名"
+        assert "%s\\t%s\\n\\n" in lc and " 192.168.199.140 pxe140-debian > /target/etc/hosts" in lc
+        # 整条 late_command 必须仍是**单逻辑行**（裸换行会截断 preseed 条目）
+        assert "\n" not in lc
+
+    def test_hostname_late_command_uses_loopback_when_dhcp(self):
+        # 没有静态 IP 时按 d-i 惯例用 127.0.1.1，不写空地址
+        lc = [l for l in _debian_preseed(_cfg(net_mode="dhcp")).splitlines()
+              if l.startswith("d-i preseed/late_command string ")][0]
+        assert " 127.0.1.1 pxe140-debian > /target/etc/hosts" in lc
+        assert "\n" not in lc
+
 
 class TestDebianWiring:
     # MAC 必须用生成器认的冒号形态：_MAC_RE = ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ 只认冒号

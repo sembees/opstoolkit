@@ -12,7 +12,21 @@ static+lvm 必测；dhcp / direct 按参数化补齐，各一份内联期望。
 重新基线：用装了 passlib 的解释器跑
     python mimo/draft/debian_docs_golden.py gen --case <case> --src <backend 的上级目录>
 逐行核对 diff 后更新 GOLDEN，并沿用本仓 golden 先例的注释惯例记录"哪些行变了、为什么"。
-基线生成时间：2026-10-14 23:31
+重新基线历史：
+  · 2026-10-14（初版）：基线取自 b2863cc 之前的实现（内网代工内嵌的那份已过期 ——
+    那时 preseed/late_command 的装完回调还是"目标系统外 curl"）。落地时按**当前**
+    实现现算，掩码后 sha256: static_lvm 67f877dd… / dhcp_lvm f911b122… / static_direct 6c8eb940…
+  · 2026-10-14（真机回归后 · 第一次）：_debian_preseed 增加
+    `d-i netcfg/hostname string <主机名>`（当时以为它才是落盘用的键）。
+    行数各 **+1**（68→69 / 62→63 / 65→66）。
+  · 2026-10-14（真机回归后 · 第二次）：把主机名的**真正落地点**改到
+    `preseed/late_command`（写 /target/etc/hostname 与 /target/etc/hosts）。
+    原因：netcfg/hostname 虽然模板自称 "can be preseeded"，但 netcfg 1.197 的
+    netcfg.c / netcfg-static.c 主流程**根本不读它**，而 netcfg_write_common() 在
+    hostname 为空时直接 return —— 两轮真机（含下发 netcfg/hostname 的那轮）装完
+    /etc/hostname 恒为 debian。行数不变（69/63/66），只有 late_command 那行内容变长。
+
+基线生成时间：2026-10-14 23:52
 """
 import hashlib
 import re
@@ -74,8 +88,8 @@ CASE_OVERRIDES = {
 # sha256 = sha256(掩码文本)，n_lines = len(text.split("\n"))。三重一致才算过。
 GOLDEN = {
     "static_lvm": {
-        "sha256": "67f877dd47babf7ebf82b12c30bcefc1e4fb9eef5b85b6d114d271265c92668b",
-        "n_lines": 68,
+        "sha256": "be79557c3762effbdcf3761f65228438b04154d4af3b9b093db41c4b1eeed0bb",
+        "n_lines": 69,
         "lines": (
             '#_preseed_V1',
             '# 由 OpsToolkit 生成（Debian d-i preseed）',
@@ -95,6 +109,7 @@ GOLDEN = {
             'd-i netcfg/get_nameservers string 192.168.199.1',
             'd-i netcfg/confirm_static boolean true',
             'd-i netcfg/get_hostname string pxe140-debian',
+            'd-i netcfg/hostname string pxe140-debian',
             'd-i netcfg/get_domain string localdomain',
             '',
             '### 包源（本地 HTTP 仓库，离线装机用）',
@@ -143,13 +158,13 @@ GOLDEN = {
             '',
             '### 收尾',
             'd-i finish-install/reboot_in_progress note',
-            'd-i preseed/late_command string mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
+            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 192.168.199.140 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
             '',
         ),
     },
     "dhcp_lvm": {
-        "sha256": "f911b122283a6ad222999925ef87d2ff6dd95b632c4a65968bf8ced3a949418e",
-        "n_lines": 62,
+        "sha256": "13dddbf4015fad9b2e60f78d357c38a28c2299bfac3fe1a28bb0c7078df95e96",
+        "n_lines": 63,
         "lines": (
             '#_preseed_V1',
             '# 由 OpsToolkit 生成（Debian d-i preseed）',
@@ -163,6 +178,7 @@ GOLDEN = {
             '### 网络（DHCP；iPXE 侧必须同时给 interface=ens18）',
             'd-i netcfg/choose_interface select ens18',
             'd-i netcfg/get_hostname string pxe140-debian',
+            'd-i netcfg/hostname string pxe140-debian',
             'd-i netcfg/get_domain string localdomain',
             '',
             '### 包源（本地 HTTP 仓库，离线装机用）',
@@ -211,13 +227,13 @@ GOLDEN = {
             '',
             '### 收尾',
             'd-i finish-install/reboot_in_progress note',
-            'd-i preseed/late_command string mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
+            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 127.0.1.1 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
             '',
         ),
     },
     "static_direct": {
-        "sha256": "6c8eb9400e43bcb908e3324e5de99d939a02228a626de1eafbe5cfedc3ad2751",
-        "n_lines": 65,
+        "sha256": "f4752bad5b65d474e8c149e039d59738466413f9bc14c3c38a5c9d2f273fecdd",
+        "n_lines": 66,
         "lines": (
             '#_preseed_V1',
             '# 由 OpsToolkit 生成（Debian d-i preseed）',
@@ -237,6 +253,7 @@ GOLDEN = {
             'd-i netcfg/get_nameservers string 192.168.199.1',
             'd-i netcfg/confirm_static boolean true',
             'd-i netcfg/get_hostname string pxe140-debian',
+            'd-i netcfg/hostname string pxe140-debian',
             'd-i netcfg/get_domain string localdomain',
             '',
             '### 包源（本地 HTTP 仓库，离线装机用）',
@@ -282,7 +299,7 @@ GOLDEN = {
             '',
             '### 收尾',
             'd-i finish-install/reboot_in_progress note',
-            'd-i preseed/late_command string mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
+            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 192.168.199.140 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
             '',
         ),
     },
