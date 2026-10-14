@@ -515,6 +515,14 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
               </el-alert>
               <p class="section-title mt-2">standalone（独立 DHCP）</p>
               <p>本工具自己就是 DHCP 服务器，裸机插上线就装。前提是这段网络里不能有其他 DHCP，否则会冲突抢答甚至断网 —— 确认弹窗里会红字提醒这一风险。</p>
+              <p class="section-title mt-2">装机网段可以自定义（不是写死的）</p>
+              <p>模板「装机网（PXE 服务端 DHCP）」里可以填 <b>DHCP 池起 / 池止 / 下发网关 / 下发 DNS</b>，<b>任意网段</b>都可以（例如 10.99.0.0/24、172.20.5.0/24），与「被装机器用 DHCP 还是静态」是两回事，两种模式下都能填。留空则自动取<b>部署时填的 PXE 服务端 IP</b> 所在网段的 <code>.100–.200</code>。</p>
+              <p class="tight-p">两个前提：</p>
+              <ol class="tight-p">
+                <li>该网段必须<b>已经配置在本机某张网卡上</b>（部署时按 server_ip 反查持有它的网卡并写进 dnsmasq 的 <code>interface=</code>）。要在新网段装机，先在宿主机上给一张隔离网卡配上该网段的地址，再在模板里填同一网段的池。</li>
+                <li>池必须<b>整体落在该网卡的网段内</b>，否则部署会被红线守卫直接拒绝（<code>422</code>，提示池不在网段内）。<b>企业网段一律拒绝</b> —— 在承载默认路由的管理/生产网口上开 DHCP 会把地址发到该网段，这是硬红线，不是提醒。</li>
+              </ol>
+              <p class="tight-p">网关与 DNS 留空时取 PXE 服务端 IP（隔离装机网里服务端通常就是网关）；只填池的一端也可以，另一端仍按服务端 IP 推。</p>
               <p class="section-title mt-2">proxy（ProxyDHCP 代理）</p>
               <p>不动 IP 分配（现有 DHCP 照常工作），只额外广播一条 PXE 引导信息。机器同时收到两份回应：从原 DHCP 拿到 IP，从本工具拿到引导地址。</p>
               <p class="section-title mt-2">relay（中继模式）</p>
@@ -1125,7 +1133,8 @@ const pxeFields = [
   { field: "自定义分区表", required: "custom", desc: "逐行定义挂载点/大小/fstype/VG+LV；必须含 / 分区；rest 只能最后一行" },
   { field: "其它数据盘", required: "否", desc: "默认不动数据；要挂载须二选一：格式化新建，或填已有文件系统 UUID/卷标（仅 RHEL 系）" },
   { field: "RAID", required: "custom", desc: "仅自定义分区表；级别 0/1/5/6/10，成员填分区序号（如 3,4）" },
-  { field: "网络", required: "否", desc: "DHCP 或静态（网卡名/IP/掩码/网关/DNS）" },
+  { field: "网络", required: "否", desc: "被装机器的网络：DHCP 或静态（网卡名/IP/掩码/网关/DNS）" },
+  { field: "装机网（PXE 服务端 DHCP）", required: "否", desc: "服务端 dnsmasq 的 DHCP 池起/池止、下发网关、下发 DNS —— 支持任意自定义网段，与「被装机器用 DHCP 还是静态」无关。全部留空则按部署时的 PXE 服务端 IP 推同网段 .100–.200，网关/DNS 取服务端 IP。前提：该网段已配在本机某张网卡上，且池整体落在该网段内（企业网段会被红线守卫拒绝）" },
   { field: "镜像源", required: "否", desc: "apt/yum 源，留空用默认；RHEL 系给本机 repo 时会自动探测 stage2 与 AppStream" },
   { field: "额外软件 / 安装后脚本", required: "否", desc: "追加包（逗号分隔）；装完执行的 shell 脚本" },
 ]

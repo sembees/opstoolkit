@@ -2773,6 +2773,36 @@ def _ipxe_menu(c, mac="", answer_url=""):
 
 
 # ===== dnsmasq 配置 =====
+def _ipv4_octets(v):
+    """把 "a.b.c.d" 拆成 4 段整数；不是合法 IPv4 就返回 None（生成器不信任入参）。"""
+    try:
+        parts = str(v or "").strip().split(".")
+        if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            return parts
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _dhcp_pool_defaults(server_ip):
+    """装机网 DHCP 池的缺省值：从 server_ip 推同网段的一个池（返回 (start, end)）。
+
+    为什么要有它：旧实现在 _dnsmasq 里把池硬编码成 192.168.1.100-192.168.1.200，
+    于是"装机网是 192.168.199.0/24"时生成的池不在本机任何网段的网段内 —— 部署会被
+    红线守卫按真实掩码拒掉（这是对的），但界面上当时**没有**填池的入口，运维无路可走。
+    取 server_ip 的前三段 + .100/.200：对 /24 的隔离网就是正确值（本项目 192.168.199.0/24
+    → 192.168.199.100-192.168.199.200）；非 /24 时这只是"按最常见形状猜"，**不豁免任何
+    安全检查** —— 最终仍由部署侧 range_inside_binding（按该网卡真实掩码）与
+    dhcp.check_dhcp_conf_safety（骨干网拦截）判定，宁可拒绝也不放行。
+    server_ip 非法/为 IPv6/为空时退回旧默认值（保持向后兼容）。
+    """
+    parts = _ipv4_octets(server_ip)
+    if parts:
+        base = ".".join(parts[:3])
+        return base + ".100", base + ".200"
+    return "192.168.1.100", "192.168.1.200"
+
+
 def _dnsmasq(c, installs=None):
     """三种部署模式：
     standalone - 独立 DHCP（专用装机网络，裸机接入即装）
@@ -2793,7 +2823,28 @@ def _dnsmasq(c, installs=None):
     # 生成物是 `interface=ens18`，而 ens18=10.128.118.113 是企业网卡 —— 一部署就在
     # 10.128.118.0/24 上开 DHCP。没有 server_interface 时保持原样（向后兼容）。
     iface = nc.get("server_interface") or nc.get("interface", "eth0")
-    gateway = nc.get("gateway", "192.168.1.1")
+    # ── 装机网（服务端）参数：缺省值一律从 server_ip 推，不再硬编码 192.168.1.x ──
+    # 真机/界面实证（2026-10-15，用户报"DHCP 不能说只能固定一个网段"）：
+    #   旧实现把池硬编码成 `192.168.1.100-192.168.1.200`、网关硬编码成 `192.168.1.1`，
+    #   而 Pxe.vue 的 buildPayload() **只在 net_mode=static 时才发 net_config**，
+    #   且从不发 dhcp_start/dhcp_end/dns_server ⇒ 界面上选「模式=DHCP」建出来的模板，
+    #   生成物必然是 `dhcp-range=192.168.1.100,192.168.1.200` + `interface=eth0`
+    #   —— 池落在本机任何网卡的网段之外，部署会被红线守卫
+    #   （_deploy_redline_check → range_inside_binding）拒掉，而界面上根本没有填池的入口。
+    #   本项目的真机验收之所以能跑通，只是因为 e2e 脚本自己显式传了
+    #   dhcp_start/dhcp_end/gateway（界面走不到那条路）。
+    # 现在：池与网关默认跟随 server_ip（隔离装机网的服务器地址），并新增界面入口
+    #   让运维显式指定任意网段；**红线判据一字未改** —— 池最终仍由部署侧
+    #   range_inside_binding 按该网卡的真实掩码 + dhcp.check_dhcp_conf_safety
+    #   的骨干网拦截共同把关（fail-closed），推出来的默认值不豁免任何检查。
+    _pool = _dhcp_pool_defaults(c.server_ip)
+    # 网关/DNS 同样不信任入参：模板里填了但**不是合法 IPv4** 时不能原样发出去
+    # （否则 dnsmasq 配置里会出现 `dhcp-option=option:router,192.168.199` 这种半截地址，
+    #  本次改动的自检用例正是当场抓到了这一条）。非法/空 ⇒ 用 server_ip，再不行用旧默认。
+    _srv_ok = _ipv4_octets(c.server_ip)
+    gateway = (nc.get("gateway") if _ipv4_octets(nc.get("gateway"))
+               else (".".join(_srv_ok) if _srv_ok else "192.168.1.1"))
+    _dns_srv = nc.get("dns_server") if _ipv4_octets(nc.get("dns_server")) else gateway
     mode = c.deploy_mode or "standalone"
     # 每台【已登记】机器的第二阶段引导脚本放在 answer_root 下（按模板隔离）。
     # 未登记机器的默认引导脚本仍然是**扁平**的 <http_root>/boot.ipxe：
@@ -2870,10 +2921,11 @@ def _dnsmasq(c, installs=None):
     else:
         # standalone：独立 DHCP + TFTP，完整分配 IP
         L.append("# 独立 DHCP 模式: 完整分配 IP + PXE 引导（确保网段内无其他 DHCP）")
-        L.append("dhcp-range=" + nc.get("dhcp_start", "192.168.1.100") + ","
-                 + nc.get("dhcp_end", "192.168.1.200") + ",12h")
+        # 池：显式填的优先；没填则用 server_ip 同网段的默认池（见上方 _dhcp_pool_defaults）
+        L.append("dhcp-range=" + (nc.get("dhcp_start") or _pool[0]) + ","
+                 + (nc.get("dhcp_end") or _pool[1]) + ",12h")
         L.append("dhcp-option=option:router," + gateway)
-        L.append("dhcp-option=option:dns-server," + nc.get("dns_server", gateway))
+        L.append("dhcp-option=option:dns-server," + _dns_srv)
 
     L.append("")
     L.append("enable-tftp")

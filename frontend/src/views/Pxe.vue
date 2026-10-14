@@ -565,6 +565,26 @@
           <el-col :span="8"><el-form-item label="DNS"><el-input v-model="form.net_dns" placeholder="逗号分隔" /></el-form-item></el-col>
         </el-row>
 
+        <!-- ★ 装机网（服务端 DHCP）：与"被装机器用 DHCP 还是静态"无关，两种模式都要能填。
+             之前这里只有上面那组客户端字段，且 net_config 只在 static 时下发 ⇒ 界面选
+             DHCP 建出来的模板，dnsmasq 的池被硬编码成 192.168.1.100-200（与本机任何网卡
+             的网段都不符），部署会被红线守卫拒掉，而界面上没有填池的入口。 -->
+        <el-divider content-position="left">装机网（PXE 服务端 DHCP）</el-divider>
+        <el-alert type="info" :closable="false" show-icon class="mb-2"
+                  title="池与网关按隔离装机网填；留空则自动取「PXE 服务端 IP」所在网段的 .100–.200。该网段必须先在本机某张网卡上配好地址（部署时按 server_ip 反查网卡），企业网段会被红线守卫拒绝。" />
+        <el-row :gutter="12">
+          <el-col :span="8"><el-form-item label="DHCP 池起">
+            <el-input v-model="form.pxe_dhcp_start" placeholder="留空=按服务端 IP 推，如 192.168.199.100" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="DHCP 池止">
+            <el-input v-model="form.pxe_dhcp_end" placeholder="留空=按服务端 IP 推，如 192.168.199.200" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="下发网关">
+            <el-input v-model="form.pxe_gateway" placeholder="留空=用 PXE 服务端 IP" /></el-form-item></el-col>
+        </el-row>
+        <el-row :gutter="12">
+          <el-col :span="8"><el-form-item label="下发 DNS">
+            <el-input v-model="form.pxe_dns_server" placeholder="留空=用下发网关" /></el-form-item></el-col>
+        </el-row>
+
         <el-divider content-position="left">镜像与软件</el-divider>
         <el-form-item label="镜像源"><el-input v-model="form.mirror" placeholder="http://mirror/rocky/9/BaseOS/x86_64/os/" /></el-form-item>
         <el-form-item label="额外软件"><el-input v-model="form.extra_packages_text" placeholder="逗号分隔: vim, net-tools, htop" /></el-form-item>
@@ -1358,6 +1378,9 @@ const emptyForm = () => ({
   disk_min_size_gb: 0, disk_wipe: true,
   partitions: [], data_disks: [], raid: [],
   net_mode: "dhcp", net_interface: "ens33", net_ip: "", net_netmask: "255.255.255.0", net_gateway: "", net_dns: "",
+  // 装机网（服务端 DHCP）—— 与上面那组"被装机器"的字段是两回事，两种模式下都可填。
+  // 留空则后端从部署时的 server_ip 推同网段默认池（见 generator._dhcp_pool_defaults）。
+  pxe_dhcp_start: "", pxe_dhcp_end: "", pxe_gateway: "", pxe_dns_server: "",
   mirror: "", extra_packages_text: "", post_script: "",
 })
 const form = reactive(emptyForm())
@@ -1505,6 +1528,33 @@ function buildDiskConfig() {
   return dc
 }
 
+function buildNetConfig() {
+  // 两组字段合成一个 net_config，后端按用途各取所需：
+  //  · 被装机器（static 才有）：interface/ip/netmask/gateway/dns —— 进 ks/user-data/preseed；
+  //  · 装机网服务端（两种模式都要）：dhcp_start/dhcp_end/dns_server/server_interface/gateway
+  //    —— 进 dnsmasq 的 dhcp-range 与 dhcp-option。
+  // 空值一律**不下发**（后端用 `or` 落到按 server_ip 推的默认值），避免把空串写进配置。
+  const nc = {}
+  const put = (k, v) => { const s = String(v == null ? "" : v).trim(); if (s) nc[k] = s }
+  if (form.net_mode === "static") {
+    put("interface", form.net_interface)
+    put("ip", form.net_ip)
+    put("netmask", form.net_netmask)
+    put("gateway", form.net_gateway)
+    const dns = form.net_dns.split(",").map(d => d.trim()).filter(Boolean)
+    if (dns.length) nc.dns = dns
+  }
+  put("dhcp_start", form.pxe_dhcp_start)
+  put("dhcp_end", form.pxe_dhcp_end)
+  put("dns_server", form.pxe_dns_server)
+  // 不下发 server_interface：服务端 dnsmasq 该绑哪张网卡，唯一正确判据是「谁持有
+  // server_ip」（后端在部署时按 server_ip 反查并覆盖）。界面上给这个框只会误导人。
+  // 下发网关：只有运维显式填了才覆盖后端默认（默认 = PXE 服务端 IP）。
+  // static 模式下没填就沿用上面那个客户端网关（两者在隔离装机网里通常同一个地址）。
+  put("gateway", form.pxe_gateway || (form.net_mode === "static" ? form.net_gateway : ""))
+  return nc
+}
+
 function buildPayload() {
   return {
     name: form.name, os_type: form.os_type, os_version: form.os_version,
@@ -1518,11 +1568,7 @@ function buildPayload() {
     disk_scheme: form.disk_scheme,
     disk_config: buildDiskConfig(),
     net_mode: form.net_mode,
-    net_config: form.net_mode === "static" ? {
-      interface: form.net_interface, ip: form.net_ip,
-      netmask: form.net_netmask, gateway: form.net_gateway,
-      dns: form.net_dns.split(",").map(d => d.trim()).filter(Boolean),
-    } : {},
+    net_config: buildNetConfig(),
     mirror: form.mirror,
     extra_packages: form.extra_packages_text.split(",").map(p => p.trim()).filter(Boolean),
     post_script: form.post_script,
@@ -1571,6 +1617,11 @@ function fillForm(p) {
   form.net_interface = nc.interface || "ens33"; form.net_ip = nc.ip || ""
   form.net_netmask = nc.netmask || "255.255.255.0"; form.net_gateway = nc.gateway || ""
   form.net_dns = (nc.dns || []).join(",")
+  // 装机网（服务端）：老模板里这些键多半不存在 —— 一律折成空串，表示"由后端按 server_ip 推"
+  form.pxe_dhcp_start = nc.dhcp_start || ""; form.pxe_dhcp_end = nc.dhcp_end || ""
+  form.pxe_dns_server = nc.dns_server || ""
+  // 下发网关只在"与客户端网关不同"时回填，避免把同一个地址两处显示成不一致
+  form.pxe_gateway = (nc.gateway && nc.gateway !== form.net_gateway) ? nc.gateway : ""
   form.mirror = p.mirror
   form.extra_packages_text = (p.extra_packages || []).join(",")
   form.post_script = p.post_script
