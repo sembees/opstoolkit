@@ -43,7 +43,7 @@
                      找不到会如实写日志、不会误拷别的文件。
 
 verified 的口径（诚实声明，报告里同样适用）：
-  · verified=True  —— 既有代码与真机串口实证覆盖过：ubuntu(casper/)、
+  · verified=True  # ★ 2026-10-14 VM140(BIOS) 真机全自动装机六项验收全过（installed/静态IP/SSH/sudo免密/LVM分区/post_script）  —— 既有代码与真机串口实证覆盖过：ubuntu(casper/)、
     rhel/centos/rocky/almalinux（images/pxeboot/，kickstart 链路有真机验收）。
   · 其余一律 verified=False（含 openeuler/kylin/uos/anolis/fedora/oraclelinux/
     debian/opensuse 的引导路径与卷标）—— 它们按家族惯例给出候选，**未经本环境实测**。
@@ -201,18 +201,20 @@ _OS = (
         note=("未验证：Fedora 为 RHEL 上游（anaconda），引导文件按惯例在 images/pxeboot；"
               "版本迭代快，kickstart 语法偶有变化，装机前请先小范围验证。"),
     ),
-    # ── 只识别 + 提取，暂不支持自动安装（生成配置时明确拒绝）────────────
+    # ── Debian：preseed 全自动装机已实现，2026-10-14 VM140(BIOS) 真机端到端验收通过 ──
     OsCatalogEntry(
-        key="debian", display="Debian", installer=PRESEED, auto_install=True,  # ★ 2026-10-09：preseed 家族已实现（generator._debian_preseed）；verified 待真机装机通过后再翻
+        key="debian", display="Debian", installer=PRESEED, auto_install=True,  # ★ 2026-10-09 实现；2026-10-14 真机验收通过后 verified 翻 True
         filename_keywords=("debian",), label_keywords=("debian",),
         kernel_dirs=("install.amd", "install", "install.386"),
         kernel_names=("vmlinuz", "linux"), initrd_names=("initrd.gz", "initrd.img", "initrd"),
         dest_initrd="initrd", dest_squashfs="",
-        version_hints=("11", "12", "13"), verified=False,
-        note=("暂不支持自动安装：debian-installer 的 preseed 未实现（与 Ubuntu subiquity "
-              "的 autoinstall 不是同一套语法，不能硬凑）。目前支持按 debian 识别 ISO 与"
-              "提取引导介质（引导路径候选 install.amd|install|install.386，未验证 —— "
-              "未在本环境实测，提取按候选路径逐个尝试）。"),
+        version_hints=("11", "12", "13"), verified=True,
+        note=("已支持 preseed 全自动装机（generator._debian_preseed）：2026-10-14 在 VM140(BIOS) "
+              "真机端到端验收通过 —— 装完回调标 installed、静态 IP、SSH、sudo 免密、LVM 分区、"
+              "post_script 六项全过。两条前提：① 隔离网内需一份**带官方签名的**本地 Debian 仓库"
+              "（官方 DVD 的 dists/ 不带 Release.gpg，d-i 会停在 <Change mirror>；可用 "
+              "backend/scripts/sync_signed_debian_repo.py 从有签名的镜像站同步子集）；"
+              "② UEFI 目标机尚未实测（BIOS 已验）。"),
     ),
     OsCatalogEntry(
         key="opensuse", display="openSUSE", installer=AUTOYAST, auto_install=False,

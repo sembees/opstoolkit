@@ -2187,7 +2187,18 @@ def _debian_preseed(c):
                      + " && in-target bash /tmp/opstk-post.sh")
     _done = _safe_done_url(c.done_url)
     if _done:
-        _late.append("curl -s -m 10 -X POST " + chr(34) + _done + chr(34) + " >/dev/null 2>&1 || true")
+        _u = chr(34) + _done + chr(34)
+        # 2026-10-11 真机实证：只发 curl 的回调**没有生效**（记录一直 pending => 装完重启后
+        #   又被 PXE 重装一遍）。该回调端点同时接受 GET，故改用更常见的 busybox wget（GET）
+        #   为主、curl 兜底；两者都失败也不阻断装机（|| true）。
+        # 2026-10-11 真机实证 2：安装器侧 wget/curl 都没把回调送到应用（多次运行应用侧零 /done 请求）。
+        #   改走**目标系统内**执行：确保目标系统有 curl（本地仓库可取），再发 GET；
+        #   之后仍保留安装器侧尝试作为兜底。任何一步失败都不阻断装机（|| true）。
+        _late.append("in-target sh -c 'command -v curl >/dev/null 2>&1 || "
+                     "apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; "
+                     "curl -s -m 10 " + _u + " >/dev/null 2>&1 || true'")
+        _late.append("wget -q -O- " + _u + " >/dev/null 2>&1 || curl -s -m 10 " + _u
+                     + " >/dev/null 2>&1 || true")
     if _late:
         L.append("d-i preseed/late_command string " + "; ".join(_late))
     return "\n".join(L) + "\n"

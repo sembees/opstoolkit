@@ -80,11 +80,14 @@ class CatalogCoverageTest(unittest.TestCase):
         self.assertEqual(os_catalog.entry("opensuse").kernel_dirs, ("boot/x86_64/loader",))
 
     def test_unverified_flags_are_honest(self):
-        """已验证的两族必须标 verified=True；其余一律 verified=False（不编造）。"""
-        for t in ("ubuntu", "rhel", "centos", "rocky", "almalinux"):
+        """已验证的族必须标 verified=True；其余一律 verified=False（不编造）。
+
+        debian 于 2026-10-14 在 VM140(BIOS) 真机六项验收全过后移入已验证组。
+        """
+        for t in ("ubuntu", "rhel", "centos", "rocky", "almalinux", "debian"):
             self.assertTrue(os_catalog.entry(t).verified, t)
         for t in ("openeuler", "kylin", "uos", "anolis", "fedora",
-                  "oraclelinux", "debian", "opensuse"):
+                  "oraclelinux", "opensuse"):
             self.assertFalse(os_catalog.entry(t).verified, t + " 未验证，必须如实标注")
             self.assertIn("未验证", os_catalog.entry(t).note, t)
 
