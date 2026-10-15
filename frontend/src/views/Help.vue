@@ -523,6 +523,15 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
                 <li>池必须<b>整体落在该网卡的网段内</b>，否则部署会被红线守卫直接拒绝（<code>422</code>，提示池不在网段内）。<b>企业网段一律拒绝</b> —— 在承载默认路由的管理/生产网口上开 DHCP 会把地址发到该网段，这是硬红线，不是提醒。</li>
               </ol>
               <p class="tight-p">网关与 DNS 留空时取 PXE 服务端 IP（隔离装机网里服务端通常就是网关）；只填池的一端也可以，另一端仍按服务端 IP 推。</p>
+              <p class="section-title mt-2">不用记 IP：点「扫描本机网段」</p>
+              <p>模板编辑弹窗与「部署」确认弹窗里都有 <b>扫描本机网段</b> 按钮。它列出本机每张网卡的 <b>地址 / 网段 / 建议池 / 可用性</b>，点「用这个网段」就把池、网关、以及部署用的 PXE 服务 IP 一起填好 —— 不必再去别处抄 IP（手抄正是当初把企业网卡名填进 <code>interface=</code> 的来源）。</p>
+              <p class="tight-p">可用性一栏只有三种：</p>
+              <ul class="tight-p">
+                <li><b>可用</b>：非默认路由网卡，并已给出落在该网段内的建议池 —— 独立装机网就该选这种。</li>
+                <li><b>不可做独立 DHCP</b>：这张卡<b>承载本机默认路由</b>（上联/管理/生产网）。拿它做 standalone，部署会被守卫拒绝；<b>proxy / relay 不发地址，仍可以用它</b>（在部署弹窗里把模式改成 proxy 即可）。</li>
+                <li><b>网段太小</b>：例如 /30 或点对点链路，可用地址不够，请手工填池。</li>
+              </ul>
+              <p class="tight-p">扫描是<b>只读</b>的：只读本机网卡地址与 <code>/proc/net/route</code>，不改任何配置、不发任何包。</p>
               <p class="section-title mt-2">proxy（ProxyDHCP 代理）</p>
               <p>不动 IP 分配（现有 DHCP 照常工作），只额外广播一条 PXE 引导信息。机器同时收到两份回应：从原 DHCP 拿到 IP，从本工具拿到引导地址。</p>
               <p class="section-title mt-2">relay（中继模式）</p>

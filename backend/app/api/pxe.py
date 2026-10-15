@@ -739,6 +739,21 @@ async def download_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
 
 
 # ---------- 本机部署与服务管控 ----------
+@router.get("/local-networks")
+async def local_networks(_user=Depends(get_current_user)):
+    """GET /api/it/pxe/local-networks — 扫描本机**所有可用 IPv4 网段**，供界面选装机网。
+
+    只读：不改任何配置、不发任何包。返回每张网卡的地址/掩码/网段、是否承载默认路由、
+    以及一个落在该网段内的建议 DHCP 池；承载默认路由的那张会被标 `blocked`（standalone
+    会在它上面发地址，部署侧守卫会拒），proxy/relay 仍可用（它们不发地址）。
+
+    为什么要有它：装 PXE 的机器通常已经配好了好几张网卡的地址，运维要的是"从本机网段里
+    挑一个当装机网"，而不是记住 IP 再手打一遍 —— 手打正是当初把企业网卡名填进
+    `interface=` 的来源。
+    """
+    return pxe_server.list_local_networks()
+
+
 @router.get("/server/status")
 async def server_status(_user=Depends(get_current_user)):
     """查看本机 PXE 服务状态 (dnsmasq + TFTP + HTTP 文件 + 端口)。"""

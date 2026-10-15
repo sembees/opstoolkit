@@ -231,6 +231,157 @@ def _default_route_warning(iface: str, gateway: str) -> str:
             "（server_ip），部署侧守卫会在「DHCP 池不在该网卡网段内」时直接拒绝。")
 
 
+def _ipv4_usable_addresses(net, skip=()):
+    """一个网段里可当 DHCP 池用的地址（去掉网络地址/广播地址与 skip 里的地址）。"""
+    import ipaddress
+    out = []
+    for a in net.hosts():
+        if any(str(a) == str(s) for s in skip):
+            continue
+        out.append(a)
+    return out
+
+
+def suggest_pool(net, skip=()):
+    """在给定网段里推一个 DHCP 池（返回 (start, end) 字符串，推不出来返回 ("","")）。
+
+    规则（刻意保守，宁可让人改也不要撞上服务器自己或网关）：
+      · 跳过网络地址/广播地址，以及 skip 里的地址（服务器自身 IP、网关）；
+      · 候选池取该网段可用地址的 **后半段中部**：从 max(可用数//2, 1) 起、取 100 个
+        （不足则取到末尾）—— 避开常见的 .1/.2 网关与静态设备段；
+      · 少于 4 个可用地址就不猜（返回空，让运维手填）。
+    """
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(str(net), strict=False)
+    except ValueError:
+        return "", ""
+    if net.version != 4:
+        return "", ""
+    hosts = _ipv4_usable_addresses(net, skip)
+    if len(hosts) < 4:
+        return "", ""
+    start_i = max(len(hosts) // 2, 1)
+    if start_i >= len(hosts):
+        start_i = len(hosts) - 1
+    end_i = min(start_i + 99, len(hosts) - 1)
+    return str(hosts[start_i]), str(hosts[end_i])
+
+
+def list_local_networks(providers=None):
+    """列出本机**所有可用的 IPv4 网段**，供界面选"哪张网卡/哪个网段做装机网"。
+
+    这是用户 2026-10-15 提的正经用法：「应用装在一台配好 IP 的机器上，能不能自己扫
+    本机网段、让人选哪个用于 DHCP，再指定自己是 DHCP 还是 proxy」。此前只有
+    `detect_network()` —— 它只看**默认路由那张卡**（恰恰是最危险的一张），
+    界面上也就没有"从本机网段里挑一个"的入口，只能让人手打 IP。
+
+    返回 `{"interfaces": [...], "warnings": [...]}`，每项：
+      interface / ip / netmask / prefixlen / network（CIDR）/ gateway /
+      is_default_route（是否承载默认路由）/ suggest_start / suggest_end /
+      safety（"ok" | "caution" | "blocked"）/ reason（中文说明，给人看）/
+      blocked_modes（哪些模式绝不能用这个网段）
+
+    安全口径（与部署侧守卫**同一套判据**，不新造规则）：
+      · 承载默认路由的那张网卡 → `blocked`：standalone 会在上面发地址，
+        `_deploy_redline_check` 会拒；proxy/relay 不发地址，允许（标 caution 提示）。
+      · 其余网卡 → `ok`，并给出落在该网段内的建议池。
+      · 只列**有 IPv4 地址**的非回环、非虚拟网卡；地址/掩码取不到的一律不列
+        （宁可少列，也不要列一个池必然算错的网段）。
+    providers 可注入便于单测：{"iface_name": 名字, "iface_v4_map": {网卡: (ip,prefix)},
+      "ifaces": [网卡名...], "gateway": "x.x.x.x", "route": 文件路径}
+    """
+    import ipaddress
+    import socket
+
+    prov = providers or {}
+    warnings = []
+
+    # 默认路由那张卡（骨干网）—— 判定"危险"的唯一依据，与 dhcp.protected_networks 同源
+    try:
+        if "iface_name" in prov:
+            route_iface = prov["iface_name"]
+        else:
+            route_iface = _dhcp._default_route_iface(prov.get("route", "/proc/net/route"))
+    except OSError:
+        route_iface = ""
+    if "gateway" in prov:
+        route_gw = prov["gateway"]
+    else:
+        try:
+            route_gw = _dhcp.gateway_from_route(prov.get("route", "/proc/net/route"))
+        except OSError:
+            route_gw = ""
+
+    # 网卡清单：可注入；否则用 if_nameindex（容器 network_mode: host，看到的与宿主一致）
+    if "ifaces" in prov:
+        names = list(prov["ifaces"])
+    else:
+        try:
+            names = [n for _i, n in socket.if_nameindex()]
+        except Exception as e:  # noqa: BLE001
+            return {"interfaces": [], "warnings": ["取不到本机网卡清单: " + str(e)[:80]]}
+
+    v4map = prov.get("iface_v4_map")
+    out = []
+    for name in sorted(names):
+        if name == "lo" or name.startswith(("docker", "veth", "br-", "virbr", "tun", "tap", "vnet")):
+            continue
+        if v4map is not None:
+            got = v4map.get(name)
+        else:
+            got = _dhcp._iface_v4(name)
+        if not got:
+            continue                      # 没有 IPv4 ⇒ 与装机网无关，不列
+        ip, prefix = got
+        try:
+            net = ipaddress.ip_network(ip + "/" + str(prefix), strict=False)
+        except ValueError:
+            warnings.append("%s 的地址/掩码算不出网段（%s/%s），已跳过" % (name, ip, prefix))
+            continue
+        if net.prefixlen >= 31:
+            warnings.append("%s 是 %s（点对点/单地址网段），不适合做装机网，已跳过" % (name, net))
+            continue
+
+        is_route = (name == route_iface)
+        gw = route_gw if is_route else str(net.network_address + 1)
+        # 建议池：跳过服务器自己与网关；承载默认路由的网段**不给建议池**
+        if is_route:
+            s_start = s_end = ""
+            safety = "blocked"
+            reason = ("这张网卡承载本机【默认路由】（网关 " + (route_gw or "未知") + "），通常是"
+                      "上联/管理/生产网。standalone（独立 DHCP）会在它上面直接发地址，部署侧"
+                      "守卫会拒绝；proxy/relay 不发地址，可用。想在上面做独立 DHCP 请先给"
+                      "一张隔离网卡配上装机网段的地址。")
+            blocked_modes = ["standalone"]
+        else:
+            s_start, s_end = suggest_pool(net, skip=[ip, gw])
+            safety = "ok" if (s_start and s_end) else "caution"
+            reason = ("可用作独立装机网" if (s_start and s_end)
+                      else "网段太小，推不出建议池，请手工填池")
+            blocked_modes = []
+        out.append({
+            "interface": name,
+            "ip": ip,
+            "netmask": str(net.netmask),
+            "prefixlen": net.prefixlen,
+            "network": str(net),
+            "gateway": gw,
+            "is_default_route": is_route,
+            "suggest_start": s_start,
+            "suggest_end": s_end,
+            "safety": safety,
+            "reason": reason,
+            "blocked_modes": blocked_modes,
+        })
+
+    # 排前面的是"建议用"的（非默认路由优先），危险的最后，免得一眼看过去先看到危险的
+    out.sort(key=lambda x: (x["is_default_route"], x["interface"]))
+    if not out:
+        warnings.append("本机没有可用于装机网的 IPv4 网卡（只有回环/虚拟口或无地址）")
+    return {"interfaces": out, "warnings": warnings}
+
+
 def detect_network() -> dict:
     """探测本机主用网卡 / IP / 网关 / DHCP 范围。
 

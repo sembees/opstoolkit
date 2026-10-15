@@ -572,6 +572,30 @@
         <el-divider content-position="left">装机网（PXE 服务端 DHCP）</el-divider>
         <el-alert type="info" :closable="false" show-icon class="mb-2"
                   title="池与网关按隔离装机网填；留空则自动取「PXE 服务端 IP」所在网段的 .100–.200。该网段必须先在本机某张网卡上配好地址（部署时按 server_ip 反查网卡），企业网段会被红线守卫拒绝。" />
+        <el-form-item label="本机网段">
+          <el-button size="small" :loading="netScanning" @click="scanLocalNetworks">扫描本机网段</el-button>
+          <span class="hint-txt">列出本机每张网卡的地址与网段，选一个当装机网即可自动填池（承载默认路由的那张不能做独立 DHCP）</span>
+        </el-form-item>
+        <el-table v-if="netCandidates.length" :data="netCandidates" border size="small" class="mb-2">
+          <el-table-column prop="interface" label="网卡" width="88" />
+          <el-table-column prop="ip" label="本机地址" width="126" />
+          <el-table-column prop="network" label="网段" width="146" />
+          <el-table-column prop="suggest_start" label="建议池起" width="126" />
+          <el-table-column prop="suggest_end" label="建议池止" width="126" />
+          <el-table-column label="可用性" min-width="230">
+            <template #default="{ row }">
+              <el-tag :type="row.safety === 'ok' ? 'success' : (row.safety === 'blocked' ? 'danger' : 'warning')"
+                      size="small">{{ row.safety === 'ok' ? '可用' : (row.safety === 'blocked' ? '不可做独立 DHCP' : '网段太小') }}</el-tag>
+              <span class="hint-txt"> {{ row.reason }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="140">
+            <template #default="{ row }">
+              <el-button size="small" :disabled="row.safety === 'blocked'" @click="useCandidate(row)">用这个网段</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-alert v-if="netScanWarn" type="warning" :closable="false" show-icon class="mb-2" :title="netScanWarn" />
         <el-row :gutter="12">
           <el-col :span="8"><el-form-item label="DHCP 池起">
             <el-input v-model="form.pxe_dhcp_start" placeholder="留空=按服务端 IP 推，如 192.168.199.100" /></el-form-item></el-col>
@@ -656,6 +680,30 @@
         <el-form-item label="PXE服务IP">
           <el-input v-model="deployForm.server_ip" placeholder="留空则由后端自动探测本机IP" />
         </el-form-item>
+        <!-- 把"用哪个网段"和"用哪种模式"放在一起决定：点一下扫描，直接看到本机每张网卡
+             的网段与可用性（承载默认路由的那张不能做独立 DHCP），选中即回填 PXE 服务 IP。 -->
+        <el-form-item label="本机网段">
+          <el-button size="small" :loading="netScanning" @click="scanLocalNetworks">扫描本机网段</el-button>
+          <span class="hint-txt">选一个网段即填入上面的 PXE 服务 IP</span>
+        </el-form-item>
+        <el-table v-if="netCandidates.length" :data="netCandidates" border size="small" class="mb-2">
+          <el-table-column prop="interface" label="网卡" width="84" />
+          <el-table-column prop="ip" label="本机地址" width="124" />
+          <el-table-column prop="network" label="网段" width="140" />
+          <el-table-column label="能否做独立 DHCP" min-width="230">
+            <template #default="{ row }">
+              <el-tag :type="row.safety === 'ok' ? 'success' : (row.safety === 'blocked' ? 'danger' : 'warning')"
+                      size="small">{{ row.safety === 'ok' ? '可以' : (row.safety === 'blocked' ? '不可' : '网段太小') }}</el-tag>
+              <span class="hint-txt"> {{ row.reason }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="110">
+            <template #default="{ row }">
+              <el-button size="small" @click="deployForm.server_ip = row.ip">选这张</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-alert v-if="netScanWarn" type="warning" :closable="false" show-icon class="mb-2" :title="netScanWarn" />
       </el-form>
       <el-alert v-if="deployForm.deploy_mode === 'standalone'" type="warning" :closable="false" show-icon>
         <template #title>
@@ -1387,6 +1435,45 @@ const form = reactive(emptyForm())
 
 const genForm = reactive({ hostname: "server01", server_ip: "", http_root: "", kernel_path: "", initrd_path: "", squashfs_path: "", deploy_mode: "standalone" })
 
+// ── 本机网段扫描（装机网选择器）──
+// 后端 /it/pxe/local-networks 扫本机每张网卡的 IPv4 地址/掩码/网段，并给出落在该网段内的
+// 建议池；承载默认路由的那张由后端标 blocked（standalone 会在它上面发地址，部署侧会拒）。
+// 这里只负责展示与回填：**不下发任何网络配置**，选完只是把池/网关写进表单。
+const netCandidates = ref([])
+const netScanning = ref(false)
+const netScanWarn = ref("")
+
+async function scanLocalNetworks() {
+  netScanning.value = true
+  netScanWarn.value = ""
+  try {
+    const res = await http.get("/it/pxe/local-networks")
+    // axios 拦截器已把 response.data 拆出来（与 loadOsCatalog 的 r.items 同一写法）
+    netCandidates.value = (res && res.interfaces) || []
+    const warns = (res && res.warnings) || []
+    netScanWarn.value = warns.join("；")
+    if (!netCandidates.value.length) {
+      netScanWarn.value = netScanWarn.value || "本机没有可用于装机网的 IPv4 网卡"
+    }
+  } catch (e) {
+    // 与文件内既有写法一致：拦截器把后端的detail拆到错误对象上
+    netScanWarn.value = "扫描失败: " + ((e && (e.detail || e.message)) || "未知错误")
+  } finally {
+    netScanning.value = false
+  }
+}
+
+function useCandidate(row) {
+  if (!row || row.safety === "blocked") return
+  form.pxe_dhcp_start = row.suggest_start || ""
+  form.pxe_dhcp_end = row.suggest_end || ""
+  form.pxe_gateway = row.gateway || ""
+  // 顺带把部署弹窗的 PXE 服务端 IP 预填成这张网卡的地址 —— 运维选的就是"这张网卡做装机网"，
+  // 免得再去别处手打一遍（手打正是当初把企业网卡名填进 interface= 的来源）。
+  deployForm.server_ip = row.ip
+  ElMessage.success("已按 " + row.interface + "（" + row.network + "）填入装机网池；部署时 PXE 服务端 IP 预填为 " + row.ip)
+}
+
 function osLabel(row) { return row.os_type + " " + row.os_version }
 function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", installed: "success", failed: "danger" }[s] || "info" }
 function statusLabel(s) { return { pending: "待装机", booting: "引导中", installing: "安装中", done: "完成", installed: "已装完", failed: "失败" }[s] || s }
@@ -1865,6 +1952,8 @@ onMounted(() => {
 
 /* 卡片内小节标题 / 文件标签 / 空态文案 */
 .group-label { margin-bottom: var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+/* 本机网段扫描器里的行内提示（按钮右边的说明、表格里"可用性"后面的原因） */
+.hint-txt { margin-left: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 /* 装完能 SSH：两开关一行摆放，标签与开关间距用既有 token */
 .switch-label { margin: 0 var(--ot-space-3) 0 var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 .switch-gap { margin-left: var(--ot-space-3); }
