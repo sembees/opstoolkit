@@ -1527,17 +1527,25 @@ def _size_to_bytes(v) -> int:
     return int(num * _SIZE_UNITS[unit])
 
 
-def _safe_matcher_value(v, what, i) -> str:
-    """洗掉 serial/wwid 里的危险字符 —— 它们会被拼进 %pre 的 shell/awk 字符串。
+def _safe_matcher_value(v, what, i, allow_space=False) -> str:
+    """洗掉 serial/wwid/model 里的危险字符 —— 它们会被拼进 %pre/%pre 类脚本的 shell/awk 字符串。
 
     只放行字母数字与 . _ : + -（真实序列号/wwid 都在这个集合里）。不放行引号、
-    反斜杠、$、空格，否则又是一条配置注入面（与 §5.9 的 os/netplan_renderer 同类）。
+    反斜杠、$，否则又是一条配置注入面（与 §5.9 的 os/netplan_renderer 同类）。
+
+    `allow_space=True` 额外放行**中间的空格**（`2026-10-15` 起）：`target.mode=match` 用
+    **model** 匹配时这是必需的 —— 真机型号大量带空格（`QEMU HARDDISK`、`PERC H730 Mini`…），
+    而 `_disk_plan` 本来就允许 model 带空格（第 725 行 `_safe_ident(..., extra=" ")`）。
+    两处口径不一致的后果：**用 model 匹配的模板在 RHEL 侧直接生成失败**（ValueError），
+    等于这个功能一直不可用。空格在单引号字符串里没有注入能力，放行是安全的。
+    仍然不放行首尾空格与连续以外的其它字符；也不放行 `;`/`|`/`&`/引号/`$`/反引号。
     """
     s = str(v or "").strip()
-    if not re.match(r"^[A-Za-z0-9._:+-]+$", s):
+    pat = r"^[A-Za-z0-9._:+-]+(?: [A-Za-z0-9._:+-]+)*$" if allow_space else r"^[A-Za-z0-9._:+-]+$"
+    if not re.match(pat, s):
         raise ValueError(
-            "disk_config.data_disks[%d].%s 含非法字符（只允许字母数字与 . _ : + -）：%r"
-            % (i, what, v))
+            "disk_config.data_disks[%d].%s 含非法字符（只允许字母数字与 . _ : + -%s）：%r"
+            % (i, what, "，以及中间的空格" if allow_space else "", v))
     return s
 
 
@@ -1723,7 +1731,8 @@ def _rhel_pick_target_lines(plan) -> list:
             raise ValueError(
                 "disk_config.target.mode=match 在 RHEL 侧需要 serial 或 model："
                 "两者都为空时 %pre 会用一个空匹配串，命中任意盘（静默装错盘）。")
-        key = _safe_matcher_value(plan["serial"] or plan["model"], "target.serial/model", 0)
+        key = _safe_matcher_value(plan["serial"] or plan["model"], "target.serial/model", 0,
+                                  allow_space=True)
         lines.append("target=$(lsblk -dnP -o NAME,SERIAL,MODEL,WWN | "
                      "awk -v s='%s' -v dm='%s' '" % (key, dm))
         lines.append(_LSBLK_AWK_PRELUDE + _AWK_PICK_BY_KEY + "' | sort | head -1)")
@@ -1949,6 +1958,104 @@ def _ubuntu_user_data(c):
 
 
 # ===== Debian preseed (debian-installer) =====
+
+# 目标盘解析失败时的**哨兵设备名**：不可能存在的设备。
+# 为什么要哨兵而不是"留空/回退 sda"（2026-10-15，A1）：
+#   选盘脚本一旦因为 d-i 环境差异没跑成，`partman-auto/disk` 若还留着 sda 这类**看起来正常**
+#   的值，安装就会**静默装到 sda** —— 多盘机器上正是"装错盘"的那条路（§5.83.75 真机复现）。
+#   指向一个不存在的设备 ⇒ partman 找不到盘 ⇒ 装机**停下来并报错**（fail-closed），
+#   不会替运维猜一块盘去格式化。
+_DEB_NO_DISK = "/dev/opstk-no-target-disk"
+
+
+def _debian_pick_disk_shell(plan) -> list:
+    """生成"在 d-i 里现场挑目标盘"的 sh 片段（A1）。
+
+    与 RHEL 的 `%pre` 选盘**同源思路**（见 `_rhel_pick_target_lines`）：只认**稳定属性**，
+    绝不认 sda/sdb 这种由内核探测顺序决定的设备名 —— §5.42/§5.83.75 两次事故都这么来的。
+
+    环境假设（刻意的保守选择）：
+      · **不用 lsblk / blockdev**：d-i 的 initrd 里不保证有（那是 anaconda 才有的）。
+        只用 `list-devices disk`（di-utils，官方文档里的标准做法）+ sysfs 读属性。
+      · `list-devices` 万一缺失就回退扫 `/sys/block/*`，仍只产出 `/dev/<name>`。
+      · 属性读 `/sys/block/<n>/…`：size（512B 扇区）、removable、device/serial、device/model。
+        **virtio 盘没有 serial/model**（QEMU 实测，§5.45 同源）⇒ match 模式在没有 id_path 时
+        会选不出盘 ⇒ fail-closed，而不是随便挑一块。
+
+    ★ 返回值的形状是**硬约束**：每个元素必须是**一条完整的 sh 语句**（调用方用 `"; "` 连接）。
+      复合语句（for/if/case）**必须整条作为一个元素** —— 我第一版把它们拍平过，
+      生成的串让 `sh -n` 直接报语法错（真机验收当场抓住）。
+    """
+    ST = []
+    ST.append("pxelog() { echo \"PXE-DISK: $*\"; "
+              "echo \"PXE-DISK: $*\" >/dev/console 2>/dev/null || true; }")
+    ST.append("pxelog '开始选盘（Debian/d-i）；下列为本机磁盘（size 单位字节）- - - - - -'")
+    ST.append("set -- $(list-devices disk 2>/dev/null || true)")
+    ST.append("[ $# -gt 0 ] || set -- $(for _x in /sys/block/*; do "
+              "[ -d \"$_x\" ] && echo /dev/$(basename \"$_x\"); done)")
+    # 磁盘清单（留痕到串口）：与 RHEL %pre 的 pxelog 同一目的 —— §5.42 那类事故事后只能靠日志定位
+    ST.append("for _d in \"$@\"; do _n=$(basename \"$_d\"); "
+              "case \"$_n\" in zram*|ram*|loop*|sr*|dm-*|md*) continue;; esac; "
+              "_sz=$(cat /sys/block/$_n/size 2>/dev/null || echo 0); "
+              "_rmv=$(cat /sys/block/$_n/removable 2>/dev/null || echo 0); "
+              "_ser=$(cat /sys/block/$_n/device/serial 2>/dev/null | tr -d ' \\n'); "
+              "_mod=$(cat /sys/block/$_n/device/model 2>/dev/null | tr -d ' \\n'); "
+              "pxelog \"$_d size=$((_sz * 512)) removable=$_rmv serial=$_ser model=$_mod\"; done")
+    # ★ 把 udev 的 by-path 链接也打出来（2026-10-15）：QEMU/virtio 下 virtio 盘在 sysfs 里
+    #   **没有 serial**（§5.45 实测），by-path 才是唯一稳定的键，而 `target.id_path` 要填的
+    #   就是它。不打出来的话运维在目标机上抄不到这个值，`mode=match` 就成了纸面功能。
+    ST.append("for _l in /dev/disk/by-path/*; do [ -e \"$_l\" ] && "
+              "pxelog \"by-path $_l -> $(readlink -f \"$_l\")\"; done")
+    ST.append("_ot=''")
+    if plan["mode"] == "match":
+        if plan["id_path"]:
+            ST.append("_byp=/dev/disk/by-path/" + plan["id_path"])
+            ST.append("if [ -e \"$_byp\" ]; then _ot=$(readlink -f \"$_byp\"); "
+                      "pxelog \"按 id_path 命中：$_byp -> $_ot\"; fi")
+        keys = [k for k in (plan["serial"], plan["model"]) if k]
+        if keys:
+            # Debian 侧比较用的是"**去掉空格后**的 serial/model"（见上面的 tr -d ' \n'，
+            # 与 RHEL 侧的 lsblk -P 原样比较不同）。所以 key 也先去空格再洗 ——
+            # 这样 `QEMU HARDDISK` 这种带空格的型号在 Debian 上也能匹配，
+            # 而白名单依旧是严格的那一套（不留空格 ⇒ 注入面更小）。
+            _k = _safe_matcher_value("".join(str(keys[0]).split()), "target.serial/model", 0)
+            ST.append("_key=$(echo '" + _k + "' | tr 'A-Z' 'a-z')")
+            ST.append("if [ -z \"$_ot\" ]; then "
+                      "for _d in \"$@\"; do _n=$(basename \"$_d\"); "
+                      "case \"$_n\" in zram*|ram*|loop*|sr*|dm-*|md*) continue;; esac; "
+                      "_ser=$(cat /sys/block/$_n/device/serial 2>/dev/null | tr -d ' \\n' | tr 'A-Z' 'a-z'); "
+                      "_mod=$(cat /sys/block/$_n/device/model 2>/dev/null | tr -d ' \\n' | tr 'A-Z' 'a-z'); "
+                      "if [ -n \"$_key\" ] && { [ \"$_ser\" = \"$_key\" ] || [ \"$_mod\" = \"$_key\" ]; }; "
+                      "then _ot=$_d; pxelog \"按 serial/model 命中：$_d\"; fi; done; fi")
+    else:  # auto：挑**最大**的非可移动盘（与 RHEL 侧 min_size 过滤同一语义）
+        _min = int(plan["min_size_gb"]) * 1024 ** 3
+        _minfrag = ("[ \"$_b\" -lt " + str(_min) + " ] && continue; ") if _min else ""
+        ST.append("_best=0")
+        ST.append("for _d in \"$@\"; do _n=$(basename \"$_d\"); "
+                  "case \"$_n\" in zram*|ram*|loop*|sr*|dm-*|md*) continue;; esac; "
+                  "_rmv=$(cat /sys/block/$_n/removable 2>/dev/null || echo 0); "
+                  "[ \"$_rmv\" = \"1\" ] && continue; "
+                  "_sz=$(cat /sys/block/$_n/size 2>/dev/null || echo 0); "
+                  "_b=$((_sz * 512)); " + _minfrag
+                  + "if [ \"$_b\" -gt \"$_best\" ]; then _best=$_b; _ot=$_d; fi; done")
+        if plan["min_size_gb"]:
+            ST.append("pxelog \"自动选盘下限 = " + str(_min) + " 字节（min_size_gb="
+                      + str(int(plan["min_size_gb"])) + "）\"")
+    # 定盘：成功 ⇒ debconf 指向真盘；失败 ⇒ 指向**不存在的哨兵设备**（partman 找不到盘、
+    # 装机停下报错），同时把 `_ot` 清空 —— 让后面的抹盘块整段跳过（否则 dd 会往 /dev 里
+    # 写一个 200MB 的普通文件，把安装器的 tmpfs 吃掉）。
+    ST.append("if [ -n \"$_ot\" ]; then pxelog \"选定目标盘 _ot=$_ot\"; "
+              "debconf-set partman-auto/disk \"$_ot\"; "
+              "debconf-set grub-installer/bootdev \"$_ot\"; "
+              "else pxelog '!! 按稳定条件没有选出目标盘 —— 拒绝继续（绝不按设备名猜一块盘去格式化）'; "
+              "pxelog '!! partman-auto/disk 已指向不存在的哨兵设备，安装会停在这里；"
+              "请改用 target.id_path / serial / model，或明确写出盘名'; "
+              "debconf-set partman-auto/disk \"" + _DEB_NO_DISK + "\"; "
+              "debconf-set grub-installer/bootdev \"" + _DEB_NO_DISK + "\"; "
+              "_ot=''; fi")
+    return ST
+
+
 def _debian_preseed(c):
     """生成 Debian（d-i）preseed.cfg。
 
@@ -2011,6 +2118,31 @@ def _debian_preseed(c):
             + "（该值会进入 partman/early_command 等 shell 串）"
         )
     disk = "/dev/" + _disk_bare
+    # ★ A1（2026-10-15）：**结构化选盘**（disk_config.target）在 Debian 上原来被**整个忽略** ——
+    #   本函数只读 `disk_config["disk"]`（缺省 sda）。后果有两层，第 2 层是真机复现过的：
+    #     1. 界面上选「自动（最大盘）」（target.mode=auto）时，disk_config 里没有 `disk` 键
+    #        ⇒ 这里落到默认 **sda**，而界面显示的是"自动" —— 界面与产物说的不是一回事；
+    #     2. §5.83.75：多盘机器（Proxmox 两块盘挂同一 virtio-scsi 控制器的不同 LUN）上
+    #        客户机对 LUN 的枚举顺序与槽位号可以相反 ⇒ `sda` 是**运维没想装的那块盘**，
+    #        安装落到它上面、真机起不来，运维以为装的是另一块。RHEL/Ubuntu 早有稳定选盘
+    #        （serial/model/id_path），**只有 Debian 没有**，这是家族不等价。
+    #   处置：复用同一个 `_disk_plan`（与 RHEL/Ubuntu 同一份语义与校验），
+    #   · mode=name  → 用 target.name 钉死设备名（与今天等价，只是键更规范）；
+    #   · mode=auto/match → **在 d-i 里现场按稳定属性选盘**（early_command + debconf-set），
+    #     静态值先指向哨兵设备：一旦选盘没跑成 ⇒ partman 找不到盘 ⇒ 装机停下报错（fail-closed），
+    #     绝不静默回退到 sda。
+    #   `plan is None`（老模板只给 {disk: 盘名}）时**逐字节保持原样**，不动既有产物。
+    _plan = _disk_plan(c, c.disk_config or {})
+    _resolve = []
+    if _plan is not None and _plan["mode"] == "name":
+        _nm = _plan["name"]
+        if not _safe_ident(_nm, "disk_config.target.name"):
+            raise ValueError("disk_config.target.name 不合法 " + repr(_nm))
+        disk = "/dev/" + _nm
+    elif _plan is not None and _plan["mode"] in ("auto", "match"):
+        _resolve = _debian_pick_disk_shell(_plan)
+        # 静态值 = 哨兵：只有 early_command 里的 debconf-set 会把它改成真实盘
+        disk = _DEB_NO_DISK
     # 软件包：SSH 公钥配了就必须装 openssh-server（与 Ubuntu 家族同一条理由）
     pkgs = list(c.extra_packages or [])
     if c.ssh_keys and "openssh-server" not in pkgs:
@@ -2211,18 +2343,33 @@ def _debian_preseed(c):
         _wdev = "/dev/" + _safe_ident(_wb, "disk_config.wipe_disks[]")
         if _wdev != disk and _wdev not in _extra_wipe:
             _extra_wipe.append(_wdev)
+    # ★ A1：目标盘可能是**现场解析出来的**（auto/match）。这时抹盘必须抹 `$_ot`
+    #   （解析结果），不能抹静态名 —— 否则就回到"按设备名猜盘去格式化"那条老路。
     # 目标盘保持原样（wipefs + 首尾各 200MB）；声明了的额外盘套用同一串命令 ——
     # 同样要"首尾都抹"：LVM 在磁盘尾部还有一份元数据备份（2026-10-10 二次实证）。
-    # _extra_wipe 为空时，下面的 join 结果与改造前的单盘命令串逐字节一致。
+    # _extra_wipe 为空且不解析选盘时，下面的 join 结果与改造前的单盘命令串逐字节一致。
+    def _wipe_one(dev):
+        return ("wipefs -a " + dev + " 2>/dev/null || true; "
+                + "dd if=/dev/zero of=" + dev + " bs=1M count=200 conv=notrunc; "
+                + "_SZ=$(blockdev --getsz " + dev + " 2>/dev/null || echo 0); "
+                + "[ \"$_SZ\" -gt 409600 ] && dd if=/dev/zero of=" + dev
+                + " bs=512 seek=$((_SZ-204800)) count=204800 conv=notrunc")
+
     _wipe_blocks = []
-    for _d in [disk] + _extra_wipe:
-        _wipe_blocks.append(
-            "wipefs -a " + _d + " 2>/dev/null || true; "
-            + "dd if=/dev/zero of=" + _d + " bs=1M count=200 conv=notrunc; "
-            + "_SZ=$(blockdev --getsz " + _d + " 2>/dev/null || echo 0); "
-            + "[ \"$_SZ\" -gt 409600 ] && dd if=/dev/zero of=" + _d
-            + " bs=512 seek=$((_SZ-204800)) count=204800 conv=notrunc")
-    _wipe = "; ".join(_wipe_blocks) + "; true"
+    if _resolve:
+        # 解析模式下 `_ot` 是现场选出来的：只有它真是一块块设备才抹。
+        # 不加这层判断的话，选盘失败时 `dd of=<空>` 会写到一个不存在的路径、
+        # `dd of=/dev/opstk-no-target-disk` 更会在安装器的 /dev（tmpfs）里造一个 200MB 文件。
+        _wipe_blocks.append("[ -n \"$_ot\" ] && [ -b \"$_ot\" ] && { "
+                            + _wipe_one("$_ot") + "; } || true")
+    else:
+        _wipe_blocks.append(_wipe_one(disk))
+    for _d in _extra_wipe:
+        _wipe_blocks.append(_wipe_one(_d))
+    # 选盘片段在前（它要先把 `$_ot` 定下来、并 debconf-set 好 partman-auto/disk），
+    # 抹盘在后。整个串仍必须保持**单逻辑行**（preseed 值里裸换行会截断条目）。
+    _wipe = "; ".join(_resolve + _wipe_blocks) + "; true" if _resolve else \
+        "; ".join(_wipe_blocks) + "; true"
     L.append("d-i partman/early_command string " + _wipe)
     L.append("d-i partman-auto/choose_recipe select atomic")
     L.append("d-i partman/choose_partition select finish")

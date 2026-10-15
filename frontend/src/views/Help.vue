@@ -534,6 +534,16 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
                 <li><b>网段太小</b>：例如 /30 或点对点链路，可用地址不够，请手工填池。</li>
               </ul>
               <p class="tight-p">如果你手填了一个必然被拒的组合（例如在上联网段上用独立 DHCP），弹窗会<b>提前红字告警并说明该改用哪种模式</b>，不必等部署被拒才知道。</p>
+              <p class="section-title mt-2">目标盘怎么选：Debian 现在也认「稳定属性」了</p>
+              <p>三档口径（三种家族同一套配置语义，<code>disk_config.target.mode</code>）：</p>
+              <ul class="tight-p">
+                <li><b>自动（最大盘）</b>：在安装器里现场挑<b>最大</b>的那块非可移动盘（可加「最小容量」下限）。<b>不认设备名</b> —— 所以多盘机器上不会因为枚举顺序变化而装错盘。</li>
+                <li><b>按盘名</b>：明确写出设备名（如 <code>sda</code>）。适合"我就知道是这块"，但注意 Proxmox 等虚拟化下 <code>sda</code> 与槽位的对应关系<b>可以反过来</b>（同一控制器不同 LUN 的实测结论），多盘机器建议改用下面两种。</li>
+                <li><b>按稳定属性</b>：用 <code>by-path</code> / 序列号 / 型号定位。虚拟化（QEMU/virtio）下序列号常为空，此时 <b><code>by-path</code> 是唯一稳定的键</b>（如 <code>pci-0000:00:05.0-scsi-0:0:0:1</code>）。</li>
+              </ul>
+              <p class="tight-p">怎么拿到这些值：装机时安装器会把<b>每块盘的容量、序列号、型号、以及 by-path 映射</b>直接打进安装日志（搜 <code>PXE-DISK:</code>），照抄即可；也可在已装好的机器上用 <code>ls -l /dev/disk/by-path/</code> 看。</p>
+              <p class="tight-p">选不出盘时<b>不会猜</b>：安装器会停在"找不到目标盘"的报错上（阈值/属性对不上就停下），绝不会退回按 <code>sda</code> 去格式化 —— <b>宁可不装，不装错盘</b>。</p>
+              <p class="tight-p">家族差异（同一份配置，谁支持什么）：<b>Debian</b> 三种都支持（<code>by-path</code> 优先）；<b>RHEL 系</b> 支持「自动/按盘名/序列号/型号」，<b>不认 <code>by-path</code></b>（只给它会在生成配置时报错，不会静默忽略）；<b>Ubuntu</b> 明确拒绝 <code>by-path</code>（subiquity 不认识它，会静默退回"匹配第一块盘"，有抹掉数据盘的风险）。</p>
               <p class="tight-p">扫描是<b>只读</b>的：只读本机网卡地址与 <code>/proc/net/route</code>，不改任何配置、不发任何包。</p>
               <p class="section-title mt-2">proxy（ProxyDHCP 代理）</p>
               <p>不动 IP 分配（现有 DHCP 照常工作），只额外广播一条 PXE 引导信息。机器同时收到两份回应：从原 DHCP 拿到 IP，从本工具拿到引导地址。</p>

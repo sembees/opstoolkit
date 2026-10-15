@@ -322,6 +322,17 @@
             </el-form-item>
           </el-col>
           <el-col :span="8" v-if="form.disk_target_mode === 'match'">
+            <el-form-item label="by-path">
+              <el-input v-model="form.disk_id_path"
+                        placeholder="pci-0000:00:05.0-scsi-0:0:0:1" />
+              <span class="hint-txt">
+                仅 Debian 支持（虚拟化下序列号常为空，这是唯一稳定的键）。装机时安装器会把
+                每块盘的 <code>by-path</code> 打进日志（<code>PXE-DISK:</code> 留痕），照抄即可。
+                RHEL 不支持该键（只给它会生成期报错）、Ubuntu 会明确拒绝。
+              </span>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8" v-if="form.disk_target_mode === 'match'">
             <el-form-item label="序列号">
               <el-input v-model="form.disk_serial" placeholder="序列号最稳，如 S3Z1NB0K123456" />
             </el-form-item>
@@ -1455,6 +1466,7 @@ const emptyForm = () => ({
   // 在 NVMe(nvme0n1) / virtio-blk(vda) 的机器上必然装不上。
   disk_scheme: "lvm",
   disk_target_mode: "auto", disk_name: "sda", disk_serial: "", disk_model: "",
+  disk_id_path: "",
   disk_min_size_gb: 0, disk_wipe: true,
   partitions: [], data_disks: [], raid: [],
   net_mode: "dhcp", net_interface: "ens33", net_ip: "", net_netmask: "255.255.255.0", net_gateway: "", net_dns: "",
@@ -1677,8 +1689,13 @@ function buildDiskConfig() {
   // mode=auto 时后端会忽略 name —— 这里干脆不发，避免"以为自动其实写死"
   if (form.disk_target_mode === "name" && form.disk_name) t.name = form.disk_name
   if (form.disk_target_mode === "match") {
+    // ★ 三个键都给：**由后端按家族决定用哪个**（口径写在后端，前端不做家族判断）。
+    //   Debian：id_path 优先（虚拟化下唯一稳定的键）、其次 serial/model；
+    //   RHEL  ：只用 serial/model，只给 id_path 会在生成期明确报错（fail-closed）；
+    //   Ubuntu：显式拒绝 id_path（subiquity 不认识它，会静默退回"匹配第一块盘"）。
+    if (form.disk_id_path) t.id_path = form.disk_id_path
     if (form.disk_serial) t.serial = form.disk_serial
-    else if (form.disk_model) t.model = form.disk_model
+    if (form.disk_model) t.model = form.disk_model
   }
   if (form.disk_min_size_gb) t.min_size_gb = form.disk_min_size_gb
   const dc = { target: t, wipe: !!form.disk_wipe, layout: form.disk_scheme }
@@ -1812,6 +1829,7 @@ function fillForm(p) {
   form.disk_name = dt.name || dc.disk || "sda"
   form.disk_serial = dt.serial || ""
   form.disk_model = dt.model || ""
+  form.disk_id_path = dt.id_path || ""
   form.disk_min_size_gb = dt.min_size_gb || 0
   form.disk_wipe = dc.wipe !== false
   form.partitions = (dc.partitions || []).map(q => ({
