@@ -1,0 +1,18 @@
+[Unit]
+Description=OpsToolkit: 执行离线签名仓库同步（由 opstk-repo-sync.path 触发）
+Documentation=file:/opt/opstk/deploy/host/README.md
+# 关掉启动限流（理由同 opstk-dnsmasq-reload.service）：同步可能被连续触发多次
+# （运维连点、或部署后立刻再同步），限流会让**服务根本不跑**，而平台侧只会看到
+# 状态文件一直是 running —— 那种"看起来在跑、其实没跑"最难查。
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/opstk-repo-sync.sh
+# 同步失败（源站 404、磁盘满、网络断）**不能**让 path 单元被 systemd 停掉：
+# 失败要写进 result.json 交给平台显示，而不是让"以后再也不触发"。
+SuccessExitStatus=0 1
+# 同步是重 IO + 长任务：给足时间（默认 90s 会把它掐掉），并让它尽量跑完
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle

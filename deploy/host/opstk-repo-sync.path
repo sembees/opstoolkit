@@ -1,0 +1,18 @@
+[Unit]
+Description=OpsToolkit: 监视"离线签名仓库同步"请求，触发宿主侧同步
+Documentation=file:/opt/opstk/deploy/host/README.md
+
+[Path]
+# 容器把请求写进这个文件（宿主 /srv/opstk/state 已挂给容器），
+# 但容器里**没有** systemctl/systemd-run、也没有 /run/systemd ⇒ 它无法命令宿主机的 systemd。
+# 由这个 path 单元补上"执行"这一步 —— 与 opstk-dnsmasq-reload 完全同一个思路。
+#
+# 用 **PathExists** 而不是 PathChanged/PathModified：这是一次性请求文件，
+# 平台"创建"它就该触发；而 PathChanged/PathModified 需要文件先存在再变化（还吃不到 IN_ATTRIB，
+# 见 opstk-dnsmasq-reload.path 里那段实测记录）。
+# 脚本处理完会**删掉**请求文件 ⇒ PathExists 重新进入"未满足"，下一次创建才会再次触发。
+PathExists=/srv/opstk/state/repo-sync/request.json
+Unit=opstk-repo-sync.service
+
+[Install]
+WantedBy=multi-user.target

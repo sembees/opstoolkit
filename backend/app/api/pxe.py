@@ -32,6 +32,9 @@ from app.it.pxe import transfers as iso_transfers
 # 我在容器里单独调它一切正常，白查了两轮）。教训：新增接口后，
 # **一定要真打一次那个接口**，而不是只测它调用的函数。
 from app.it.pxe import repo_verify
+# B1 后半：一键同步（平台只写请求文件，宿主 path 单元执行）。
+# 上一轮我漏了 repo_verify 的 import ⇒ 接口 500 白查两轮 —— 这次一并写上，并且**真要打接口**。
+from app.it.pxe import repo_sync
 from app.it.pxe import os_catalog
 from app.it.pxe.generator import (
     DEFAULT_KERNEL_CONSOLE,
@@ -991,6 +994,31 @@ async def repo_status(_user=Depends(get_current_user)):
                     "verdict": v["verdict"], "reason": v.get("reason", ""),
                     "suite_detail": v["suites"]})
     return {"root": repo_verify.REPO_ROOT, "repos": out}
+
+
+@router.post("/repo/sync")
+async def repo_sync_start(body: dict = None, _user=Depends(require_role("admin"))):
+    """POST /api/it/pxe/repo/sync — 请求一次"离线签名仓库同步"（admin）。
+
+    **不在请求里做下载**：平台只写一个请求文件，宿主机上的 `opstk-repo-sync.path` 接住并执行
+    （容器里没有 curl/xz，也没有 systemctl ⇒ 见 app/it/pxe/repo_sync.py 的整段说明）。
+    因此这里返回 202 + 请求内容；进度用 GET /it/pxe/repo/sync 查。
+    """
+    try:
+        req = repo_sync.start_sync(body or {})
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    logging.getLogger(__name__).warning(
+        "已请求离线仓库同步：suite=%s dest=%s mirror=%s dry_run=%s（等宿主机 path 单元执行）",
+        req["suite"], req["dest"], req["mirror"], req["dry_run"])
+    return {"accepted": True, "request": req,
+            "note": "请求已写入宿主可见的 state 目录；宿主机 opstk-repo-sync.path 触发后开始下载"}
+
+
+@router.get("/repo/sync")
+async def repo_sync_status(_user=Depends(get_current_user)):
+    """GET /api/it/pxe/repo/sync — 同步状态（宿主侧写的 status/result + 日志尾部）。"""
+    return repo_sync.sync_status()
 
 
 @router.get("/server/status")
