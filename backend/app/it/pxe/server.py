@@ -349,11 +349,19 @@ def list_local_networks(providers=None):
         if is_route:
             s_start = s_end = ""
             safety = "blocked"
+            # ★ 2026-10-15 更正：这里原写 `blocked_modes=["standalone"]`，理由写在
+            #   `_deploy_redline_check` 里 —— "proxy/relay 不发地址，可以用"。但这与**真正
+            #   生效的那一层**不一致：PXE 落盘走 `deploy_files` → `dhcp.check_dhcp_conf_safety`，
+            #   它的第 3 条是"目标网卡就是承载默认路由的那张 ⇒ 拒绝"，**不看模式**。
+            #   也就是说：在这张网卡上，standalone / proxy / relay **一个都部署不了**
+            #   （它们的 conf 都带 `interface=<这张卡>`）。扫描器必须按**实际会生效的**
+            #   守卫口径说话，否则界面会承诺一个必然被拒的选项（我就这么错过一次）。
             reason = ("这张网卡承载本机【默认路由】（网关 " + (route_gw or "未知") + "），通常是"
-                      "上联/管理/生产网。standalone（独立 DHCP）会在它上面直接发地址，部署侧"
-                      "守卫会拒绝；proxy/relay 不发地址，可用。想在上面做独立 DHCP 请先给"
-                      "一张隔离网卡配上装机网段的地址。")
-            blocked_modes = ["standalone"]
+                      "上联/管理/生产网。它**不适合也不允许**跑 PXE：三种模式（独立 DHCP / "
+                      "ProxyDHCP / 中继）生成的配置都带 `interface=" + name + "`，落盘前的"
+                      "红线检查会一律拒绝 —— 在这张卡上起 dnsmasq 等于把装机引导广播到该网段。"
+                      "请给这台机器加一张隔离网卡（例如 ens19）并配上装机网段的地址。")
+            blocked_modes = ["standalone", "proxy", "relay"]
         else:
             s_start, s_end = suggest_pool(net, skip=[ip, gw])
             safety = "ok" if (s_start and s_end) else "caution"

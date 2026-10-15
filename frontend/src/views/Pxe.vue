@@ -690,20 +690,24 @@
           <el-table-column prop="interface" label="网卡" width="84" />
           <el-table-column prop="ip" label="本机地址" width="124" />
           <el-table-column prop="network" label="网段" width="140" />
-          <el-table-column label="能否做独立 DHCP" min-width="230">
+          <el-table-column label="这个网段能做什么" min-width="250">
             <template #default="{ row }">
               <el-tag :type="row.safety === 'ok' ? 'success' : (row.safety === 'blocked' ? 'danger' : 'warning')"
-                      size="small">{{ row.safety === 'ok' ? '可以' : (row.safety === 'blocked' ? '不可' : '网段太小') }}</el-tag>
+                      size="small">{{ modeHint(row) }}</el-tag>
               <span class="hint-txt"> {{ row.reason }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="110">
+          <el-table-column label="操作" width="150">
             <template #default="{ row }">
-              <el-button size="small" @click="deployForm.server_ip = row.ip">选这张</el-button>
+              <el-button size="small" :disabled="row.safety === 'blocked'"
+                         @click="useCandidateForDeploy(row)">{{ pickLabel(row) }}</el-button>
             </template>
           </el-table-column>
         </el-table>
         <el-alert v-if="netScanWarn" type="warning" :closable="false" show-icon class="mb-2" :title="netScanWarn" />
+        <!-- ★ 网段 × 模式的一致性提示：选了承载默认路由的网段又选独立 DHCP，会在部署时被
+             守卫拒（422）。与其让人撞一次错，不如现在就说清该用哪种模式。 -->
+        <el-alert v-if="modeConflict" type="error" :closable="false" show-icon class="mb-2" :title="modeConflict" />
       </el-form>
       <el-alert v-if="deployForm.deploy_mode === 'standalone'" type="warning" :closable="false" show-icon>
         <template #title>
@@ -1473,6 +1477,55 @@ function useCandidate(row) {
   deployForm.server_ip = row.ip
   ElMessage.success("已按 " + row.interface + "（" + row.network + "）填入装机网池；部署时 PXE 服务端 IP 预填为 " + row.ip)
 }
+
+// ── 网段 × 模式：把"选哪个网段"和"用哪种模式"绑成一个决定 ──
+// 用户 2026-10-15 描述的流程：基础网络先配好 → 装平台 → 平台扫出本机网段 →
+// 选定用哪个网段做【DHCP 广播】还是【proxy】。所以选网段时必须同时说清模式，
+// 而不是让人撞一次 422 才知道不行。
+// ⚠️ 2026-10-15 更正：承载默认路由的网段上，**三种模式都会在落盘前被红线检查拒绝**
+//   （PXE 落盘走 deploy_files → dhcp.check_dhcp_conf_safety，第 3 条只看
+//    `interface=` 是不是承载默认路由的那张卡，不看模式）。所以那一行直接禁用，
+//   不再提供"Proxy 用它" —— 之前那句承诺是错的，会让运维白跑一次部署。
+function modeHint(row) {
+  if (!row) return ""
+  if (row.safety === "ok") return "可做独立 DHCP"
+  if (row.safety === "blocked") return "不可用于 PXE"
+  return "网段太小"
+}
+
+function pickLabel(row) {
+  if (!row) return "选这张"
+  if (row.safety === "ok") return "独立 DHCP 用它"
+  return "不可用"
+}
+
+function useCandidateForDeploy(row) {
+  if (!row || row.safety === "blocked") return
+  deployForm.server_ip = row.ip
+  deployForm.deploy_mode = "standalone"
+  ElMessage.success("已选 " + row.network + "（" + row.interface + "）：模式=独立 DHCP，"
+    + "将在此网段做 DHCP 广播，池 " + (row.suggest_start || "?") + "–" + (row.suggest_end || "?"))
+}
+
+// 当前"服务端 IP + 模式"是否不可能部署成功。两处会自相矛盾：
+//   · 选了承载默认路由的网段（任何模式都会被落盘前的红线检查拒）；
+//   · 网段太小、独立 DHCP 却没有池。
+// 现在提前红字说清，别让人白跑一次。
+const modeConflict = computed(() => {
+  if (!deployForm.server_ip) return ""
+  const hit = netCandidates.value.find(x => x.ip === deployForm.server_ip)
+  if (!hit) return ""
+  if (hit.safety === "blocked") {
+    return "网段不可用：PXE 服务 IP " + hit.ip + " 在 " + hit.interface + "（" + hit.network
+      + "）上，而这张网卡承载本机默认路由 —— 独立 DHCP / ProxyDHCP / 中继三种模式生成的配置"
+      + "都带 interface=" + hit.interface + "，落盘前的红线检查会一律拒绝。"
+      + "请改选一张隔离网卡的地址（例如给这台机器再加一张网卡并配上装机网段）。"
+  }
+  if (hit.safety === "caution" && deployForm.deploy_mode === "standalone") {
+    return "注意：" + hit.network + " 可用地址太少，独立 DHCP 的池需要手工填写。"
+  }
+  return ""
+})
 
 function osLabel(row) { return row.os_type + " " + row.os_version }
 function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", installed: "success", failed: "danger" }[s] || "info" }

@@ -890,6 +890,16 @@ def _deploy_redline_check(ip: str, mode: str, net_config: dict, bind: dict,
        所以 standalone 必须由运维**显式**给出隔离装机网的 server_ip；proxy/relay
        不发地址，自动探测照旧允许。
     3. DHCP 池必须整体落在该网卡网段内（池与网段不匹配时可能把地址发到别的网段）。
+
+    ⚠️ 这一层**不是全部**：它放过 proxy/relay（它们不分配地址），但真正落盘前还有更严的
+    一层 —— `it/pxe/server.py::deploy_files` 会先调
+    `dhcp.check_dhcp_conf_safety`，其第 3 条是「目标网卡就是承载默认路由的那张 ⇒ 拒绝」，
+    **不看模式**。所以在那张网卡上 standalone / proxy / relay **一个都部署不了**
+    （三者的配置都带 `interface=<那张卡>`）。
+    2026-10-15 我就是只读了本函数的注释，据此在扫描器里写下"proxy/relay 可以用"、
+    界面还据此推荐 proxy —— 那个承诺是错的（部署时必被拒）。
+    **对外承诺（界面/扫描器）必须按"实际会生效的那一层"来说**，即按
+    `check_dhcp_conf_safety` 的口径。
     """
     if not bind or not bind.get("interface"):
         return ("无法确定 server_ip " + str(ip) + " 所在网卡，拒绝部署：dnsmasq 的 "
