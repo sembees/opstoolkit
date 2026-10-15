@@ -147,7 +147,14 @@ try:
 
     _pxe_web = Path("/srv/opstk/pxe-web")
     if _pxe_web.is_dir():
-        app.mount("/pxe/serve", _TokenStatic(directory=str(_pxe_web), scope=serve_token.PXE),
+        # follow_symlink=True（2026-10-15，A2 真机准备实测）：
+        #   装机仓库动辄几个 GB，而 web 根所在的卷可能很小（实测：放 4.5GB 就把 rl-root
+        #   压到 96%），自然的运维做法是把仓库放**独立卷**、web 根里留软链。默认
+        #   follow_symlink=False 时软链一律 404（文件系统里明明读得到），这条路就走不通。
+        #   安全性：URL 侧的目录穿越防护（.. / 归一化）不受影响，能读到的仍限于 web 根内
+        #   （或其软链目标）—— 而 web 根本就是无认证的装机发布目录，软链目标由 root 决定。
+        app.mount("/pxe/serve", _TokenStatic(directory=str(_pxe_web), scope=serve_token.PXE,
+                                             follow_symlink=True),
                   name="pxe-serve")
 except Exception:  # noqa: BLE001
     pass
@@ -160,7 +167,9 @@ try:
     _ztp_web = Path("/srv/opstk/ztp-web")
     if _ztp_web.is_dir():
         # ★ J 的第二个落点：ZTP 静态根同样是"无认证 + 含机密"（这里是**明文**设备口令）。
-        app.mount("/ztp", _TokenStatic(directory=str(_ztp_web), scope=serve_token.ZTP),
+        # 同 /pxe/serve：跟随软链（ZTP 的应答文件树也可能被运维放到别的卷上）
+        app.mount("/ztp", _TokenStatic(directory=str(_ztp_web), scope=serve_token.ZTP,
+                                      follow_symlink=True),
                   name="ztp-serve")
 except Exception:  # noqa: BLE001
     pass
