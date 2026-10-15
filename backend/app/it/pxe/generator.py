@@ -3057,6 +3057,20 @@ def _ipxe_menu(c, mac="", answer_url=""):
         L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")",
              "kernel " + kernel + " initrd=" + initrd_name + " " + cmdline,
              "initrd " + initrd, "boot"]
+    elif entry.key == "opensuse":
+        # ★ A2（2026-10-15）openSUSE（AutoYaST）：第五个家族。
+        #   内核行与其它家族都不同：AutoYaST 用 `autoyast=<应答文件 URL>`，
+        #   **不是** anaconda 的 `inst.ks=`；安装源用 `install=<仓库>`。
+        #   一份 AutoYaST profile 里已经写了静态地址/用户/分区，所以这里只需要
+        #   autoyast= 与 install=，网络由 initrd 用 ip=dhcp 先拉起来取应答文件。
+        #   ★ 当前状态：**产物级**（本文件与用例锁住），**真机未验**（无 openSUSE 介质）。
+        answer = _safe_line(answer_url, "answer_url") or (answer_base + "/autoinst.xml")
+        cmdline = ("autoyast=" + answer + " install=" + mirror + " ip=dhcp")
+        if kernel_console:
+            cmdline += " " + kernel_console
+        L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")",
+             "kernel " + kernel + " initrd=" + initrd_name + " " + cmdline,
+             "initrd " + initrd, "boot"]
     else:
         # D17：RHEL 装机必须有可用的安装源。本机**从不**发布 ISO 仓库树
         # （extract_from_iso() 只拷 vmlinuz/initrd.img，那个目录里没有 repomd.xml，

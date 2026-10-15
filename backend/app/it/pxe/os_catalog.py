@@ -232,13 +232,16 @@ _OS = (
               "可用 backend/scripts/sync_signed_debian_repo.py 从有签名的镜像站同步子集）。"),
     ),
     OsCatalogEntry(
-        key="opensuse", display="openSUSE", installer=AUTOYAST, auto_install=False,
+        key="opensuse", display="openSUSE", installer=AUTOYAST, auto_install=True,
         filename_keywords=("opensuse", "suse"), label_keywords=("opensuse", "suse"),
         kernel_dirs=("boot/x86_64/loader",),
         kernel_names=("vmlinuz",), initrd_names=("initrd",),
         version_hints=("15.5", "15.6"), verified=False,
-        note=("暂不支持自动安装：AutoYaST 未实现。目前支持按 opensuse 识别 ISO 与提取"
-              "引导介质（引导路径候选 boot/x86_64/loader/，未验证 —— 未在本环境实测）。"),
+        note=("AutoYaST：应答文件由 _opensuse_autoyast() 生成（autoinst.xml），"
+              "iPXE 内核行用 autoyast=<应答文件> install=<仓库>。**产物级已验证**"
+              "（12 条用例：结构/命名空间/转义/口令哈希/静态网络/分区/公钥/sudo）；"
+              "但**真机未验证**（本环境无 openSUSE 介质）。引导介质按候选路径 "
+              "boot/x86_64/loader/ 提取，同样未经真机实测。"),
     ),
 )
 

@@ -259,8 +259,12 @@ class KickstartFamilyGenerationTest(unittest.TestCase):
 
 
 class UnsupportedFamilyTest(unittest.TestCase):
-    """openSUSE 仍不支持自动装机：只支持识别 + 提取引导介质，生成时明确拒绝（不硬凑假应答文件）。
-    Debian 自 2026-10-09 起已支持 preseed 自动装机（见 test_pxe_debian_preseed.py）。
+    """★ 2026-10-15 A2：**openSUSE（AutoYaST）已实现** —— 本类原先守的"openSUSE 生成时被拒"
+    这条契约已不成立，故改为正向断言（与当年 Debian 落地时同一做法）。
+
+    现在**目录里没有任何 auto_install=False 的条目**（五个家族全支持自动装机），
+    所以"明确拒绝"这条路径只剩**防御**意义：未知 os_type、或将来新增但未实现的家族。
+    "拒绝必须发生在写任何应答文件之前"这条性质仍由下面的用例守着。
     """
 
     def test_debian_now_generates_preseed(self):
@@ -271,21 +275,37 @@ class UnsupportedFamilyTest(unittest.TestCase):
         self.assertIn("preseed.cfg", files, "debian 现在应产出 preseed.cfg")
         self.assertNotIn("ks.cfg", files)
         self.assertNotIn("user-data", files)
-    def test_opensuse_generate_rejected_with_clear_message(self):
-        with self.assertRaises(ValueError) as cm:
-            generate_all(_ks(os_type="opensuse", os_version="15.6"))
-        msg = str(cm.exception)
-        self.assertIn("暂不支持", msg)
-        self.assertIn("openSUSE", msg)
-        self.assertIn("AutoYaST", msg)
+    def test_opensuse_now_generates_autoyast(self):
+        """★ 2026-10-15 A2：openSUSE 由"生成时拒绝"改为**正向产出 AutoYaST**。
+
+        同时钉住 iPXE 内核行的家族差异：AutoYaST 用 `autoyast=`，**不是** anaconda 的
+        `inst.ks=`（两者混用会让安装器完全找不到应答文件）。
+        """
+        from app.it.pxe.generator import _ipxe_menu
+        c = _ks(os_type="opensuse", os_version="15.6")
+        files = generate_all(c)
+        self.assertIn("autoinst.xml", files, "openSUSE 现在应产出 autoinst.xml")
+        self.assertNotIn("ks.cfg", files)
+        self.assertNotIn("user-data", files)
+        menu = _ipxe_menu(c)
+        self.assertIn("autoyast=", menu)
+        self.assertIn("install=", menu)
+        self.assertNotIn("inst.ks=", menu)
+
+    def test_no_catalog_entry_is_left_unsupported(self):
+        """五个家族全支持之后显式钉住：一旦有人把某个家族改回 auto_install=False，
+        下面那条"拒绝路径"用例就失去载体 —— 这里立刻报出来。"""
+        for e in os_catalog.entries():
+            self.assertTrue(e.auto_install, e.key + " 现在应支持自动装机")
 
     def test_rejection_happens_before_any_answer_file_is_written(self):
-        """拒绝必须发生在写任何应答文件之前（改用仍不支持的 openSUSE 守这条性质）。"""
+        """拒绝必须发生在写任何应答文件之前。改用一个**未知** os_type 来守这条性质
+        （openSUSE 已支持，不能再拿它当"不支持的家族"）。"""
         from app.it.pxe.generator import _ipxe_menu
         with self.assertRaises(ValueError):
-            _ipxe_menu(_ks(os_type="opensuse", os_version="15.6"))
+            _ipxe_menu(_ks(os_type="plan9", os_version="1"))
         with self.assertRaises(ValueError):
-            generate_all(_ks(os_type="opensuse", os_version="15.6"))
+            generate_all(_ks(os_type="plan9", os_version="1"))
     def test_unsupported_can_still_be_detected_and_extracted(self):
         """不支持自动安装 ≠ 不能识别/提取：debian/openSUSE 仍过识别与提取白名单。"""
         # detect 取文件名里第一个数字段（12.5.0 是 Debian 官方命名的真实形状）
