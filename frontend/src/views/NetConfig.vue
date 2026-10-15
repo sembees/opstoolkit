@@ -167,11 +167,17 @@
               <span v-else class="cell-static">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="120" fixed="right">
-            <template #default="{ $index }">
+          <el-table-column label="操作" width="190" fixed="right">
+            <template #default="{ $index, row }">
               <!-- 复制/删除必须在同一行：`.table-actions` 抵消 EP 相邻按钮的 12px 外边距
                    （全站工具类，定义在 styles/main.css；80px 列宽 + 12px 间距本来必折行） -->
               <div class="table-actions">
+                <!-- ★ 额外路由（2026-10-15）：按 netplan 的语义挂在**设备**上，
+                     所以入口放在每行的操作列里；有路由时把条数显示出来，
+                     否则"我明明加过路由"会因为藏在弹窗里而看不见。 -->
+                <el-button link type="primary" size="small" @click="openRoutes($index)">
+                  路由<template v-if="(row.routes || []).length">（{{ (row.routes || []).length }}）</template>
+                </el-button>
                 <el-button link type="primary" size="small" @click="dupItem($index)">复制</el-button>
                 <el-button link type="danger" size="small" @click="delItem($index)">删除</el-button>
               </div>
@@ -194,6 +200,50 @@
         {{ localErrors.length || serverError ? '当前参数未通过校验，暂无预览' : '添加接口后自动预览' }}
       </div>
     </CardSection>
+
+    <!-- ★ 额外路由编辑（2026-10-15）。做成弹窗而不是加列：路由是"一对多"（一台设备可以
+         好几条），塞进表格只会把每行撑爆。按 netplan 的语义挂在设备上。 -->
+    <el-dialog v-model="routesDialog" title="额外路由" width="720px" append-to-body>
+      <div class="routes-hint">
+        目标填 <code>default</code>（默认路由）或网段（如 <code>10.20.0.0/16</code>，裸 IP 按 /32）；
+        <code>下一跳</code>可留空（on-link 直连路由）。<b>网关</b>字段仍是默认路由的便捷写法，
+        这里再加一条 <code>default</code> 会与它并存、由 metric 决定谁优先。
+      </div>
+      <el-table :data="routesDraft" size="small" empty-text="还没有路由，点下面的「添加一条」">
+        <el-table-column label="目标" min-width="180">
+          <template #default="{ row }">
+            <el-input v-model="row.to" size="small" placeholder="default 或 10.20.0.0/16" />
+          </template>
+        </el-table-column>
+        <el-table-column label="下一跳" min-width="150">
+          <template #default="{ row }">
+            <el-input v-model="row.via" size="small" placeholder="10.10.10.1（可空）" />
+          </template>
+        </el-table-column>
+        <el-table-column label="metric" width="110">
+          <template #default="{ row }">
+            <el-input v-model="row.metric" size="small" placeholder="可空" />
+          </template>
+        </el-table-column>
+        <el-table-column label="on-link" width="86">
+          <template #default="{ row }">
+            <el-switch v-model="row.on_link" />
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="70">
+          <template #default="{ $index }">
+            <el-button link type="danger" size="small" @click="routesDraft.splice($index, 1)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button size="small" @click="routesDraft.push({ to: '', via: '', metric: '', on_link: false })">
+          添加一条
+        </el-button>
+        <el-button size="small" type="primary" @click="saveRoutes">保存</el-button>
+        <el-button size="small" @click="routesDialog = false">取消</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -209,6 +259,41 @@ const items = ref([])
 const previewScript = ref("")
 const previewFilename = ref("")
 const previewKey = ref("")          // 生成当前预览所用的 payload 指纹（所见即所得的依据）
+
+// ── 额外路由编辑状态（弹窗里是**草稿**：取消就不该改动表格里的行）──
+const routesDialog = ref(false)
+const routesDraft = ref([])
+const routesIndex = ref(-1)
+
+function openRoutes(index) {
+  routesIndex.value = index
+  const cur = items.value[index].routes || []
+  // 深拷贝成草稿：metric 在输入框里是字符串（空串 = 未填），保存时再归一
+  routesDraft.value = cur.map(r => ({
+    to: r.to || "", via: r.via || "",
+    metric: (r.metric === null || r.metric === undefined) ? "" : String(r.metric),
+    on_link: !!r.on_link,
+  }))
+  routesDialog.value = true
+}
+
+function saveRoutes() {
+  const rows = []
+  for (const d of routesDraft.value) {
+    const to = String(d.to || "").trim()
+    if (!to) continue                      // 空目标的行直接丢弃（等于"没填这条"）
+    const r = { to }
+    const via = String(d.via || "").trim()
+    if (via) r.via = via
+    const m = String(d.metric ?? "").trim()
+    if (m !== "") r.metric = Number(m)
+    if (d.on_link) r.on_link = true
+    rows.push(r)
+  }
+  items.value[routesIndex.value].routes = rows
+  routesDialog.value = false
+  preview()          // 让预览与下载立刻跟上（否则会显示"预览已失效"）
+}
 const generating = ref(false)
 const metaLoaded = ref(false)
 const metaLoading = ref(true)       // U5-F12：区分"还在加载"与"加载失败"
@@ -263,7 +348,7 @@ function onVlanParentChange(row) {
 }
 
 function addItem(typ) {
-  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100, primary: "", lacpRate: "slow", xmitHash: "layer2+3" }
+  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100, primary: "", lacpRate: "slow", xmitHash: "layer2+3", routes: [] }
   if (typ === "iface") { base.name = "eth" + items.value.filter(i => i._type === "iface").length; base.mode = "dhcp" }
   // 网桥：默认"自动"（有 IP 即静态，无 IP 即纯二层）；bond 与 vlan 的模式不由该下拉控制
   else if (typ === "bridge") { base.name = "br" + items.value.filter(i => i._type === "bridge").length; base.mode = ""; base.slavesStr = "eth0"; onSlavesChange(base) }
@@ -400,16 +485,18 @@ function buildPayload() {
     const gw = dhcp ? null : _safeStr(row.gateway)
     // DNS 输入框被禁用时不提交残值
     const dns = dnsDisabled(row) ? [] : (row.dns || [])
+    // ★ 额外路由（2026-10-15）：四类设备都带上；没配就不发这个键（老请求形状不变）
+    const routes = (row.routes || []).length ? row.routes : undefined
     if (row._type === "iface") {
-      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ip, cidr: cidr, gateway: gw, dns: dns })
+      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ip, cidr: cidr, gateway: gw, dns: dns, routes: routes })
     } else if (row._type === "bond") {
-      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, dns: dns, miimon: _safeInt(row.miimon, 100), primary: _safeStr(row.primary), lacp_rate: row.lacpRate || null, xmit_hash_policy: row.xmitHash || null })
+      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, dns: dns, miimon: _safeInt(row.miimon, 100), primary: _safeStr(row.primary), lacp_rate: row.lacpRate || null, xmit_hash_policy: row.xmitHash || null, routes: routes })
     } else if (row._type === "vlan") {
       // dns 以前被这里丢掉，界面上的 DNS 输入框成了摆设；后端现已支持
-      payload.vlans.push({ parent: row.parent, vlan_id: _safeInt(row.vlanId, 100), ip: ip, cidr: cidr, gateway: gw, dns: dns })
+      payload.vlans.push({ parent: row.parent, vlan_id: _safeInt(row.vlanId, 100), ip: ip, cidr: cidr, gateway: gw, dns: dns, routes: routes })
     } else if (row._type === "bridge") {
       // mode 以前完全没发出去（下拉被静默忽略）；"" 表示自动，后端按"有 IP 即静态"处理
-      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], mode: row.mode || null, ip: ip, cidr: cidr, gateway: gw, dns: dns })
+      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], mode: row.mode || null, ip: ip, cidr: cidr, gateway: gw, dns: dns, routes: routes })
     }
   }
   return payload
@@ -519,6 +606,20 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 额外路由弹窗顶部的一句说明：字段少，靠这行解释"目标/下一跳能填什么"，
+   比给每列加 placeholder 更省纵向空间。 */
+.routes-hint {
+  margin-bottom: 8px;
+  color: var(--ot-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.routes-hint code {
+  padding: 0 3px;
+  background: var(--ot-fill-1);
+  border-radius: 3px;
+}
+
 /* 布局：根容器 .page（全局）负责纵向 flex 与 16px 区块间距；
    这里只补 height:100% —— 高度由父容器（el-main，已是有界 flex 项）决定，
    不再写死"视口高度 − 顶栏高度"。预览卡 flex:1 撑满剩余高度并内部滚动。 */

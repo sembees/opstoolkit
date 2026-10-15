@@ -203,6 +203,7 @@ def _ipv4_lines(obj, metric=None) -> list:
             # DHCP 口 + 手填 DNS 是合法且常见的（覆盖 DHCP 下发的 DNS）。
             # 改前这里直接 return，DNS 静默丢失。
             lines.append("ipv4.dns " + _sh(" ".join(str(d) for d in obj["dns"])))
+        lines += _nmcli_route_lines(obj)
         return lines
     lines.append(f"ipv4.addresses {_sh(obj['ip'])}/{_prefix(obj)}")
     lines.append("ipv4.method manual")
@@ -216,6 +217,30 @@ def _ipv4_lines(obj, metric=None) -> list:
         # set -e 下脚本在此中止，后面的 nmcli connection up 永不执行。
         # nmcli 接受「一个参数内空格分隔」的 DNS，故整体引用成单个 shell 词。
         lines.append("ipv4.dns " + _sh(" ".join(str(d) for d in obj["dns"])))
+    lines += _nmcli_route_lines(obj)
+    return lines
+
+
+def _nmcli_route_lines(obj) -> list:
+    """额外路由 → nmcli 的 `+ipv4.routes`（**追加**，不覆盖 gateway 写出的默认路由）。
+
+    语法依据 nmcli 对 ipv4.routes 的定义：一个**列表**，每项是
+    `ip[/prefix] [next-hop] [,metric]`。用 `+` 前缀是"追加一条"而不是"整体赋值" ——
+    不加 `+` 会把 ipv4.gateway 建立的那条默认路由一起清掉。
+
+    每条单独一个 `+ipv4.routes`：多条合成一个逗号串在 nmcli 里语义含混（netmask 与
+    metric 都用逗号），逐条追加最不容易写错。
+    """
+    lines = []
+    for e in _routes_of(obj):
+        # to=default 在 nmcli 里写 0.0.0.0/0
+        dest = "0.0.0.0/0" if e["to"] == "default" else e["to"]
+        item = dest
+        if e["via"]:
+            item += " " + e["via"]
+        if e["metric"] is not None:
+            item += "," + str(int(e["metric"]))
+        lines.append("+ipv4.routes " + _sh(item))
     return lines
 
 
@@ -332,30 +357,86 @@ def _netplan_dns(out, indent, dns):
         out.append(f"{indent}  addresses: [{', '.join(_yaml(d) for d in dns)}]")
 
 
+def _routes_of(obj) -> list:
+    """取某设备的**额外路由**列表（用户 2026-10-15 要求"支持添加路由"）。
+
+    兼容两种入参：pydantic 模型（有 .routes）与 dict（netplan 侧有些地方传 model_dump()）。
+    返回统一形状的 dict 列表，字段固定 to/via/metric/on_link，**非法值在 schemas 层就已 422**；
+    这里再洗一遍（第 3 层兜底，与文件开头"两层都拦"的口径一致）：
+      · to   ：`default` 或 IPv4 CIDR（用 _yaml/_sh 引用时也会再挡一次）
+      · via  ：IPv4 地址，可空
+      · metric：整数，可空
+    """
+    rs = obj.get("routes") if isinstance(obj, dict) else getattr(obj, "routes", None)
+    out = []
+    for i, r in enumerate(rs or []):
+        d = r if isinstance(r, dict) else (
+            r.model_dump() if hasattr(r, "model_dump") else dict(r))
+        to = str(d.get("to") or "").strip()
+        if not to:
+            continue
+        via = str(d.get("via") or "").strip()
+        metric = d.get("metric")
+        if metric in ("", None):
+            metric = None
+        else:
+            metric = int(metric)
+        out.append({"to": to, "via": via, "metric": metric,
+                    "on_link": bool(d.get("on_link")) if d.get("on_link") is not None else None})
+    return out
+
+
+def _netplan_routes(out, indent, obj, metric=None):
+    """netplan 的 routes 块：**默认路由与额外路由合成一个 `routes:` 键**。
+
+    为什么必须合成一个键（2026-10-15）：netplan 里 `routes` 是**列表**，
+    同一次出现两次 `routes:` 会让后一个覆盖前一个（YAML 重复键）—— 那正是
+    "加了静态路由，默认路由却没了"的失败形状。所以这里先收齐再输出。
+    """
+    entries = []
+    gw = (obj.get("gateway") or "").strip() if isinstance(obj, dict) else getattr(obj, "gateway", None)
+    if gw:
+        e = {"to": "default", "via": gw, "metric": metric, "on_link": None}
+        entries.append(e)
+    entries.extend(_routes_of(obj))
+    if not entries:
+        return
+    out.append(f"{indent}routes:")
+    for e in entries:
+        out.append(f"{indent}  - to: {_yaml(e['to'])}")
+        if e["via"]:
+            out.append(f"{indent}    via: {_yaml(e['via'])}")
+        if e["metric"] is not None:
+            out.append(f"{indent}    metric: {int(e['metric'])}")
+        if e["on_link"]:
+            out.append(f"{indent}    on-link: true")
+
+
 def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
     """输出 netplan 地址/routes/nameservers 块。indent 为属性缩进 (6 空格)。"""
     dns = obj.get("dns") or []
     if obj.get("mode") == "dhcp":
         out.append(f"{indent}dhcp4: true")
         # 改前 dhcp 分支直接 return，静默丢掉 DNS（netplan 里 dhcp4+nameservers 是合法的）
+        # ★ 2026-10-15：同样不能丢 routes —— DHCP 拿地址 + 手工补静态路由是常见需求。
+        _netplan_routes(out, indent, obj, metric)
         _netplan_dns(out, indent, dns)
         return
     if not obj.get("ip"):
         if dhcp_default:
             out.append(f"{indent}dhcp4: true")
+            _netplan_routes(out, indent, obj, metric)
             _netplan_dns(out, indent, dns)
         # 无地址、也不走 DHCP（bond/bridge/vlan 的 L2 场景）时不写任何地址块：
         # 这里不写 nameservers —— 单独的 nameservers 没有地址承载，语义不清。
+        # 但**显式给的路由仍然输出**：L2 桥上挂静态路由是合法配置，静默丢弃等于骗人。
+        else:
+            _netplan_routes(out, indent, obj, metric)
         return
     p = _prefix(obj)
     out.append(f"{indent}dhcp4: false")
     out.append(f"{indent}addresses: [{_yaml(str(obj['ip']) + '/' + str(p))}]")
-    if obj.get("gateway"):
-        out.append(f"{indent}routes:")
-        out.append(f"{indent}  - to: default")
-        out.append(f"{indent}    via: {_yaml(obj['gateway'])}")
-        if metric is not None:
-            out.append(f"{indent}    metric: {int(metric)}")
+    _netplan_routes(out, indent, obj, metric)
     _netplan_dns(out, indent, dns)
 
 
@@ -495,6 +576,27 @@ def _build_ifcfg(req):
 
     metrics = _route_metrics(req)
 
+    def _route_file(obj, ifname):
+        """额外路由 → `/etc/sysconfig/network-scripts/route-<ifname>`（initscripts 的官方约定）。
+
+        为什么单开文件而不是塞进 ifcfg-<ifname>：RHEL 系里 ifcfg 只认默认网关（GATEWAY=），
+        静态路由的规范落点就是 route-<ifname>（NM 的 ifcfg-rh 也读它）。
+        每行格式：`<目标> via <下一跳> [metric <n>]`；on-link 路由没有下一跳就只写目标。
+        """
+        rs = _routes_of(obj)
+        if not rs:
+            return
+        lines = []
+        for e in rs:
+            dest = "0.0.0.0/0" if e["to"] == "default" else e["to"]
+            line = dest
+            if e["via"]:
+                line += " via " + _sh(e["via"])
+            if e["metric"] is not None:
+                line += " metric " + str(int(e["metric"]))
+            lines.append(line)
+        files["route-" + _sh(ifname)] = "\n".join(lines) + "\n"
+
     # Interfaces
     for i, o in enumerate(req.interfaces):
         name = o.name
@@ -507,6 +609,7 @@ def _build_ifcfg(req):
             lines += ["BRIDGE=" + _sh(master), "ONBOOT=yes"]
         else:
             lines += _ip_lines(o.model_dump(), metrics.get(("iface", i)))
+            _route_file(o, name)
         files["ifcfg-" + _sh(name)] = "\n".join(lines) + "\n"
 
     # ? bond/bridge ??? interfaces ????????????
@@ -541,6 +644,7 @@ def _build_ifcfg(req):
             {"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "dns": o.dns, "netmask": o.netmask},
             metrics.get(("bond", i)),
         )
+        _route_file(o, name)
         files["ifcfg-" + _sh(name)] = "\n".join(lines) + "\n"
 
     # VLANs
@@ -553,6 +657,7 @@ def _build_ifcfg(req):
              "mode": o.mode, "dns": o.dns},
             metrics.get(("vlan", i)),
         )
+        _route_file(o, name)
         files["ifcfg-" + _sh(name)] = "\n".join(lines) + "\n"
 
     # Bridges
@@ -564,6 +669,7 @@ def _build_ifcfg(req):
              "mode": o.mode, "dns": o.dns},
             metrics.get(("bridge", i)),
         )
+        _route_file(o, name)
         files["ifcfg-" + _sh(name)] = "\n".join(lines) + "\n"
 
     # Combine output

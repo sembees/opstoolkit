@@ -440,6 +440,7 @@ cp /opt/opstk/backend/data/ops.db /backup/</pre>
                 <li>DHCP 行同样可以填 DNS：nmcli 产物写 ipv4.dns（auto 模式下也生效），netplan 写 dhcp4 + nameservers，ifcfg 在 BOOTPROTO=dhcp 分支写 DNS1..N。</li>
                 <li>mode=dhcp 时 IP/掩码/网关输入框禁用，残值不会提交（后端也会拒绝 DHCP 行带网关）。</li>
                 <li>IP 掩码写法二选一：<code>10.0.0.1/24</code> 或 IP + 独立掩码列（255.255.255.0，必须是连续掩码）；只给 IP 不给前缀时按 /24 处理（网关同子网校验也用这个默认值）。</li>
+                <li><b>额外路由</b>：每行的「路由」按钮可以加任意多条静态路由（<code>目标</code> / <code>下一跳</code> / <code>metric</code> / <code>on-link</code>），按钮上会显示条数。目标是 <code>default</code> 或网段（<code>10.20.0.0/16</code>；裸 IP 按 /32）；下一跳可留空（on-link 直连路由）。四个产物都支持，但落地位置不同：netplan 与 <b>默认路由合并进同一个 <code>routes:</code> 键</b>（YAML 重复键会让默认路由被覆盖），nmcli 每条一个 <code>+ipv4.routes</code>（<code>+</code> 是追加，不会清掉默认路由），ifcfg 生成 <code>/etc/sysconfig/network-scripts/route-&lt;网卡&gt;</code>。校验：带前缀时主机位必须为 0（<code>10.20.0.1/16</code> 会被拒绝，不静默改写你的目标）、<code>default</code> 必须给下一跳、metric 0..4294967295、只支持 IPv4。</li>
               </ul>
             </el-collapse-item>
 

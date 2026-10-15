@@ -1538,6 +1538,84 @@ class PxeGenerateResult(BaseModel):
 
 
 # ---------- IT 网络配置生成 ----------
+class NetRouteIn(BaseModel):
+    """一条**额外路由**（用户 2026-10-15 要求："应该支持添加路由的功能"）。
+
+    为什么做成独立模型而不是塞进一个字符串：三个产物（netplan YAML / nmcli /
+    ifcfg-route-*）对同一条路由的写法完全不同，而且都要做**注入防护** ——
+    这条值会原样进 YAML 标量、进 nmcli 参数、进 ifcfg 文件内容。
+    拆成字段后每个字段只有一个语义，白名单才能收紧（例如 to 只能是 default 或 IPv4 CIDR）。
+
+    字段：
+      · to     —— 目标：`default`（默认路由）或 IPv4 CIDR（10.20.0.0/16、192.168.5.0/24）
+      · via    —— 下一跳 IPv4 地址；**可空**（on-link 直连路由没有下一跳）
+      · metric —— 优先级（越小越优先）；可空 = 交给系统默认
+      · on_link—— netplan 的 on-link 语义（目标在链路上、不经网关）；nmcli/ifcfg 侧忽略它
+    """
+    to: str
+    via: Optional[str] = None
+    metric: Optional[int] = None
+    on_link: Optional[bool] = None
+
+    @field_validator("to")
+    @classmethod
+    def _check_to(cls, v: str) -> str:
+        """`default` 或 IPv4 目标。
+
+        · `0.0.0.0/0` 归一成 `default`（两者在三个产物里是同一个意思）；
+        · **裸 IP** 当 /32 主机路由（netplan 与 nmcli 都是这个语义），归一成显式 `x/32`；
+        · 带前缀但**主机位非零**（如 `10.20.0.1/16`）**拒绝** —— 不静默改成 `10.20.0.0/16`：
+          路由目标被悄悄改写，比直接报错难查得多。
+        """
+        s = (v or "").strip()
+        if s.lower() in ("default", "0.0.0.0/0"):
+            return "default"
+        try:
+            net = ipaddress.IPv4Network(s if "/" in s else s + "/32", strict=True)
+        except ValueError:
+            raise ValueError(
+                f"invalid to {v!r}: 必须是 default 或 IPv4 目标"
+                "（10.20.0.0/16、10.20.0.5（按 /32）、10.20.0.5/32）"
+                "；带前缀时主机位必须为 0（不要写 10.20.0.1/16）")
+        return str(net)
+
+    @field_validator("via")
+    @classmethod
+    def _check_via(cls, v: Optional[str]) -> Optional[str]:
+        return _require_ipv4(v, kind="address") if v else None
+
+    @field_validator("metric", mode="before")
+    @classmethod
+    def _check_metric(cls, v):
+        """`mode="before"`：要在 pydantic 把值强制成 int **之前**看到原始类型。
+
+        为什么必须这样：默认的 lax 模式会把 `True` 静默变成 `1`（bool 是 int 的子类）——
+        一个布尔值悄悄变成 metric 1 是典型的"配错了但看不出来"。数字字符串则照旧接受
+        （前端或脚本传 "100" 很常见），因为它的语义无歧义。
+        """
+        if v in (None, ""):
+            return None
+        if isinstance(v, bool):
+            raise ValueError(f"invalid metric {v!r}: 必须是整数（布尔值不是 metric）")
+        if isinstance(v, str):
+            s = v.strip()
+            if re.fullmatch(r"\d+", s) is None:
+                raise ValueError(f"invalid metric {v!r}: 必须是整数")
+            v = int(s)
+        if not isinstance(v, int):
+            raise ValueError(f"invalid metric {v!r}: 必须是整数")
+        if not (0 <= v <= 4294967295):
+            raise ValueError(f"invalid metric {v!r}: 必须在 0..4294967295 之间")
+        return v
+
+    @model_validator(mode="after")
+    def _check_route(self):
+        """跨字段：default 路由**必须**有 via（否则写出来是一条不可用的默认路由）。"""
+        if self.to == "default" and not self.via:
+            raise ValueError("default 路由必须给 via（下一跳）；只填 to: default 的默认路由不可用")
+        return self
+
+
 class NetInterfaceIn(BaseModel):
     name: str                       # 网卡名 eth0 / ens33 / eno1
     mode: str = "static"            # static / dhcp
@@ -1546,6 +1624,9 @@ class NetInterfaceIn(BaseModel):
     cidr: Optional[int] = None
     gateway: Optional[str] = None
     dns: list[str] = []
+    # ★ 额外路由（2026-10-15）：按 netplan 的语义**挂在设备上**（netplan 的 routes 就是
+    #   设备级属性）。gateway 仍是"默认路由"的便捷写法，routes 里也可以再写一条 to: default。
+    routes: list[NetRouteIn] = []
 
 
     @field_validator("name")
@@ -1593,6 +1674,7 @@ class NetBondIn(BaseModel):
     primary: Optional[str] = None   # active-backup 主接口
     lacp_rate: Optional[str] = None  # 802.3ad: slow / fast
     xmit_hash_policy: Optional[str] = None  # balance-xor/802.3ad: layer2 / layer2+3 / layer3+4
+    routes: list[NetRouteIn] = []
 
 
     @field_validator("name")
@@ -1679,6 +1761,7 @@ class NetVlanIn(BaseModel):
     # 运维填的 DNS 静默消失。这里补上，三条生成路径都已支持（netplan nameservers /
     # nmcli ipv4.dns / ifcfg DNS1..N）。
     dns: list[str] = []
+    routes: list[NetRouteIn] = []   # 额外路由（四类设备一致支持）
 
 
     @field_validator("parent")
@@ -1732,6 +1815,7 @@ class NetBridgeIn(BaseModel):
     cidr: Optional[int] = None
     gateway: Optional[str] = None
     dns: list[str] = []             # 同上：前端网桥行也有 DNS 输入框
+    routes: list[NetRouteIn] = []   # 额外路由（四类设备一致支持）
 
 
     @field_validator("name")
