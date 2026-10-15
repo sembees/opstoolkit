@@ -509,6 +509,28 @@ _MOUNT_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
 _RAID_LEVELS = (0, 1, 5, 6, 10)
 _DISK_MODES = ("auto", "name", "match")
 _DISK_LAYOUTS = ("lvm", "direct", "zfs", "custom")
+
+# ★ A6（2026-10-15）：**ZFS 口径统一为"明确拒绝"**。
+#   改前三个地方说法不一致，而其中两个会**静默给出别的东西**：
+#     · schemas 的 disk_scheme 白名单：拒绝 zfs（422）—— 与手册一致；
+#     · _disk_plan 的 disk_config.layout：**接受** zfs，随后 RHEL 侧 `_rhel_layout_lines`
+#       把它当 lvm/其它分支处理 ⇒ 运维写 zfs、装出来是 LVM，**产物上看不出问题**；
+#     · Ubuntu 的旧 disk_scheme 路径：会真的给 subiquity 发 `layout.name=zfs`
+#       （subiquity 认这个键，于是"界面说没实现、直连却真去建 zfs"）。
+#   本工具的 ZFS 支持确实没做（界面选项已移除、手册写明未实现）。既然没做，就在**所有**
+#   能到达的路径上一律拒绝，并说清替代方案 —— 宁可当场报错，不要"配置与实际不符"。
+_ZFS_REJECT_MSG = (
+    "ZFS 未实现：本工具的 ZFS 布局尚未落地（界面上已移除该选项，只有 lvm / direct / custom）。"
+    "现在请用 layout=lvm（推荐）或 layout=direct；确有 ZFS 需求时，"
+    "先让 ZFS 方案通过真机验收（分区/挂载/引导三项）再打开这个键。"
+    "这里**拒绝**而不是静默按 LVM 生成 —— 那会变成「配置写 zfs、装出来是 LVM」这种看不出问题的偏差。"
+)
+
+
+def _reject_zfs(scheme, where: str) -> None:
+    """ZFS 的唯一口径（见 `_ZFS_REJECT_MSG`）。`where` 只用于把出错位置写进消息。"""
+    if str(scheme or "").strip().lower() == "zfs":
+        raise ValueError(where + "：" + _ZFS_REJECT_MSG)
 _SIZE_UNIT = {"M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4, "P": 1024 ** 5}
 # "吃掉剩余空间"的两种写法：kickstart 用 --grow，subiquity 用字符串 "rest"
 _GROW_SIZES = ("rest", "100%FREE")
@@ -762,8 +784,13 @@ def _disk_plan(c, dc):
         layout = _safe_ident(raw_layout, "disk_config.layout").strip().lower()
         if layout not in _DISK_LAYOUTS:
             raise ValueError(
-                "disk_config.layout 非法 " + repr(raw_layout) + "：只允许 lvm|direct|zfs|custom"
+                "disk_config.layout 非法 " + repr(raw_layout) + "：只允许 lvm|direct|custom"
+                "（zfs 不再是可选项，见下）"
             )
+    # A6：zfs 在 _DISK_LAYOUTS 里只是为了给出**准确**的拒绝消息（它不是"非法值"，
+    # 而是"认得但没实现"）—— 从元组里删掉会落到上面那句"非法"，反而误导。
+    # 放在 if/else **之后**：两条来源（disk_config.layout 与旧 disk_scheme）都要拦。
+    _reject_zfs(layout, "disk_config.layout")
 
     custom = layout == "custom"
     parts_in = dc.get("partitions") or []
@@ -1292,11 +1319,15 @@ def _ubuntu_storage_obj(plan):
 # ---- RHEL / anaconda ----
 
 def _rhel_layout_lines(scheme, disk) -> str:
-    """既有 layout 简写的 ks 行（lvm/direct/zfs）。
+    """既有 layout 简写的 ks 行（lvm/direct）。
 
     disk_config 缺省时**必须逐字命中**本函数返回值（回归红线 §5.1）——所以这里只做
-    参数替换，标点/顺序/空格一个都不许动。zfs 沿用既有行为（与 lvm 同构）。
+    参数替换，标点/顺序/空格一个都不许动。
+
+    ★ A6：`zfs` 以前落到本函数的 lvm 分支（"沿用既有行为（与 lvm 同构）"）——
+    那意味着**运维写 zfs、装出来是 LVM，产物上看不出来**。现在明确拒绝。
     """
+    _reject_zfs(scheme, "_rhel_layout_lines")
     if scheme == "direct":
         return (
             "clearpart --drives=" + disk + " --all --initlabel\n"
@@ -1747,6 +1778,7 @@ def _rhel_pick_target_lines(plan) -> list:
     # 就会清到另一块盘上 —— 与 §5.42 同类，只是从"该排除的没排除"变成"主动清错盘"。
     # 反解不出来就中止：宁可不装，绝不按猜的盘去格式化。
     groups = _data_disk_matcher_specs(plan)
+    _ddev_idx = []
     for i, d in enumerate(plan["data_disks"]):
         # ★ 功能 G：**挂既有文件系统**的数据盘也要反解设备名 —— 它必须出现在
         #   `ignoredisk --only-use=` 里（否则 anaconda 看不到这块盘上的既有分区，
@@ -1773,9 +1805,26 @@ def _rhel_pick_target_lines(plan) -> list:
             "fi",
             "pxelog \"第 %d 个数据盘（%s）解析为 $ddev%d\"" % (i + 1, what, i + 1),
         ]
+        _ddev_idx.append(i + 1)
     lines.append("pxelog \"选定目标盘 target='${target:-<空>}'\"")
     lines.append("if [ -z \"$target\" ]; then "
                  "echo 'PXE: 未找到可用的目标磁盘，装机中止' >&2; exit 1; fi")
+    # ★ A4（2026-10-15）：**目标盘与数据盘解析成同一块盘时必须中止**。
+    #   为什么必须有这道闸：`clearpart --drives=<target>` / `part --ondisk=<target>` 是
+    #   **主动清除**动作。如果运维把数据盘的稳定条件（size/serial/wwid）写得与目标盘一样
+    #   （或机器上就是同一块盘满足了两个条件），反解出来的 ddevN 会等于 target ——
+    #   于是"要保护的盘"和"要格式化的盘"是同一块，结果就是**数据盘被当系统盘抹掉**。
+    #   生成期看不到真机硬件（没法在生成时判），但 %pre 里 target 与 ddevN 都已经是
+    #   真机解析出来的设备名 —— 在这里比一次是**零成本且确定**的。
+    #   宁可不装（exit 1，运维看得到串口留痕），也不冒一次数据丢失。
+    for _k in _ddev_idx:
+        lines += [
+            "if [ -n \"$ddev%d\" ] && [ \"$ddev%d\" = \"$target\" ]; then" % (_k, _k),
+            "  pxelog '!! 目标盘与第 %d 个数据盘解析成**同一块盘**（$target）—— 拒绝继续"
+            "（否则清分区会把要保护的数据盘一起抹掉）'" % _k,
+            "  echo 'PXE: 目标盘与 data_disks 冲突（同一块盘），装机中止' >&2; exit 1",
+            "fi",
+        ]
     return lines
 
 
@@ -1851,6 +1900,9 @@ def _ubuntu_user_data(c):
         scheme = c.disk_scheme
         if scheme not in ("lvm", "direct", "zfs"):
             scheme = "lvm"
+        # A6：Ubuntu 这条旧路径会**真的**给 subiquity 发 `layout.name=zfs`
+        #（subiquity 认这个键）—— 与"界面说没实现"矛盾，统一为拒绝。
+        _reject_zfs(scheme, "disk_scheme")
         cfg = {"name": scheme}
         if disk is not None:
             cfg["match"] = {"path": "/dev/" + disk}

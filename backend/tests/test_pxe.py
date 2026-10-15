@@ -829,11 +829,17 @@ class PxeDiskRegressionTest(unittest.TestCase):
         return _cfg(**kw)
 
     def test_legacy_ubuntu_storage_line_is_unchanged(self):
-        """三个 layout + 历史键 disk 的 storage 行，必须与改造前逐字一致。"""
+        """三个 layout + 历史键 disk 的 storage 行，必须与改造前逐字一致。
+
+        ★ A6（2026-10-15）：原来这里还有一条 `disk_scheme="zfs"` →
+        `storage: {"layout": {"name": "zfs"}}` 的"逐字不变"断言。那条断言记录的**正是**
+        "界面/manual 说 ZFS 未实现、直连却真给 subiquity 发 zfs 布局"的不一致 ——
+        现在统一为**拒绝**（见 test_legacy_ubuntu_zfs_is_now_rejected），
+        所以它被有意从"不变"清单里移除，而不是被删掉不提。
+        """
         cases = [
             ({}, '  storage: {"layout": {"name": "lvm"}}'),
             ({"disk_scheme": "direct"}, '  storage: {"layout": {"name": "direct"}}'),
-            ({"disk_scheme": "zfs"}, '  storage: {"layout": {"name": "zfs"}}'),
             # 非法 layout 回退 lvm（既有行为）
             ({"disk_scheme": "unknown-xyz"}, '  storage: {"layout": {"name": "lvm"}}'),
             # 历史键 disk → match.path，且 storage 仍是 layout 简写
@@ -848,14 +854,29 @@ class PxeDiskRegressionTest(unittest.TestCase):
                 ud = generate_all(_cfg(**kw))["user-data"]
                 self.assertIn(expected, ud.splitlines(), ud)
 
+    def test_legacy_ubuntu_zfs_is_now_rejected(self):
+        """A6：Ubuntu 这条旧路径以前会**真的**发 `layout.name=zfs` 给 subiquity（它认这个键），
+        与"ZFS 未实现"矛盾。现在必须当场拒绝，而不是生成一份"实际会去建 zfs"的产物。"""
+        with self.assertRaises(ValueError) as ctx:
+            generate_all(_cfg(disk_scheme="zfs"))
+        self.assertIn("ZFS 未实现", str(ctx.exception))
+
     def test_legacy_rhel_disk_lines_are_unchanged(self):
-        """RHEL 三个 layout（zfs 与 lvm 同构）的磁盘行 + bootloader 行逐行不变。"""
+        """RHEL 各 layout 的磁盘行 + bootloader 行逐行不变。
+
+        ★ A6：原来 zfs 也断言"与 lvm 逐行相同"（注释写"zfs 与 lvm 同构"）——
+        那意味着运维写 zfs、装出来是 LVM 且**产物上看不出问题**。现在改为拒绝（见下）。
+        """
         lvm = generate_all(self._rhel(disk_scheme="lvm"))["ks.cfg"]
         self.assertEqual(_ks_disk_block(lvm), LEGACY_KS_LVM)
-        zfs = generate_all(self._rhel(disk_scheme="zfs"))["ks.cfg"]
-        self.assertEqual(_ks_disk_block(zfs), LEGACY_KS_LVM)
         direct = generate_all(self._rhel(disk_scheme="direct"))["ks.cfg"]
         self.assertEqual(_ks_disk_block(direct), LEGACY_KS_DIRECT)
+
+    def test_legacy_rhel_zfs_is_now_rejected(self):
+        """A6：RHEL 侧 zfs 以前静默走 lvm 分支 —— 产物"看着正常"但配置与实际不符。"""
+        with self.assertRaises(ValueError) as ctx:
+            generate_all(self._rhel(disk_scheme="zfs"))
+        self.assertIn("ZFS 未实现", str(ctx.exception))
 
     def test_legacy_disk_key_only_is_unchanged(self):
         """只有历史键 disk（前端 Pxe.vue 一直只发这个形状）时，除盘名外逐字不变。"""
@@ -1891,15 +1912,33 @@ class PxeDiskValidationTest(unittest.TestCase):
         self.assertIn("clearpart --drives=vda --all --initlabel", ks)
 
     def test_schema_and_generator_whitelists_do_not_drift(self):
-        """两层的白名单必须一致（同 _OS_TYPE_ALLOWED 的做法：有测试锁住）。"""
+        """两层的白名单必须一致（同 _OS_TYPE_ALLOWED 的做法：有测试锁住）。
+
+        ★ A6（2026-10-15）后的新不变式：**允许集**必须完全一致，但生成器的"认得集"
+        （`_DISK_LAYOUTS`）可以多出一个 `zfs` —— 因为生成器需要把"认得但没实现"与
+        "拼写错误"分开报（前者说"ZFS 未实现"，后者说"layout 非法"）。
+        改动前两边都含 zfs，于是保存期放行、生成期才拒（"保存能过、生成期才 4xx"）。
+        这里既锁住允许集一致，也锁住"zfs 两边都拒、且文案同义"，防止有人只改一边。
+        """
         from app.core import schemas
         from app.it.pxe import generator
         self.assertEqual(set(schemas._DISK_FSTYPE_ALLOWED), set(generator._FSTYPE_ALLOWED))
-        self.assertEqual(set(schemas._DISK_LAYOUT_ALLOWED), set(generator._DISK_LAYOUTS))
         self.assertEqual(set(schemas._DISK_MODE_ALLOWED), set(generator._DISK_MODES))
         self.assertEqual(tuple(schemas._RAID_LEVEL_ALLOWED), tuple(generator._RAID_LEVELS))
         self.assertEqual(schemas._DISK_SIZE_PATTERN, generator._SIZE_RE.pattern)
         self.assertEqual(schemas._DISK_MOUNT_RE.pattern, generator._MOUNT_RE.pattern)
+        # 允许集：schema 里的每一项都必须被生成器认得（不许 schema 放行、生成器不认识）
+        self.assertTrue(set(schemas._DISK_LAYOUT_ALLOWED) <= set(generator._DISK_LAYOUTS),
+                        (schemas._DISK_LAYOUT_ALLOWED, generator._DISK_LAYOUTS))
+        # zfs：schema 不放行，生成器认得并明确拒绝（两层都拒，且都提到"未实现"）
+        self.assertNotIn("zfs", schemas._DISK_LAYOUT_ALLOWED)
+        self.assertIn("zfs", generator._DISK_LAYOUTS)
+        with self.assertRaises(ValueError) as s_ctx:
+            schemas.PxeDiskConfigIn(layout="zfs")
+        with self.assertRaises(ValueError) as g_ctx:
+            generator._reject_zfs("zfs", "test")
+        self.assertIn("ZFS 未实现", str(s_ctx.exception))
+        self.assertIn("ZFS 未实现", str(g_ctx.exception))
 
     def test_schema_normalizes_but_keeps_legacy_shape(self):
         """disk_config 校验完必须还是普通 dict——它会落进 JSON 列并传给生成器。"""

@@ -499,7 +499,10 @@ _DISK_SIZE_PATTERN = r"^[0-9]+(\.[0-9]+)?[MGTP]$|^rest$|^100%FREE$"
 _DISK_SIZE_RE = re.compile(_DISK_SIZE_PATTERN)
 _DISK_MOUNT_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
 _DISK_FSTYPE_ALLOWED = ("ext4", "xfs", "btrfs", "fat32", "vfat", "swap", "bios_grub")
-_DISK_LAYOUT_ALLOWED = ("lvm", "direct", "zfs", "custom")
+# ★ A6（2026-10-15）：元组里**刻意不再列 zfs** —— 它是"认得但没实现"，由 _check_layout
+# 单独给出准确文案；留在元组里只会让错误消息说成"只允许 lvm|direct|zfs|custom"（误导：
+# 看起来 zfs 可用）。生成器侧有同一道拒绝（覆盖旧库行与绕过接口的调用）。
+_DISK_LAYOUT_ALLOWED = ("lvm", "direct", "custom")
 _DISK_MODE_ALLOWED = ("auto", "name", "match")
 _RAID_LEVEL_ALLOWED = (0, 1, 5, 6, 10)
 _GROW_SIZE_TOKENS = ("rest", "100%FREE")
@@ -829,6 +832,17 @@ class PxeDiskConfigIn(BaseModel):
     @classmethod
     def _check_layout(cls, v: str) -> str:
         s = (v or "").strip().lower()
+        # ★ A6（2026-10-15）：zfs **在保存期就拒**，不是等到生成/部署期。
+        #   为什么必须在这里而不是只靠生成器：`_DISK_LAYOUT_ALLOWED` 原来把 zfs 列为合法，
+        #   于是"模板保存 200、生成/部署才 4xx"—— 本项目在 netconfig 上已经栽过一次同类问题
+        #   （见本文件里那段"保存能过、生成/部署期才 4xx"的注释）。
+        #   生成器侧仍保留同一道拒绝（旧的库行、绕过接口的调用都要拦），两处文案一致。
+        if s == "zfs":
+            raise ValueError(
+                "ZFS 未实现：本工具的 ZFS 布局尚未落地（界面上已移除该选项）。"
+                "现在请用 layout=lvm（推荐）或 layout=direct；"
+                "确有 ZFS 需求时，先让 ZFS 方案通过真机验收（分区/挂载/引导三项）再放行。"
+            )
         if s and s not in _DISK_LAYOUT_ALLOWED:
             raise ValueError(
                 f"layout 非法 {v!r}：只允许 " + "|".join(_DISK_LAYOUT_ALLOWED)
