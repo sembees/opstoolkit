@@ -142,3 +142,94 @@ class TestEndpointIsReadOnly:
                      if getattr(r, "path", "").endswith("/local-networks"))
         deps = [d.call.__name__ for d in route.dependant.dependencies if getattr(d, "call", None)]
         assert "get_current_user" in deps, "本机网段扫描必须要求登录态"
+
+
+class TestIPv6Coverage:
+    """IPv6 覆盖（用户 2026-10-15 要求「这个需要覆盖测试」）。
+
+    PXE/DHCP 这条链是 **IPv4**：dnsmasq 的 `dhcp-range=<v4>,<v4>`、`dhcp-host=<mac>,<v4>`、
+    以及扫描器给出的建议池，全部只认 IPv4。IPv6 在这里不是"未实现"，而是**必须被安全地
+    排除** —— 不能出现"把 IPv6 地址当成 IPv4 塞进配置"或"因为网卡只有 IPv6 而崩掉"。
+    本类逐条钉住这些边界。
+    """
+
+    def test_ipv6_only_iface_is_skipped_not_crashing(self):
+        """只有 IPv6 的网卡（_iface_v4 返回 None）必须被跳过，且不影响其它网卡。"""
+        res = pxe_server.list_local_networks({
+            "iface_name": "ens18", "gateway": "10.128.118.1",
+            "ifaces": ["ens18", "ens19", "ens20"],
+            "iface_v4_map": {"ens18": ("10.128.118.113", 24),
+                             "ens19": ("192.168.199.1", 24),
+                             "ens20": None},          # 只有 IPv6 / 无 IPv4
+        })
+        got = by_iface(res)
+        assert "ens20" not in got, "没有 IPv4 的网卡不该出现在装机网候选里"
+        assert set(got) == {"ens18", "ens19"}
+
+    def test_all_ipv6_host_yields_empty_with_warning(self):
+        res = pxe_server.list_local_networks({
+            "iface_name": "", "ifaces": ["ens18", "ens19"],
+            "iface_v4_map": {"ens18": None, "ens19": None}})
+        assert res["interfaces"] == []
+        assert res["warnings"], "整机没有 IPv4 时必须给警告，不能静默空列表"
+
+    def test_ipv6_like_strings_never_leak_into_output(self):
+        """输出里任何地址字段都不得是 IPv6 字面量（生成器只吃 IPv4）。"""
+        import ipaddress
+        res = pxe_server.list_local_networks({
+            "iface_name": "ens18", "gateway": "10.128.118.1",
+            "ifaces": ["ens18", "ens19"],
+            "iface_v4_map": {"ens18": ("10.128.118.113", 24), "ens19": ("192.168.199.1", 24)}})
+        for x in res["interfaces"]:
+            for key in ("ip", "netmask", "network", "gateway"):
+                assert x[key], (key, x)
+                ipaddress.IPv4Address(x[key] if key != "network" else x["ip"])
+                assert ":" not in x[key], "%s 里出现了 IPv6 字面量: %r" % (key, x[key])
+            for key in ("suggest_start", "suggest_end"):
+                if x[key]:
+                    ipaddress.IPv4Address(x[key])
+
+    def test_suggest_pool_rejects_ipv6_networks(self):
+        assert pxe_server.suggest_pool("fe80::/64") == ("", "")
+        assert pxe_server.suggest_pool("2001:db8::/32") == ("", "")
+        assert pxe_server.suggest_pool("::1/128") == ("", "")
+
+    def test_range_guard_is_fail_closed_for_ipv6(self):
+        """红线守卫对 IPv6 必须 fail-closed（False），不能因为"算不出来"就放行。"""
+        bind = {"interface": "ens19", "ip": "192.168.199.1",
+                "netmask": "255.255.255.0", "prefixlen": 24}
+        for a, b in (("fe80::1", "fe80::ff"), ("192.168.199.10", "fe80::1"),
+                     ("fe80::1", "192.168.199.200")):
+            assert pxe_server.range_inside_binding(a, b, bind) is False, (a, b)
+
+    def test_schema_rejects_ipv6_in_server_side_fields(self):
+        """模板保存期就拒绝：这些键最终会拼进 IPv4 的 dnsmasq 指令。"""
+        import pytest
+        from pydantic import ValidationError
+
+        from app.core.schemas import PxeNetConfigIn
+        for key in ("dhcp_start", "dhcp_end", "gateway", "dns_server"):
+            with pytest.raises(ValidationError):
+                PxeNetConfigIn.model_validate({key: "fe80::1"})
+            with pytest.raises(ValidationError):
+                PxeNetConfigIn.model_validate({key: "2001:db8::5"})
+        # IPv4 正常通过（对照组，防止把校验写死成"一律拒绝"）
+        ok = PxeNetConfigIn.model_validate({"dhcp_start": "10.99.0.50", "dhcp_end": "10.99.0.150"})
+        assert ok.model_dump()["dhcp_start"] == "10.99.0.50"
+
+    def test_generator_keeps_ipv4_pool_when_server_ip_is_ipv6(self):
+        """server_ip 给 IPv6 ⇒ 池/网关退回 IPv4 默认值，绝不把 v6 拼进 dhcp-range。"""
+        from app.it.pxe.generator import PxeConfig, generate_all
+        c = PxeConfig(os_type="debian", os_version="13.7.0", hostname="h", admin_user="ops",
+                      admin_password="x", ssh_keys=[], disk_scheme="lvm",
+                      disk_config={"disk": "sda"}, net_mode="dhcp", net_config={},
+                      mirror="http://h/repo/", server_ip="fe80::1",
+                      http_root="http://192.168.199.1:8000/pxe/serve",
+                      kernel_path="k", initrd_path="i", deploy_mode="standalone")
+        conf = generate_all(c, [])["dnsmasq.conf"]
+        rng = [l for l in conf.splitlines() if l.startswith("dhcp-range=")][0]
+        assert rng == "dhcp-range=192.168.1.100,192.168.1.200,12h"
+        assert ":" not in rng, "dhcp-range 里出现 IPv6 即非法"
+        for l in conf.splitlines():
+            if l.startswith("dhcp-option="):
+                assert ":" not in l.split(",", 1)[1], l

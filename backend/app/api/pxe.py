@@ -549,14 +549,75 @@ def _gen_body_dict(body: PxeGenerateIn | None) -> dict:
     return body.model_dump(exclude_none=True)
 
 
+async def _collect_deployed_extras(db: AsyncSession, exclude_pid: str,
+                                   server_ip: str, deploy_mode: str):
+    """收集**其它已部署模板**的 (配置, 装机记录)，供生成器把它们的按 MAC 条目合并进同一份
+    dnsmasq.conf。
+
+    为什么必须合并（2026-10-15 用户报障）：`/etc/dnsmasq.d/opstk-pxe.conf` 是**单文件**，
+    每次部署整体覆盖。于是"A 模板有两台待装机、随后部署 B 模板"会把 A 的 `dhcp-host`
+    地址预留与每机引导菜单一起冲掉 —— A 的机器 IP 会漂、也拿不到自己的装机菜单。
+
+    数据来源：`last-deploy.json`（每次成功部署写一条 `{pid: {server_ip, deploy_mode}}`）。
+    它是"本机当前实际部署过哪些模板"的唯一权威记录；只读，不改。
+    跳过条件：就是当前模板、模板已被删除、pid 非法（都只是"不合并"，不影响本次部署）。
+
+    返回 `([{"c": PxeConfig, "installs": [...]}, …], [模板名…])`。
+    """
+    out, names = [], []
+    try:
+        deployed = _read_last_deploy()
+    except Exception as e:  # noqa: BLE001 —— best-effort：读不到就不合并，绝不因此让部署失败
+        logging.getLogger(__name__).warning("读取 last-deploy.json 失败，跳过多模板合并: %s", e)
+        return out, names
+    for pid in sorted(deployed):
+        if str(pid) == str(exclude_pid):
+            continue
+        try:
+            scope = pxe_server.safe_pid(str(pid))
+        except ValueError:
+            continue                      # 非法 pid 当作没部署过
+        p = await db.get(models.PxeProfile, str(pid))
+        if p is None:
+            continue                      # 模板已删除 ⇒ 产物也该随之消失
+        rows = (await db.execute(
+            select(models.PxeInstall).where(models.PxeInstall.profile_id == str(pid))
+        )).scalars().all()
+        if not rows:
+            continue                      # 没有装机记录的模板不贡献任何按 MAC 条目
+        insts = []
+        for r in rows:
+            fin = getattr(r, "finished_at", None)
+            insts.append({
+                "mac": r.mac, "hostname": r.hostname,
+                "ip": getattr(r, "ip", None) or getattr(r, "mgmt_ip", None),
+                "status": r.status or "pending",
+                "finished_at": fin,
+            })
+        # answer_root 必须与该模板**自己**的落盘前缀一致（profiles/<pid>），
+        # 否则会把 A 的机器指到 B 的菜单去。
+        root = serve_token.serve_base(server_ip) + "/" + pxe_server.PROFILE_SCOPE_DIR + "/" + scope
+        c = _to_pxeconfig(p, server_ip=server_ip, http_root=serve_token.serve_base(server_ip),
+                          answer_root=root,
+                          deploy_mode=(deployed.get(pid, {}) or {}).get("deploy_mode") or deploy_mode)
+        out.append({"c": c, "installs": insts})
+        names.append("%s(%s)" % (p.name or p.id, str(pid)[:8]))
+    return out, names
+
+
 async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession,
-                         out_warnings: list | None = None) -> dict:
+                         out_warnings: list | None = None,
+                         merge_others: bool = True) -> dict:
     """生成全部 PXE 部署文件 (autoinstall/kickstart + iPXE + dnsmasq)。
 
     入参 body 约定来自 `PxeGenerateIn.model_dump(exclude_none=True)`
     （见 _gen_body_dict）：模型校验在 HTTP 层完成，这里只消费摊平后的字段。
     out_warnings：给了就把生成期的非致命警告（目前只有"服务端绑卡没确定"）追加进去 ——
     部署路径不需要（它有 fail-closed 守卫），/generate 与 /download 需要。
+    merge_others：是否把**其它已部署模板**的按 MAC 条目合并进 dnsmasq.conf。
+      部署与「生成预览」要合并（它们描述的就是**本机**将生效的配置）；
+      `/download` 不合并 —— 那个 ZIP 是拿到**另一台机器**上落地的，把本机其它模板的
+      记录塞进去只会误导人。
     """
     p = await db.get(models.PxeProfile, pid)
     if not p:
@@ -713,8 +774,47 @@ async def _gen_pxe_files(pid: str, body: dict, db: AsyncSession,
             if r is None:
                 continue
             _with_done(item, r)
+    # ★ 多模板合并（2026-10-15 用户报障）：把其它**已部署**模板已登记的机器并进同一份
+    #   dnsmasq.conf，否则后部署者会把前者的 dhcp-host 地址预留与每机引导菜单整体冲掉。
+    extra, merged_names = [], []
+    registered_anywhere = None
+    if merge_others:
+        try:
+            extra, merged_names = await _collect_deployed_extras(
+                db, pid, _srv_ip, body.get("deploy_mode", "") or cfg.deploy_mode or "standalone")
+        except Exception as e:  # noqa: BLE001 —— 合并是增强，失败不能把部署本身搞挂
+            logging.getLogger(__name__).warning("多模板合并失败（本次按单模板生成）: %s", e)
+            extra, merged_names = [], []
+        if extra:
+            # 全机口径：本机**已有任何一台登记的机器**（本模板的，或合并进来的别的模板的）
+            # ⇒ 那份扁平 boot.ipxe 必须是"拒绝自动安装"的安全菜单。否则"有记录的 A +
+            # 无记录的 B"里 B 最后部署会把默认菜单换成 B 的装机菜单，未登记机器又会被
+            # 自动分区（RUNBOOK §5.29 那条实测事故）。
+            # ⚠️ 只在**确有其它已部署模板**时才接管这个判定：单模板部署（绝大多数场景，
+            #    也是既有用例覆盖的路径）走 generate_all 的原判定，逐字节不变。
+            registered_anywhere = bool(installs) or any(bool(g.get("installs")) for g in extra)
+        if merged_names and out_warnings is not None:
+            out_warnings.append(
+                "本次 dnsmasq.conf 合并了其它已部署模板的装机记录：" + "、".join(merged_names)
+                + "。全局段（interface / DHCP 池 / 引导骨架）取自本次部署的模板；"
+                  "被合并模板的机器仍指向它们各自的 boot/<mac>.ipxe，不受影响。")
     try:
-        return generate_all(cfg, installs)
+        files = generate_all(cfg, installs, extra=extra, registered_anywhere=registered_anywhere)
+        if merged_names:
+            # 落盘的 README 也要写明"这份配置是合并出来的"，否则照 README 排查的人会以为
+            # 里面那些 MAC 是别的模板串味了。仅合并时追加，单模板输出逐字节不变。
+            files["README.txt"] = files["README.txt"] + (
+                "多模板合并说明\n"
+                "--------------\n"
+                "本机 /etc/dnsmasq.d/opstk-pxe.conf 是**单文件**，每次部署整体覆盖。\n"
+                "为避免「后部署的模板把先部署模板的已登记机器冲掉」，本次生成时把\n"
+                "下列已部署模板的装机记录一并合并了进来：\n"
+                "  " + "、".join(merged_names) + "\n"
+                "这些机器各自的引导菜单与应答文件仍在它们**自己**的 profiles/<id>/ 下，\n"
+                "合并进本文件的只有 dhcp-host 地址预留与指向各自菜单的那两条 dhcp-boot。\n"
+                "全局段（interface / DHCP 池 / 引导骨架）取自本次部署的模板 —— 一个\n"
+                "dnsmasq 实例只能服务一个装机网段，多网段请分开部署到不同机器。\n\n")
+        return files
     except ValueError as e:
         # 存量空口令模板等生成期校验失败：以 4xx + 中文提示暴露，而不是 500
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -731,7 +831,9 @@ async def generate_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
 async def download_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """下载全部 PXE 部署文件 (zip 压缩包)。"""
     warns: list = []
-    files = await _gen_pxe_files(pid, _gen_body_dict(body), db, out_warnings=warns)
+    # 不合并本机其它模板：这个 ZIP 是拿到**另一台机器**上落地的（/generate 与部署才合并）。
+    files = await _gen_pxe_files(pid, _gen_body_dict(body), db, out_warnings=warns,
+                                 merge_others=False)
     # 警告也要跟着 ZIP 走：拿到包的人可能不经过界面，只在 README 里印一遍不够稳
     for _i, _w in enumerate(warns, 1):
         files["WARNINGS-%d.txt" % _i] = _w + "\n"

@@ -2803,7 +2803,7 @@ def _dhcp_pool_defaults(server_ip):
     return "192.168.1.100", "192.168.1.200"
 
 
-def _dnsmasq(c, installs=None):
+def _dnsmasq(c, installs=None, extra=None):
     """三种部署模式：
     standalone - 独立 DHCP（专用装机网络，裸机接入即装）
     proxy      - ProxyDHCP（与现有 DHCP 并存，只提供 PXE 引导信息，不分配 IP）
@@ -2869,15 +2869,43 @@ def _dnsmasq(c, installs=None):
     # 元组第 4/5 位 = 装机状态与完成时间：status 非 pending 的记录**不再下发**按机
     # 的自动装机菜单（防重复抹盘，2026-10-08 真机实证：装完的机器重启走网卡引导
     # 又被装了一遍），但 dhcp-host 地址预留照发（该机的 IP 稳定性不能丢）。
+    # 元组第 6 位 = **该机所属模板的 answer_base**（profiles/<pid>）：合并进来的机器
+    # 必须指向它自己模板的菜单与应答文件，否则会把 A 的机器指到 B 的菜单去。
+    # ★ 多模板合并（2026-10-15 用户报障："部署 B 模板会把 A 的 dhcp-host 冲掉"）：
+    #   这份 conf 是**单文件**，后部署者整体覆盖前者。除主模板外还要把**其它已部署
+    #   模板**已登记的机器合并进来，否则那些机器的地址预留与每机引导会凭空消失。
+    #   全局段（interface / dhcp-range / 引导骨架）仍**只由主模板提供**：一个 dnsmasq
+    #   实例只能服务一个装机网段，这是物理约束，不是省事。
     reg = []
-    for inst in installs:
-        mac = _safe_mac(inst.get("mac"))
-        if not mac:
+
+    def _collect_reg(cfg, insts, base):
+        for inst in (insts or []):
+            mac = _safe_mac(inst.get("mac"))
+            if not mac:
+                continue
+            addr, _prefix = _require_install_ip(inst, "装机记录 " + mac)
+            _fin = " ".join(str(inst.get("finished_at") or "").split())
+            reg.append((mac, _mac_tag(mac), addr,
+                        str(inst.get("status") or "pending"), _fin or "已完成", base))
+
+    _collect_reg(c, installs, answer_base)
+    _merged_from = []
+    for _g in (extra or []):
+        _gc = (_g or {}).get("c")
+        if _gc is None:
             continue
-        addr, _prefix = _require_install_ip(inst, "装机记录 " + mac)
-        _fin = " ".join(str(inst.get("finished_at") or "").split())
-        reg.append((mac, _mac_tag(mac), addr,
-                    str(inst.get("status") or "pending"), _fin or "已完成"))
+        _collect_reg(_gc, (_g or {}).get("installs"), _answer_base(_gc))
+        _merged_from.append(str(getattr(_gc, "hostname", "") or "其它模板"))
+    # 同一 MAC 出现在两个模板里时以**先出现者**为准（主模板优先）：dnsmasq 对同一 MAC
+    # 出现两条 dhcp-host 时只有一条生效且顺序未定义，不能听天由命。
+    _seen_mac = set()
+    _dedup = []
+    for _r in reg:
+        if _r[0] in _seen_mac:
+            continue
+        _seen_mac.add(_r[0])
+        _dedup.append(_r)
+    reg = _dedup
 
     if mode == "relay":
         # M6：原实现同时写了 interface=<iface> 与 no-dhcp-interface=<iface>。
@@ -2937,7 +2965,7 @@ def _dnsmasq(c, installs=None):
     L.append("dhcp-match=set:efi-x86_64,option:client-arch,9")
     L.append("dhcp-match=set:efi-ia32,option:client-arch,6")
     L.append("dhcp-match=set:ipxe,175")
-    for mac, tag, ip, _st, _fin in reg:
+    for mac, tag, ip, _st, _fin, _base in reg:
         # 照抄同文件既有拼法：dhcp-host=<mac>,set:pxe_<tag>；该机登记了 ip 时
         # 在中间插入 <ip>（dnsmasq 的 dhcp-host=MAC,IP,set:tag 是同一指令的预留写法）。
         # ★ 已标记完成的机器这行**照发**：地址预留要保持稳定（IP 不漂移），
@@ -2970,7 +2998,7 @@ def _dnsmasq(c, installs=None):
     L.append("")
     L.append("# 第二阶段：iPXE 自己再次 DHCP 时下发【脚本 URL】（HTTP），而不是固件")
     L.append("# 按 MAC 指定 iPXE 菜单 (tag 方式, 避免 URL 被当作 hostname)")
-    for mac, tag, _ip, st, fin in reg:
+    for mac, tag, _ip, st, fin, base in reg:
         if st != "pending":
             # ★ 防重复抹盘（2026-10-08 真机实证）：该机已标记完成（finished_at=…），
             #   不再下发自动装机菜单 → 回落未登记默认菜单 → 引导本地磁盘。
@@ -2980,14 +3008,15 @@ def _dnsmasq(c, installs=None):
                      + "），不再下发自动装机菜单 → 回落未登记默认菜单 → 引导本地磁盘")
             continue
         L.append("tag-if=set:fw-menu-" + tag + ",tag:fw-menu,tag:pxe_" + tag)
-        L.append("dhcp-boot=tag:fw-menu-" + tag + "," + answer_base + "/boot/" + tag + ".ipxe")
+        # base 是该机**自己模板**的 answer_base（合并进来的机器不能指到主模板的菜单）
+        L.append("dhcp-boot=tag:fw-menu-" + tag + "," + base + "/boot/" + tag + ".ipxe")
     # 默认菜单对**仍待装机**的 MAC 取反，从而与上面每台机的专属菜单互斥。
     # 已标记完成的机器**不**取反：它的 dhcp-host 仍在（set:pxe_<tag> 照发），
     # 而专属菜单已不下发 ⇒ tag:fw-menu 成立且所有 tag:!pxe_<待装> 都成立
     # ⇒ 落到 fw-menu-def（未登记默认菜单：拒绝自动安装并 exit）⇒ 固件继续
     # 按引导顺序引导本地磁盘 —— 这正是本单元要的目标行为。
     # 它指向扁平的 <http_root>/boot.ipxe（全局唯一），内容见 _unregistered_default_menu()。
-    neg = "".join(",tag:!pxe_" + t for _m, t, _ip, st, _fin in reg if st == "pending")
+    neg = "".join(",tag:!pxe_" + t for _m, t, _ip, st, _fin, _base in reg if st == "pending")
     L.append("tag-if=set:fw-menu-def,tag:fw-menu" + neg)
     L.append("# 未登记机器的默认菜单：扁平全局文件（不是 profiles/<pid>/ 下的那份）")
     L.append("dhcp-boot=tag:fw-menu-def," + c.http_root + "/boot.ipxe")
@@ -3175,7 +3204,17 @@ def _validate_lines(c):
             _safe_line(val, f.name)
 
 
-def generate_all(c, installs=None):
+def generate_all(c, installs=None, extra=None, registered_anywhere=None):
+    """生成一个模板的全部部署产物。
+
+    :param extra: 其它**已部署**模板的 `[{"c": PxeConfig, "installs": [...]}, …]`。
+        它们只贡献"按 MAC 的那部分"（dhcp-host 地址预留 + 每机第二阶段引导），
+        合并进同一份 dnsmasq.conf —— 因为 `/etc/dnsmasq.d/opstk-pxe.conf` 是**单文件**，
+        后部署者整体覆盖前者会把别的模板已登记的机器从 DHCP 里抹掉（2026-10-15 用户报障）。
+        全局段（interface / dhcp-range / 引导第一二阶段骨架）**只由主模板 c 提供**：
+        一份 dnsmasq 实例只能有一个装机网段，这是物理约束，不是省事。
+    :param registered_anywhere: 全机口径"是否存在任何装机记录"。None ⇒ 只看本模板（旧行为）。
+    """
     _validate_lines(c)
     answer_base = _answer_base(c)
     files = {}
@@ -3207,9 +3246,17 @@ def generate_all(c, installs=None):
     #     单模板部署（前端"部署"按钮就是发 installs:[]）靠它才能装机，不能破。
     # 两种内容都是**显式定义**的，且安全菜单与模板无关（逐字节相同），
     # 因此多模板场景下不存在"后部署者把默认行为改写成另一种"。
+    # ★ 2026-10-15：判定改为**全机口径**（registered_anywhere）。原因：这份扁平 boot.ipxe
+    #   是**全局唯一文件**，只要本机任何一个模板登记过装机记录，"未登记机器一律不许自动
+    #   装机"这条安全语义就必须成立 —— 否则"有记录的 A 模板 + 无记录的 B 模板"里，
+    #   B 最后部署会把默认菜单换成 B 的装机菜单，未登记机器又会被自动分区（正是本函数
+    #   注释里那条实测事故）。registered_anywhere=None 时退回"只看本模板"的旧口径，
+    #   既有单模板行为逐字节不变。
     has_registered = any(_safe_mac(i.get("mac")) for i in (installs or []) if isinstance(i, dict))
+    if registered_anywhere is not None:
+        has_registered = bool(registered_anywhere)
     files["boot.ipxe"] = _unregistered_default_menu() if has_registered else _ipxe_menu(c)
-    files["dnsmasq.conf"] = _dnsmasq(c, installs)
+    files["dnsmasq.conf"] = _dnsmasq(c, installs, extra=extra)
     files["README.txt"] = _readme(c, has_registered=has_registered)
     # 每台装机记录生成独立菜单与应答文件，使 hostname 生效。
     # 应答文件与菜单都落在 answer_base（= 部署时的 profiles/<pid>，按模板隔离）之下。
