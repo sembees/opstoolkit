@@ -158,8 +158,13 @@ def verify_suite(repo_path, suite, keyring=None, limit_bad=10):
         # 只有目录、没有任何索引内容 ⇒ 这个 suite **根本没同步**（线上 testing/unstable 就是，
         # debian-tuna 是从完整镜像站 rsync 出来的一棵树，里面留着很多没搬的 suite 目录）。
         # 这种情况报 fail 是"狼来了"：它本来就不该有。真正危险的是"有内容却没有 Release"。
-        has_content = os.path.isdir(os.path.join(sd, "main")) or os.path.isdir(
-            os.path.join(sd, "contrib"))
+        # 判"有没有内容"要看**文件**，不能只看目录：线上 `trixie-security` 就是 0 个文件、
+        # 只有一层层空目录（一次中止的同步留下的），按目录判会误判成"有内容却缺 Release"⇒ fail。
+        has_content = any(
+            os.path.isfile(os.path.join(sd, comp, "binary-amd64", n))
+            for comp in ("main", "contrib", "non-free", "non-free-firmware")
+            for n in ("Packages", "Packages.gz", "Packages.xz", "Release")
+        )
         res["verdict"] = "fail" if has_content else "warn"
         res["reason"] = ("有内容但缺少 Release（索引声明文件）：d-i 无法校验镜像"
                          if has_content else
