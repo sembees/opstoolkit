@@ -358,7 +358,7 @@ def list_local_networks(providers=None):
             if net.subnet_of(_n) or net.overlaps(_n):
                 _site_hit = _n
                 break
-        _route_guarded = bool(getattr(_settings, "pxe_protect_default_route", False))
+        _route_guarded = bool(_dhcp.site_policy()["protect_default_route"])
         if _site_hit is not None:
             s_start = s_end = ""
             safety = "blocked"

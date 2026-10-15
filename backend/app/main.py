@@ -17,6 +17,33 @@ async def lifespan(app: FastAPI):
 
     ensure_secret_key()
     await init_db()
+    # ★ 站点级 PXE 策略（受保护网段 / 默认路由保护）存在 app_meta 里，**必须在这里装一次**：
+    #   落盘前的红线检查（dhcp.check_dhcp_conf_safety）是同步函数、读的是内存缓存；
+    #   不装的话，容器一重启就会退回 .env 口径 —— 运维在界面上改过的策略会被静默忽略，
+    #   而这条策略恰恰是"别把 PXE 开到企业网段上"的防线。装失败只告警、不阻断启动
+    #   （最坏退回 .env；本环境的 .env 里本来就有同样的值）。
+    try:
+        from app.core import dhcp as _dhcp_mod
+        from app.core import models as _models
+        from app.database import async_session as _Session
+        import json as _json
+
+        async with _Session() as _db:
+            _row = await _db.get(_models.AppMeta, "pxe_site_policy")
+            _raw = None
+            if _row is not None and (_row.value or "").strip():
+                try:
+                    _raw = _json.loads(_row.value)
+                except ValueError:
+                    logging.getLogger(__name__).warning("app_meta.pxe_site_policy 不是合法 JSON，按未配置处理")
+            _applied = _dhcp_mod.apply_site_policy(_raw)
+        logging.getLogger(__name__).info(
+            "站点级 PXE 策略已装载（来源=%s）：受保护网段=%s，保护默认路由网卡=%s",
+            "db" if _raw is not None else "env",
+            ",".join(str(n) for n in _applied["protected_networks"]) or "(无)",
+            _applied["protect_default_route"])
+    except Exception as e:  # noqa: BLE001 —— best-effort，绝不能因为策略装载失败而起不来
+        logging.getLogger(__name__).warning("站点级 PXE 策略装载失败（按 .env 口径运行）: %s", e)
     from app.ct.inspection.service import legacy_ssh_support, recover_interrupted_tasks
 
     await recover_interrupted_tasks()

@@ -188,8 +188,111 @@ class ProtectDefaultRouteFlagTest(_Base):
             assert ok, why
 
 
-class ScannerFollowsSiteConfigTest(_Base):
+class SitePolicyOptionTest(_Base):
+    """站点策略**可运行时管理**（2026-10-15 用户："可以加个选项"）。
+
+    两层：`.env`（部署期口径）与 DB/app_meta（运行时口径，界面可改、立刻生效）。
+    DB 有值就用 DB，否则用 .env。这一层必须有用例钉住 —— 否则"改了界面不生效"
+    或"重启后被 .env 悄悄覆盖"都会把"别在企业网段上开 PXE"这条防线判松。
+    """
+
+    def tearDown(self):
+        dhcp.apply_site_policy(None)      # 清缓存，别污染别的用例
+
+    def test_db_policy_overrides_env(self):
+        from app.config import settings
+        old = (settings.pxe_protected_networks, settings.pxe_protect_default_route)
+        self.addCleanup(lambda: (setattr(settings, "pxe_protected_networks", old[0]),
+                                 setattr(settings, "pxe_protect_default_route", old[1])))
+        settings.pxe_protected_networks = "10.128.118.0/24"
+        settings.pxe_protect_default_route = True
+        # 没装 DB 策略 ⇒ 按 .env
+        assert [str(n) for n in dhcp.site_protected_nets()] == ["10.128.118.0/24"]
+        assert dhcp.site_policy()["protect_default_route"] is True
+        # 装上 DB 策略 ⇒ 以 DB 为准（这里故意与 .env 不同）
+        dhcp.apply_site_policy({"protected_networks": "10.9.9.0/24", "protect_default_route": False})
+        assert [str(n) for n in dhcp.site_protected_nets()] == ["10.9.9.0/24"]
+        assert dhcp.site_policy()["protect_default_route"] is False
+        # 清缓存 ⇒ 回到 .env
+        dhcp.apply_site_policy(None)
+        assert [str(n) for n in dhcp.site_protected_nets()] == ["10.128.118.0/24"]
+
+    def test_db_policy_actually_changes_the_guard_verdict(self):
+        """★ 关键：装了 DB 策略之后，**落盘前那道红线检查**的结论必须跟着变。
+
+        用 proxy 配置来测：它没有地址池，所以第 4/6 条都不适用 —— 未被站点保护时**能过**；
+        一旦该网段被站点声明为受保护，第 3b 条（网卡落在受保护网段里）立刻拒绝。
+        （不能用"interface=ens18 + 池在别处"那种 conf：那会被第 6 条先拒，看不出策略的效果。）
+        """
+        corp_proxy = ("interface=ens18\nbind-interfaces\n"
+                      "dhcp-range=10.128.118.113,proxy\n")
+        with site("", False):
+            ok, why = dhcp.check_dhcp_conf_safety(corp_proxy, HOST_FACTS, own_path="x")
+            assert ok, why
+            dhcp.apply_site_policy({"protected_networks": "10.128.118.0/24",
+                                    "protect_default_route": False})
+            ok2, why2 = dhcp.check_dhcp_conf_safety(corp_proxy, HOST_FACTS, own_path="x")
+            assert not ok2, "装了 DB 策略后仍放行"
+            assert "受保护网段" in why2, why2
+
+    def test_db_policy_actually_changes_the_scanner(self):
+        """扫描器同样跟着 DB 策略走（否则界面显示的可用性与实际部署结论会打架）。"""
+        from app.it.pxe import server as pxe_server
+        facts = dict(HOST_FACTS, ifaces=["lo", "ens18", "ens19"])
+        with site("", False):
+            before = {x["interface"]: x["safety"]
+                      for x in pxe_server.list_local_networks(facts)["interfaces"]}
+            assert before["ens18"] == "caution"
+            dhcp.apply_site_policy({"protected_networks": "10.128.118.0/24",
+                                    "protect_default_route": False})
+            after = {x["interface"]: x["safety"]
+                     for x in pxe_server.list_local_networks(facts)["interfaces"]}
+            assert after["ens18"] == "blocked", after
+            assert after["ens19"] == "ok"
+
+    def test_bad_cidr_in_db_policy_is_ignored_not_fatal(self):
+        dhcp.apply_site_policy({"protected_networks": "不是网段,10.128.118.0/24",
+                                "protect_default_route": False})
+        assert [str(n) for n in dhcp.site_protected_nets()] == ["10.128.118.0/24"]
+
+
+class SitePolicyEndpointTest(unittest.TestCase):
+    """/site-policy 的口径：读要登录、写要 admin、坏 CIDR 必须 422（写前校验）。"""
+
+    def test_routes_registered_with_right_guards(self):
+        from app.api import pxe as pxe_api
+        paths = {getattr(r, "path", "") for r in pxe_api.router.routes}
+        assert any(p.endswith("/site-policy") for p in paths)
+        get_route = next(r for r in pxe_api.router.routes
+                         if getattr(r, "path", "").endswith("/site-policy") and "GET" in r.methods)
+        put_route = next(r for r in pxe_api.router.routes
+                         if getattr(r, "path", "").endswith("/site-policy") and "PUT" in r.methods)
+        gdeps = [d.call.__name__ for d in get_route.dependant.dependencies if getattr(d, "call", None)]
+        pdeps = [d.call.__name__ for d in put_route.dependant.dependencies if getattr(d, "call", None)]
+        assert "get_current_user" in gdeps
+        # require_role("admin") 是工厂：真正的依赖函数叫 _require_role
+        assert any("require_role" in d for d in pdeps), ("写策略必须限 admin", pdeps)
+
+    def test_put_rejects_bad_and_ipv6_cidr(self):
+        """写前逐条校验 CIDR：坏值 422 —— 绝不让一个笔误把整站保护静默关掉。"""
+        import asyncio
+        from fastapi import HTTPException
+
+        from app.api import pxe as pxe_api
+        for bad in ("10.128.118.0/33", "not-a-net", "10.128.118.007/24", "fe80::/64"):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(pxe_api.put_site_policy({"protected_networks": bad}, db=None))
+            assert ctx.exception.status_code == 422, bad
+            assert "受保护网段不合法" in str(ctx.exception.detail)
     """扫描器与文档必须**同一口径**：产品默认给 caution（只能 proxy），站点声明才 blocked。"""
+
+class ScannerFollowsSiteConfigTest(_Base):
+    """扫描器与文档必须**同一口径**：产品默认给 caution（只能 proxy），站点声明才 blocked。
+
+    注意它必须继承 `_Base` —— 扫描器本身不需要 /sys/class/net，但要对称地过一遍落盘前
+    红线检查的用例需要它（否则 Windows 上第 2 条判据会因读不到网卡而全部拒绝，
+    看起来像"扫描器与守卫不一致"，其实是夹具缺失）。
+    """
 
     def _rows(self):
         from app.it.pxe import server as pxe_server

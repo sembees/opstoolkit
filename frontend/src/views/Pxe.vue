@@ -150,6 +150,34 @@
       </el-table>
     </CardSection>
 
+    <!-- ★ 站点级策略：这是**站点选项**，不是产品规则（2026-10-15 用户澄清并拍板加选项）。
+         产品允许用本机**任意**网卡的网段做装机网（客户常常只有一张卡，proxy 就得在它上面做）；
+         而某些站点里某张卡接的是企业/生产内网，绝不允许起 dnsmasq —— 在这里声明。
+         存在数据库里，改完**立刻生效**（无需重启容器）。 -->
+    <CardSection title="PXE 站点策略" icon="Lock">
+      <el-alert type="info" :closable="false" show-icon class="mb-2"
+                :title="'当前生效：受保护网段 ' + (sitePolicy.protected_networks || '（无）')
+                        + ' ｜ 保护默认路由网卡 ' + (sitePolicy.protect_default_route ? '开' : '关')
+                        + ' ｜ 来源：' + (sitePolicy.source === 'db' ? '界面配置（数据库）' : '.env 配置')" />
+      <el-alert v-if="sitePolicy.note" type="info" :closable="false" show-icon class="mb-2"
+                :title="sitePolicy.note" />
+      <el-form label-width="150px" size="default">
+        <el-form-item label="受保护网段">
+          <el-input v-model="policyForm.protected_networks" type="textarea" :rows="2"
+                    placeholder="逗号或换行分隔的 CIDR，例如 10.128.118.0/24；留空 = 不保护任何网段" />
+        </el-form-item>
+        <el-form-item label="保护默认路由网卡">
+          <el-switch v-model="policyForm.protect_default_route" />
+          <span class="hint-txt">开启后，本机承载默认路由的那张卡（通常是上联/办公网）也禁止跑 PXE</span>
+        </el-form-item>
+        <el-form-item label=" ">
+          <el-button size="small" type="primary" :loading="policySaving" @click="saveSitePolicy">保存站点策略</el-button>
+          <el-button size="small" @click="loadSitePolicy">重新读取</el-button>
+          <span class="hint-txt">保存在数据库里，改完立刻生效</span>
+        </el-form-item>
+      </el-form>
+    </CardSection>
+
     <!-- 装机记录 -->
     <CardSection title="装机记录" icon="Monitor">
       <el-table :data="installs" stripe size="small" empty-text="暂无装机记录">
@@ -1540,6 +1568,44 @@ const modeConflict = computed(() => {
   return ""
 })
 
+// ── 站点级策略（受保护网段 / 默认路由保护）──
+// 这是**站点选项**：产品允许用本机任意网段做装机网，站点可以在这里声明"哪张网卡/哪个
+// 网段绝对不许跑 PXE"（典型：这张卡接企业内网）。存在数据库里，改完立刻生效。
+const sitePolicy = ref({ protected_networks: "", protect_default_route: false, source: "env", note: "" })
+const policyForm = reactive({ protected_networks: "", protect_default_route: false })
+const policySaving = ref(false)
+
+async function loadSitePolicy() {
+  try {
+    const r = await http.get("/it/pxe/site-policy", { _silent: true })
+    sitePolicy.value = r || sitePolicy.value
+    // 回填编辑框：换行归一成逗号，便于阅读与再编辑
+    policyForm.protected_networks = String((r && r.protected_networks) || "").replace(/\s*,\s*/g, ", ")
+    policyForm.protect_default_route = !!(r && r.protect_default_route)
+  } catch (e) {
+    // 读不到就保持原样（策略面板是辅助信息，不该让整页报错）
+  }
+}
+
+async function saveSitePolicy() {
+  policySaving.value = true
+  try {
+    // 换行也算分隔符（用户从别处粘一串 CIDR 很常见）
+    const nets = String(policyForm.protected_networks || "").split(/[\n,;]+/).map(s => s.trim())
+      .filter(Boolean).join(",")
+    const r = await http.put("/it/pxe/site-policy",
+                             { protected_networks: nets, protect_default_route: !!policyForm.protect_default_route })
+    sitePolicy.value = r || sitePolicy.value
+    ElMessage.success("站点策略已保存并立即生效")
+    // 策略变了，扫描结果会变（哪些网段可用）——重新扫一遍，别让人看着旧结论
+    if (netCandidates.value.length) await scanLocalNetworks()
+  } catch (e) {
+    ElMessage.error("保存失败：" + ((e && (e.detail || e.message)) || "未知错误"))
+  } finally {
+    policySaving.value = false
+  }
+}
+
 function osLabel(row) { return row.os_type + " " + row.os_version }
 function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", installed: "success", failed: "danger" }[s] || "info" }
 function statusLabel(s) { return { pending: "待装机", booting: "引导中", installing: "安装中", done: "完成", installed: "已装完", failed: "失败" }[s] || s }
@@ -2002,6 +2068,7 @@ onMounted(() => {
   loadProfiles(); loadInstalls(); loadServerStatus(); loadIsos(); loadMedia(); startInstallPolling()
   loadIsoSpace(); refreshTransfersNow()   // ISO 镜像传输：空间 + 1.5s 轮询
   loadOsCatalog()   // 系统目录：三个下拉与识别的唯一来源（后端 os_catalog.py）
+  loadSitePolicy()  // 站点级策略：受保护网段 / 保护默认路由网卡（数据库，改了立刻生效）
 })
 </script>
 

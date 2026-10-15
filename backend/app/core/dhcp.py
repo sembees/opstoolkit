@@ -737,29 +737,19 @@ def _other_conf_has_keyword(keyword, exclude_path, conf_dir=None):
     return ""
 
 
-def site_protected_nets(providers=None):
-    """本站点**显式声明**的受保护网段（`PXE_PROTECTED_NETWORKS`，逗号分隔 CIDR）。
+# ── 站点级 PXE 策略：可运行时管理（DB / app_meta）＋ 回落到 .env ──────────────
+# 为什么要有**两层**（2026-10-15 用户要求「可以加个选项」）：
+#   · `.env`（Settings）是**部署期**口径，改它要重启容器；
+#   · DB（app_meta 的 pxe_site_policy）是**运行时**口径，运维在界面上改一下立刻生效。
+# 判定顺序：DB 有值就用 DB，否则用 .env，再否则用 Settings 的默认值。
+# 内存缓存让**同步**的 check_dhcp_conf_safety 也能读到（它被 sync 的 deploy_files 调用，
+# 那里没有 async DB 会话）；缓存由 API 在写入后立刻刷新，应用启动时也装一次。
+_SITE_POLICY_CACHE = None      # None = 尚未从 DB 装过 ⇒ 用 .env/默认
 
-    这是**站点级**约束，不是产品规则（2026-10-15 用户澄清）：产品能力是"可以用本机
-    任意一张已有网卡的网段做装机网"；而某些站点里有一张卡接的是企业/生产内网，
-    绝不允许在上面起 dnsmasq —— 那由站点自己在这里声明。
 
-    与"默认路由网卡"那份保护（由 `PXE_PROTECT_DEFAULT_ROUTE` 控制）**互相独立**：
-      · 本函数返回的网段**永远**拦（不受任何开关影响）；
-      · 解析失败的条目**忽略并写日志**：不能因为配置里一个笔误，把整车间的保护静默关掉，
-        也不能因为它把整站部署全部堵死。providers 可注入便于单测
-        （{"protected": "10.0.0.0/8,…"}）。
-    """
+def _split_nets(raw):
+    """把逗号/分号分隔的 CIDR 串解析成 IPv4Network 列表；坏条目忽略并写日志。"""
     import ipaddress
-    raw = None
-    if providers and "protected" in providers:
-        raw = providers["protected"]
-    if raw is None:
-        try:
-            raw = settings.pxe_protected_networks
-        except Exception:  # noqa: BLE001 —— 配置读不到时按"无站点保护"走，并留日志
-            logging.getLogger(__name__).warning("读取 pxe_protected_networks 失败")
-            return []
     out = []
     for item in str(raw or "").replace(";", ",").split(","):
         s = item.strip()
@@ -769,8 +759,70 @@ def site_protected_nets(providers=None):
             out.append(ipaddress.ip_network(s, strict=False))
         except ValueError:
             logging.getLogger(__name__).warning(
-                "PXE_PROTECTED_NETWORKS 里的条目无法解析，已忽略：%r（请写成 CIDR，如 10.128.118.0/24）", s)
+                "站点 PXE 受保护网段里的条目无法解析，已忽略：%r"
+                "（应写成 CIDR，如 10.128.118.0/24）", s)
     return out
+
+
+def site_policy(providers=None):
+    """当前生效的站点 PXE 策略 → `{"protected_networks": [...], "protect_default_route": bool}`。
+
+    优先级：DB（app_meta，缓存）> `.env`（Settings）> 代码默认值。
+    `providers` 可注入便于单测：{"protected": "10.0.0.0/8", "protect_route": True}。
+    """
+    if providers and ("protected" in providers or "protect_route" in providers):
+        return {"protected_networks": _split_nets(providers.get("protected", "")),
+                "protect_default_route": bool(providers.get("protect_route", False))}
+    if _SITE_POLICY_CACHE is not None:
+        return _SITE_POLICY_CACHE
+    try:
+        raw_net = settings.pxe_protected_networks
+        raw_flag = settings.pxe_protect_default_route
+    except Exception:  # noqa: BLE001 —— 配置读不到时按"无站点保护"走，并留日志
+        logging.getLogger(__name__).warning("读取站点 PXE 配置失败，按未配置处理")
+        raw_net, raw_flag = "", False
+    return {"protected_networks": _split_nets(raw_net),
+            "protect_default_route": bool(raw_flag)}
+
+
+def apply_site_policy(raw=None):
+    """把 DB 里的策略装进内存缓存；`raw=None` = 清掉缓存（回到 .env/默认）。
+
+    `raw` 形如 `{"protected_networks": "10.128.118.0/24,10.9.9.0/24",
+    "protect_default_route": true}`（都是可直接落 app_meta.value 的原始类型）。
+    """
+    global _SITE_POLICY_CACHE
+    if raw is None:
+        _SITE_POLICY_CACHE = None
+        return site_policy()
+    _SITE_POLICY_CACHE = {
+        "protected_networks": _split_nets(raw.get("protected_networks", "")),
+        "protect_default_route": bool(raw.get("protect_default_route", False)),
+    }
+    return _SITE_POLICY_CACHE
+
+
+def site_policy_cache_loaded():
+    """内存缓存里是否已装入过策略（True = 来自 DB / 显式 apply；False = 尚未装，按 .env 走）。
+
+    用途：/server/status 用一个**不重新加载**的路径把"当前进程真正在用的口径"报出来 ——
+    否则没法确认"启动时到底装没装上"（INFO 日志被日志级别过滤时尤其看不出来）。
+    """
+    return _SITE_POLICY_CACHE is not None
+
+
+def site_protected_nets(providers=None):
+    """本站点**显式声明**的受保护网段（DB 策略 / `PXE_PROTECTED_NETWORKS`）。
+
+    这是**站点级**约束，不是产品规则（2026-10-15 用户澄清）：产品能力是"可以用本机
+    任意一张已有网卡的网段做装机网"；而某些站点里有一张卡接的是企业/生产内网，
+    绝不允许在上面起 dnsmasq —— 那由站点自己声明。
+
+    与"默认路由网卡"那份保护（`PXE_PROTECT_DEFAULT_ROUTE`）**互相独立**。
+    解析失败的条目**忽略并写日志**：不能因为配置里一个笔误把整车间的保护静默关掉，
+    也不能因为它把整站部署全部堵死。
+    """
+    return list(site_policy(providers)["protected_networks"])
 
 
 def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=None,
@@ -859,8 +911,10 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
     #     自己的约束（本项目试验环境就在这里声明 10.128.118.0/24 企业内网）。
     #   注意：无论这两个开关怎么设，下面第 4 条（池与**受保护**网段重叠 ⇒ 拒绝）与
     #   第 6 条（池必须落在网卡自己网段里）都照旧 fail-closed。
-    _site_nets = site_protected_nets()
-    _route_guarded = bool(getattr(settings, "pxe_protect_default_route", False))
+    #   两个开关的值来自 site_policy()：DB（界面可改，立刻生效）> .env > 代码默认。
+    _policy = site_policy()
+    _site_nets = list(_policy["protected_networks"])
+    _route_guarded = bool(_policy["protect_default_route"])
     if _route_guarded:
         if why:
             return False, ("无法判断哪张网卡/哪个网段是骨干网：" + why

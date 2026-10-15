@@ -15,6 +15,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crypto, models, serve_token
+# 站点级 PXE 策略（受保护网段 / 默认路由保护）的内存缓存由本模块维护：
+# 读 /site-policy、写 /site-policy 都经过 dhcp.apply_site_policy，落盘前的红线检查
+# （dhcp.check_dhcp_conf_safety，同步函数）直接读那份缓存 ⇒ 改完立刻生效、无需重启。
+from app.core import dhcp as _dhcp
+from app.config import settings
 from app.core.auth import get_current_user, require_role
 from app.core.schemas import PxeGenerateIn, PxeGenerateResult, PxeInstallIn, PxeInstallOut, PxeProfileIn, PxeProfileOut
 from app.core.timeutil import utcnow
@@ -840,26 +845,132 @@ async def download_files(pid: str, body: PxeGenerateIn = None, db: AsyncSession 
     return files_to_zip_response(files, "pxe-deploy.zip")
 
 
+# ---------- 站点级策略（受保护网段 / 默认路由保护）----------
+# 这是**站点级选项**，不是产品规则（2026-10-15 用户澄清 + "可以加个选项"）：
+#   产品能力 = 可以用本机任意一张网卡的网段做装机网；
+#   站点约束 = 某些站点里某张卡接的是企业/生产内网，不许在上面起 dnsmasq。
+# 落点选 app_meta（DB）：它与数据目录一起迁移，且**改完立刻生效**（无需重启容器）——
+# 内存缓存由 apply_site_policy 在同一进程里刷新。
+_SITE_POLICY_KEY = "pxe_site_policy"
+
+
+async def _load_site_policy(db: AsyncSession) -> dict:
+    """从 DB 读策略并装进 dhcp 的内存缓存；没有记录 ⇒ 回到 .env/默认。"""
+    row = await db.get(models.AppMeta, _SITE_POLICY_KEY)
+    raw = None
+    if row is not None and (row.value or "").strip():
+        try:
+            raw = json.loads(row.value)
+        except ValueError:
+            logging.getLogger(__name__).warning("app_meta.%s 不是合法 JSON，按未配置处理", _SITE_POLICY_KEY)
+            raw = None
+    applied = _dhcp.apply_site_policy(raw)
+    return {
+        "protected_networks": ",".join(str(n) for n in applied["protected_networks"]),
+        "protect_default_route": applied["protect_default_route"],
+        "source": "db" if raw is not None else "env",
+    }
+
+
+def _site_policy_out(policy: dict) -> dict:
+    return {
+        "protected_networks": policy.get("protected_networks", ""),
+        "protect_default_route": bool(policy.get("protect_default_route")),
+        "source": policy.get("source", "env"),
+        "env_protected_networks": getattr(settings, "pxe_protected_networks", ""),
+        "env_protect_default_route": bool(getattr(settings, "pxe_protect_default_route", False)),
+        "note": ("受保护网段里的网卡：任何 PXE 模式都不许使用；"
+                 "「保护默认路由网卡」开启时，承载默认路由的那张卡也一并受保护。"
+                 "两者都不影响与站点无关的 fail-closed 判据：DHCP 池落在受保护/默认路由"
+                 "网段内、或不在目标网卡自己的网段内，一律拒绝。"),
+    }
+
+
+@router.get("/site-policy")
+async def get_site_policy(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """GET /api/it/pxe/site-policy — 查看当前生效的站点级 PXE 策略。"""
+    return _site_policy_out(await _load_site_policy(db))
+
+
+@router.put("/site-policy")
+async def put_site_policy(body: dict = None, db: AsyncSession = Depends(get_db),
+                          _user=Depends(require_role("admin"))):
+    """PUT /api/it/pxe/site-policy — 修改站点级 PXE 策略（admin）。
+
+    入参：`{"protected_networks": "10.128.118.0/24,10.9.9.0/24", "protect_default_route": true}`
+    （`protected_networks` 也接受数组）。**写前逐条校验 CIDR**：坏值 422 拒绝，
+    绝不让一个笔误把整站保护静默关掉（生成侧虽会忽略坏条目，但那是兜底，不是入口）。
+    """
+    import ipaddress
+    body = body or {}
+    raw_nets = body.get("protected_networks", "")
+    if isinstance(raw_nets, (list, tuple)):
+        raw_nets = ",".join(str(x) for x in raw_nets)
+    bad = []
+    for item in str(raw_nets or "").replace(";", ",").split(","):
+        s = item.strip()
+        if not s:
+            continue
+        try:
+            net = ipaddress.ip_network(s, strict=False)
+            if net.version != 4:
+                bad.append(s + "（只支持 IPv4：PXE/DHCP 这条链是 IPv4）")
+        except ValueError:
+            bad.append(s + "（不是合法 CIDR，如 10.128.118.0/24）")
+    if bad:
+        raise HTTPException(status_code=422, detail="受保护网段不合法：" + "；".join(bad))
+    payload = {"protected_networks": str(raw_nets or ""),
+               "protect_default_route": bool(body.get("protect_default_route", False))}
+    row = await db.get(models.AppMeta, _SITE_POLICY_KEY)
+    if row is None:
+        db.add(models.AppMeta(key=_SITE_POLICY_KEY,
+                              value=json.dumps(payload, ensure_ascii=False)))
+    else:
+        row.value = json.dumps(payload, ensure_ascii=False)
+    await db.commit()
+    # 立刻装进内存缓存：本进程内后续的扫描/守卫都按新策略走（无需重启）
+    _dhcp.apply_site_policy(payload)
+    logging.getLogger(__name__).warning(
+        "站点级 PXE 策略已更新（受保护网段=%r，保护默认路由网卡=%s）—— 立即生效",
+        payload["protected_networks"], payload["protect_default_route"])
+    return _site_policy_out({"protected_networks": payload["protected_networks"],
+                             "protect_default_route": payload["protect_default_route"],
+                             "source": "db"})
+
+
 # ---------- 本机部署与服务管控 ----------
 @router.get("/local-networks")
-async def local_networks(_user=Depends(get_current_user)):
+async def local_networks(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """GET /api/it/pxe/local-networks — 扫描本机**所有可用 IPv4 网段**，供界面选装机网。
 
     只读：不改任何配置、不发任何包。返回每张网卡的地址/掩码/网段、是否承载默认路由、
-    以及一个落在该网段内的建议 DHCP 池；承载默认路由的那张会被标 `blocked`（standalone
-    会在它上面发地址，部署侧守卫会拒），proxy/relay 仍可用（它们不发地址）。
+    以及一个落在该网段内的建议 DHCP 池；被站点策略保护的（受保护网段 / 保护默认路由网卡）
+    会被标 `blocked`。
 
     为什么要有它：装 PXE 的机器通常已经配好了好几张网卡的地址，运维要的是"从本机网段里
     挑一个当装机网"，而不是记住 IP 再手打一遍 —— 手打正是当初把企业网卡名填进
     `interface=` 的来源。
     """
-    return pxe_server.list_local_networks()
+    # 先按 DB 里的站点策略刷新缓存（多进程/重启后第一次调用也能拿到正确口径）
+    policy = await _load_site_policy(db)
+    out = pxe_server.list_local_networks()
+    out["site_policy"] = _site_policy_out(policy)
+    return out
 
 
 @router.get("/server/status")
 async def server_status(_user=Depends(get_current_user)):
     """查看本机 PXE 服务状态 (dnsmasq + TFTP + HTTP 文件 + 端口)。"""
     out = pxe_server.server_status()
+    # ★ 把"本进程**真正在用**的站点策略"报出来（**不重新加载**）：这样能确认启动时是否
+    #   装上了 DB 里的策略 —— INFO 日志会被日志级别过滤，光看日志是看不出来的。
+    #   同时它也是排障入口：改了界面策略但结果没变时，先看这里。
+    _eff = _dhcp.site_policy()
+    out["site_policy_effective"] = {
+        "protected_networks": ",".join(str(n) for n in _eff["protected_networks"]),
+        "protect_default_route": bool(_eff["protect_default_route"]),
+        "cache_loaded": _dhcp.site_policy_cache_loaded(),
+    }
     # ★ J：把"/pxe/serve 有没有开 token 门禁"如实报出来（只报状态，不返回 token 本身）——
     #   否则运维会以为它在保护，而实际上 .env 里那行是空的。
     out["serve_token"] = serve_token.enforcement_state()
@@ -1044,6 +1155,13 @@ async def _generate_and_deploy(pid: str, server_ip: str, deploy_mode: str,
     payload["server_ip"] = ip
     payload["http_root"] = http_root
     payload["deploy_mode"] = deploy_mode
+    # ★ 站点级策略必须先装进内存缓存：下面 deploy_files 里的落盘前红线检查是**同步**函数，
+    #   读的是缓存；而策略可能只存在 DB 里（运维在界面上改过）—— 不在这里装一次，
+    #   重启后第一次部署就会按 .env 口径判，把"别在企业网段上开 PXE"这条防线判松。
+    try:
+        await _load_site_policy(db)
+    except Exception as e:  # noqa: BLE001 —— 装不上就退回 .env 口径，不让部署失败
+        logging.getLogger(__name__).warning("部署前装载站点级 PXE 策略失败（按 .env 口径）: %s", e)
     # ★ 红线守卫（判据与文案见 _deploy_redline_check）：
     #   ① 先把「server_ip 所在网卡」**写进 payload**，再让 _gen_pxe_files 用同一个值
     #      —— 之前是生成期自己再查一次，第二次查不到就静默回落到模板的客户端网卡名
