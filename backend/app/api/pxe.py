@@ -1383,12 +1383,34 @@ async def os_catalog_catalog(_user=Depends(get_current_user)):
 
 @router.post("/iso/{iso_name}/extract")
 async def extract_iso(iso_name: str, body: dict = None, _user=Depends(require_role("admin"))):
-    """从 ISO 提取 PXE 引导文件 (vmlinuz/initrd/squashfs)。"""
+    """从 ISO 提取 PXE 引导文件（内核 / initrd / squashfs）。
+
+    ★ 2026-10-15 修正（A2 真机介质实测发现）：改前缺省是 `os_type="ubuntu"`、
+    `os_version="22.04"` —— 于是**任何非 Ubuntu 的 ISO**（openSUSE / openEuler / Rocky …）
+    都会按 ubuntu 的 `casper/` 去找引导文件，必然提取失败。线上实测 openSUSE DVD：
+    挂载成功、随后 `No boot files found in ISO (expected casper/ boot files)`、
+    `dest` 落在 `/srv/opstk/pxe-web/ubuntu/22.04` —— 一个字节都没提出来。
+
+    现在：没显式给 `os_type` 就**从文件名探测**（`os_catalog.detect_os_from_name`，
+    与识别/提取白名单用的是同一份定义）；探测不出来就 **422 说清楚**，绝不静默按 ubuntu 猜。
+    显式传参仍优先（保留既有调用方行为）。
+    """
     body = body or {}
+    os_type = (body.get("os_type") or "").strip()
+    os_version = (body.get("os_version") or "").strip()
+    if not os_type:
+        det = os_catalog.detect_os_from_name(iso_name) or {}
+        os_type = (det.get("os_type") or "").strip()
+        os_version = os_version or (det.get("os_version") or "")
+        if not os_type:
+            raise HTTPException(status_code=422, detail=(
+                "无法从文件名识别这个 ISO 属于哪个系统（" + iso_name + "）："
+                "请显式传 os_type/os_version，或把文件名写成带发行版名的形式"
+                "（如 openSUSE-Leap-15.6-…、Rocky-9.4-…）"))
     return pxe_server.extract_from_iso(
         iso_name,
-        os_type=body.get("os_type", "ubuntu"),
-        os_version=body.get("os_version", "22.04"),
+        os_type=os_type,
+        os_version=os_version or "0",
     )
 
 
