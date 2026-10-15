@@ -27,6 +27,11 @@ from app.database import get_db
 from app.core.ziputil import files_to_zip_response
 from app.it.pxe import server as pxe_server
 from app.it.pxe import transfers as iso_transfers
+# B1：离线签名仓库的完整性核查（只读）。**这个 import 我第一版漏了** ——
+# 于是 /repo/status 一调就是 NameError→500（而模块本身在容器里是好的，
+# 我在容器里单独调它一切正常，白查了两轮）。教训：新增接口后，
+# **一定要真打一次那个接口**，而不是只测它调用的函数。
+from app.it.pxe import repo_verify
 from app.it.pxe import os_catalog
 from app.it.pxe.generator import (
     DEFAULT_KERNEL_CONSOLE,
@@ -956,6 +961,36 @@ async def local_networks(db: AsyncSession = Depends(get_db), _user=Depends(get_c
     out = pxe_server.list_local_networks()
     out["site_policy"] = _site_policy_out(policy)
     return out
+
+
+# ---------- 离线装机仓库（带官方签名）：完整性核查 ----------
+# B1（2026-10-15）："离线签名仓库"原来只到"脚本 + 文档 + 一次人工实测"，
+# 平台上既看不到它、也核不了它。先做**只读核查**这一半 —— 它是"带官方签名"这句话的地基：
+# 索引与 Release 声明的 SHA256/Size 逐项复算 + 签名文件存在性（能验签就验）。
+# "一键同步"那一半还差一个前提：**容器里没有 systemctl/systemd-run、也没有 /run/systemd**，
+# 平台没有通用"在宿主上执行命令"的通道（dnsmasq 重载是靠宿主上的 path 单元看 /etc/dnsmasq.d，
+# 不是平台去调的）。所以同步要在宿主上以 systemd 单元的形式跑，平台只写请求文件、读结果文件 ——
+# 那需要一并交付并安装宿主单元（`/app/deploy/host` 就是放这些的地方），下一轮做。
+@router.get("/repo/status")
+async def repo_status(_user=Depends(get_current_user)):
+    """GET /api/it/pxe/repo/status — 列出本机仓库树并逐个 suite 核查（**只读，不下载**）。
+
+    返回每个仓库的 suite 列表、体积、以及每项核查的**可复算结论**：
+      · `files`：Release / Release.gpg / InRelease 是否存在；
+      · `index_check`：Release 里声明的 Packages*/Translation* 的 SHA256 与大小是否与磁盘一致
+        （checked/ok/bad/missing 全列出来，坏在哪一个文件上直接可见）；
+      · `signature`：能不能真验签（拿不到 Debian 归档密钥环时**如实报 checked=false**，
+        绝不把"文件在"说成"签名有效"）；
+      · `verdict`：ok / warn / fail（fail = 现在拿去装机取包会失败）。
+    """
+    repos = repo_verify.list_repos()
+    out = []
+    for r in repos:
+        v = repo_verify.verify_repo(r["path"])
+        out.append({"name": r["name"], "size_bytes": r["size_bytes"], "suites": r["suites"],
+                    "verdict": v["verdict"], "reason": v.get("reason", ""),
+                    "suite_detail": v["suites"]})
+    return {"root": repo_verify.REPO_ROOT, "repos": out}
 
 
 @router.get("/server/status")
