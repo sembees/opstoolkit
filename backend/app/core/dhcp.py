@@ -17,6 +17,12 @@ PXE_CONF = os.path.join(CONF_DIR, "opstk-pxe.conf")
 ZTP_CONF = os.path.join(CONF_DIR, "opstk-ztp.conf")
 PID_FILE = "/var/run/dnsmasq-opstk.pid"
 
+# 站点级配置（受保护网段 / 是否保护默认路由网卡）放在 Settings 里。
+# 顶层导入是安全的：app.config 只依赖 pydantic 与标准库，不反向依赖本模块。
+# 单测通过 monkeypatch `settings.pxe_protected_networks` / `.pxe_protect_default_route`
+# 来覆盖两种站点口径（这也是 serve_token 的既有做法）。
+from app.config import settings  # noqa: E402
+
 
 def is_linux():
     return platform.system() == "Linux"
@@ -731,6 +737,42 @@ def _other_conf_has_keyword(keyword, exclude_path, conf_dir=None):
     return ""
 
 
+def site_protected_nets(providers=None):
+    """本站点**显式声明**的受保护网段（`PXE_PROTECTED_NETWORKS`，逗号分隔 CIDR）。
+
+    这是**站点级**约束，不是产品规则（2026-10-15 用户澄清）：产品能力是"可以用本机
+    任意一张已有网卡的网段做装机网"；而某些站点里有一张卡接的是企业/生产内网，
+    绝不允许在上面起 dnsmasq —— 那由站点自己在这里声明。
+
+    与"默认路由网卡"那份保护（由 `PXE_PROTECT_DEFAULT_ROUTE` 控制）**互相独立**：
+      · 本函数返回的网段**永远**拦（不受任何开关影响）；
+      · 解析失败的条目**忽略并写日志**：不能因为配置里一个笔误，把整车间的保护静默关掉，
+        也不能因为它把整站部署全部堵死。providers 可注入便于单测
+        （{"protected": "10.0.0.0/8,…"}）。
+    """
+    import ipaddress
+    raw = None
+    if providers and "protected" in providers:
+        raw = providers["protected"]
+    if raw is None:
+        try:
+            raw = settings.pxe_protected_networks
+        except Exception:  # noqa: BLE001 —— 配置读不到时按"无站点保护"走，并留日志
+            logging.getLogger(__name__).warning("读取 pxe_protected_networks 失败")
+            return []
+    out = []
+    for item in str(raw or "").replace(";", ",").split(","):
+        s = item.strip()
+        if not s:
+            continue
+        try:
+            out.append(ipaddress.ip_network(s, strict=False))
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "PXE_PROTECTED_NETWORKS 里的条目无法解析，已忽略：%r（请写成 CIDR，如 10.128.118.0/24）", s)
+    return out
+
+
 def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=None,
                           iface_v4=None):
     """落盘前的红线检查。返回 (ok, 原因) —— 原因是要显示给运维的中文说明。
@@ -809,14 +851,47 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
                                "请改成宿主机上真实存在的网卡（当前有：" +
                                ", ".join(sorted(present)[:8]) + " …）")
     iface, nets, why = protected_networks(providers)
-    if why:
-        return False, ("无法判断哪张网卡/哪个网段是骨干网：" + why
-                       + "。为避免把 DHCP 池开到骨干网上，这里**拒绝部署**。")
+    # ★ 2026-10-15：把"骨干网"拆成两个来源，因为它们的**性质不同** ——
+    #   · 默认路由网卡：产品**默认不拦**（`pxe_protect_default_route=False`）——
+    #     产品能力是"可以用本机任意一张网卡做装机网"（客户常常只有一张卡，
+    #     ProxyDHCP 就必须在它上面做）；站点若想更严，把该开关设为 True。
+    #   · 站点显式声明的受保护网段（`pxe_protected_networks`）：**永远**拦，且是站点
+    #     自己的约束（本项目试验环境就在这里声明 10.128.118.0/24 企业内网）。
+    #   注意：无论这两个开关怎么设，下面第 4 条（池与**受保护**网段重叠 ⇒ 拒绝）与
+    #   第 6 条（池必须落在网卡自己网段里）都照旧 fail-closed。
+    _site_nets = site_protected_nets()
+    _route_guarded = bool(getattr(settings, "pxe_protect_default_route", False))
+    if _route_guarded:
+        if why:
+            return False, ("无法判断哪张网卡/哪个网段是骨干网：" + why
+                           + "。为避免把 DHCP 池开到骨干网上，这里**拒绝部署**"
+                             "（本站点开启了 PXE_PROTECT_DEFAULT_ROUTE，判定不了就 fail-closed）。")
+        for i in ifaces:
+            if i == iface:
+                return False, ("DHCP 网卡 `" + i + "` 正是承载默认路由的网卡"
+                               "（" + ", ".join(str(n) for n in nets) + "），而本站点开启了"
+                               "「保护默认路由网卡」（PXE_PROTECT_DEFAULT_ROUTE=true）："
+                               "如果你想在这张卡上做 PXE（例如只有一张网卡的客户现场做 "
+                               "ProxyDHCP），把该开关设为 false —— 那是站点自己的决定。")
+    else:
+        # 默认口径：不拦，但**池**仍不许与默认路由网段重叠（那是"抢答上联地址"，与
+        # "在这张卡上提供引导信息"是两件事）。
+        nets = nets or []
+    # 站点显式受保护网段：网卡落在其中 ⇒ 任何模式都拒绝（这一条不受上面开关影响）
     for i in ifaces:
-        if i == iface:
-            return False, ("DHCP 网卡 `" + i + "` 正是承载默认路由的骨干网卡"
-                           "（" + ", ".join(str(n) for n in nets) + "）："
-                           "在它上面开 DHCP 会抢答骨干网的地址/网关，必须改到专用装机网卡。")
+        got = get_v4(i)
+        if not got:
+            continue
+        try:
+            inet = ipaddress.ip_network(str(got[0]) + "/" + str(got[1]), strict=False)
+        except (ValueError, TypeError, IndexError):
+            continue
+        for net in _site_nets:
+            if inet.subnet_of(net) or inet.overlaps(net):
+                return False, ("DHCP 网卡 `" + i + "`（" + str(inet) + "）落在本站点声明的"
+                               "**受保护网段** " + str(net) + " 里（PXE_PROTECTED_NETWORKS）："
+                               "本站点禁止把 PXE/DHCP 服务开在这个网段上。"
+                               "请改用其它网卡，或由站点管理员调整该配置。")
     for lo, hi in ranges:
         # ★ 外部审查 U2-F2：原来只判"两个**端点** ∈ 骨干网段"，池子**跨过**骨干网段
         #   （端点都在外面、范围却盖住了它）会被漏判 —— 而 docstring/注释写的是
@@ -828,11 +903,19 @@ def check_dhcp_conf_safety(conf_text, providers=None, conf_dir=None, own_path=No
             continue
         if hi_i < lo_i:
             lo_i, hi_i = hi_i, lo_i
-        for net in nets:
+        for net in list(nets) + list(_site_nets):
             if int(net.network_address) <= hi_i and lo_i <= int(net.broadcast_address):
-                return False, ("dhcp-range " + str(lo) + "-" + str(hi) + " 与骨干网段 "
-                               + str(net) + " 有重叠：这会把骨干网的地址分给客户端，"
-                                 "请把池改到专用装机网段。")
+                # 同一个网段可能既是"默认路由网段"又是"站点声明的受保护网段"（很常见：
+                # 站点就是为了保护企业内网才声明的），两种叫法都要出现在文案里，
+                # 否则运维只知道"受保护"却不知道它就是上联网。
+                _labels = []
+                if net in nets:
+                    _labels.append("骨干网段")
+                if net in _site_nets:
+                    _labels.append("本站点声明的受保护网段")
+                return False, ("dhcp-range " + str(lo) + "-" + str(hi) + " 与"
+                               + "/".join(_labels) + " " + str(net) + " 有重叠："
+                               "这会把该网段的地址分给客户端，请把池改到专用装机网段。")
     # 6) 地址池必须落在目标网卡**自己**的网段里（读不到网卡地址也算拒绝）
     #    只在能列出真实网卡时做（非 Linux / 容器里读不到 /sys/class/net 时跳过，
     #    与第 2 条同一口径，避免在没有真实网卡事实的环境里误拒）。

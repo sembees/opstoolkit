@@ -40,6 +40,17 @@ class DhcpConfSafetyTest(unittest.TestCase):
         # 测试也就测不到它。这里显式给出一个"真实存在"的网卡集合。
         self.real = {"lo": None, "ens18": None, "ens19": None}
         self._orig = os.listdir
+        # ★ 2026-10-15：本类模拟的是**一个把企业内网声明为受保护的站点**（正是本项目的
+        #   试验环境：PXE_PROTECTED_NETWORKS=10.128.118.0/24 + PXE_PROTECT_DEFAULT_ROUTE=true）。
+        #   产品默认口径（两个开关都不开 ⇒ 任意网段可选）另有专门用例覆盖，
+        #   见 tests/test_dhcp_site_protection.py。
+        from app.config import settings
+        self._orig_prot = getattr(settings, "pxe_protected_networks", "")
+        self._orig_route = getattr(settings, "pxe_protect_default_route", False)
+        settings.pxe_protected_networks = "10.128.118.0/24"
+        settings.pxe_protect_default_route = True
+        self.addCleanup(lambda: setattr(settings, "pxe_protected_networks", self._orig_prot))
+        self.addCleanup(lambda: setattr(settings, "pxe_protect_default_route", self._orig_route))
         # 配置目录也要隔离：这条检查会去读同目录下**别的** .conf（找不可重复关键字），
         # 而容器里的 /etc/dnsmasq.d 是宿主机的真实配置 —— 用例不能随它漂移。
         import tempfile

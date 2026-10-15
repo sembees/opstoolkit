@@ -1482,46 +1482,59 @@ function useCandidate(row) {
 // 用户 2026-10-15 描述的流程：基础网络先配好 → 装平台 → 平台扫出本机网段 →
 // 选定用哪个网段做【DHCP 广播】还是【proxy】。所以选网段时必须同时说清模式，
 // 而不是让人撞一次 422 才知道不行。
-// ⚠️ 2026-10-15 更正：承载默认路由的网段上，**三种模式都会在落盘前被红线检查拒绝**
-//   （PXE 落盘走 deploy_files → dhcp.check_dhcp_conf_safety，第 3 条只看
-//    `interface=` 是不是承载默认路由的那张卡，不看模式）。所以那一行直接禁用，
-//   不再提供"Proxy 用它" —— 之前那句承诺是错的，会让运维白跑一次部署。
+// 三态（与后端 list_local_networks 的 safety / blocked_modes 一一对应）：
+//   · ok                        ⇒ 独立 DHCP 广播（standalone）
+//   · caution + 禁 standalone   ⇒ 只能 ProxyDHCP / 中继（默认路由网卡：产品允许用，
+//                                 但独立 DHCP 的池必然越界被拒）
+//   · blocked                   ⇒ 本站点声明为受保护网段 / 站点开启了保护默认路由网卡
 function modeHint(row) {
   if (!row) return ""
+  if (row.safety === "blocked") return "本站点禁止使用"
   if (row.safety === "ok") return "可做独立 DHCP"
-  if (row.safety === "blocked") return "不可用于 PXE"
+  if ((row.blocked_modes || []).indexOf("standalone") >= 0) return "只能 ProxyDHCP / 中继"
   return "网段太小"
 }
 
 function pickLabel(row) {
   if (!row) return "选这张"
+  if (row.safety === "blocked") return "不可用"
   if (row.safety === "ok") return "独立 DHCP 用它"
-  return "不可用"
+  if ((row.blocked_modes || []).indexOf("standalone") >= 0) return "Proxy 用它"
+  return "选这张"
 }
 
 function useCandidateForDeploy(row) {
   if (!row || row.safety === "blocked") return
   deployForm.server_ip = row.ip
-  deployForm.deploy_mode = "standalone"
-  ElMessage.success("已选 " + row.network + "（" + row.interface + "）：模式=独立 DHCP，"
-    + "将在此网段做 DHCP 广播，池 " + (row.suggest_start || "?") + "–" + (row.suggest_end || "?"))
+  if (row.safety === "ok") {
+    deployForm.deploy_mode = "standalone"
+    ElMessage.success("已选 " + row.network + "（" + row.interface + "）：模式=独立 DHCP，"
+      + "将在此网段做 DHCP 广播，池 " + (row.suggest_start || "?") + "–" + (row.suggest_end || "?"))
+  } else {
+    // 默认路由网卡：产品允许用，但独立 DHCP 的池必然越界被拒 ⇒ 落到 ProxyDHCP
+    deployForm.deploy_mode = "proxy"
+    ElMessage.warning("已选 " + row.network + "（" + row.interface + "）：这是承载默认路由的网卡，"
+      + "已把模式设为 ProxyDHCP —— 它不分配地址、只广播引导信息，与现有 DHCP 并存。"
+      + "（要在这张卡上做独立 DHCP 广播，需要站点先放开保护。）")
+  }
 }
 
-// 当前"服务端 IP + 模式"是否不可能部署成功。两处会自相矛盾：
-//   · 选了承载默认路由的网段（任何模式都会被落盘前的红线检查拒）；
-//   · 网段太小、独立 DHCP 却没有池。
-// 现在提前红字说清，别让人白跑一次。
+// 选了"不能这么用"的组合时提前红字说清，别让人白跑一次部署。
 const modeConflict = computed(() => {
   if (!deployForm.server_ip) return ""
   const hit = netCandidates.value.find(x => x.ip === deployForm.server_ip)
   if (!hit) return ""
   if (hit.safety === "blocked") {
-    return "网段不可用：PXE 服务 IP " + hit.ip + " 在 " + hit.interface + "（" + hit.network
-      + "）上，而这张网卡承载本机默认路由 —— 独立 DHCP / ProxyDHCP / 中继三种模式生成的配置"
-      + "都带 interface=" + hit.interface + "，落盘前的红线检查会一律拒绝。"
-      + "请改选一张隔离网卡的地址（例如给这台机器再加一张网卡并配上装机网段）。"
+    return "网段不可用：" + hit.ip + "（" + hit.interface + "，" + hit.network + "）被本站点"
+      + "禁止用于 PXE。请改选其它网卡；确有需要时由站点管理员调整 "
+      + "PXE_PROTECTED_NETWORKS / PXE_PROTECT_DEFAULT_ROUTE 配置。"
   }
-  if (hit.safety === "caution" && deployForm.deploy_mode === "standalone") {
+  if ((hit.blocked_modes || []).indexOf("standalone") >= 0 && deployForm.deploy_mode === "standalone") {
+    return "模式不可用：" + hit.network + " 是承载默认路由的网段，独立 DHCP 的地址池会与"
+      + "该网段重叠、被落盘前的红线检查拒绝。请把模式改成 ProxyDHCP 或中继"
+      + "（它们不分配地址，只广播引导信息）。"
+  }
+  if (hit.safety === "caution" && !hit.suggest_start && deployForm.deploy_mode === "standalone") {
     return "注意：" + hit.network + " 可用地址太少，独立 DHCP 的池需要手工填写。"
   }
   return ""

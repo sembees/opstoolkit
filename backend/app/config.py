@@ -100,6 +100,21 @@ class Settings(BaseSettings):
     pxe_iso_reserve_bytes: int = 2 * 1024**3
     pxe_transfer_chunk: int = 8 * 1024 * 1024
 
+    # ★ PXE/ZTP 的「本站点禁止使用哪些网段/网卡」—— **站点级配置，不是产品规则**。
+    #   为什么必须分开（2026-10-15 用户澄清）：产品能力是「可以用本机**任意**一张已有网卡的
+    #   网段做装机网」—— 客户那边常常只有一张网卡，ProxyDHCP 就必须在它上面做。
+    #   而某些站点（含本项目的试验环境）里，机器上有一张网卡接的是**企业/生产内网**，
+    #   绝不允许在上面起 dnsmasq：那是**该站点的约束**，不该硬编码成产品行为。
+    #   · pxe_protected_networks：逗号分隔的 CIDR（如 "10.128.118.0/24,10.0.0.0/8"）。
+    #     落在其中的网卡**任何模式**都不许起 PXE 服务；DHCP 池落在其中更是直接拒绝。
+    #     解析失败的条目会被忽略并写日志（不能因为一个笔误把整站保护静默关掉）。
+    #   · pxe_protect_default_route：是否额外把「承载默认路由的那张网卡」也算受保护。
+    #     默认 **False**：产品默认允许运维显式选择任意网卡（含上联网卡）—— 这时界面会
+    #     给出醒目告警，且「standalone + 自动探测出来的 IP」「池不在该网卡网段内」等
+    #     fail-closed 判据照旧生效。站点若想更严（例如本试验环境），把它设为 True。
+    pxe_protected_networks: str = ""
+    pxe_protect_default_route: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -47,23 +47,23 @@ class TestListLocalNetworks:
         assert "lo" not in got and "veth1234" not in got and "br-abc" not in got
         assert "docker0" not in got
 
-    def test_default_route_iface_is_blocked_for_all_modes(self):
-        """★ 2026-10-15 更正：承载默认路由的网卡上**三种模式都不可用**。
+    def test_default_route_iface_is_caution_and_proxy_only(self):
+        """承载默认路由的网卡：产品默认**可用**，但只能用 proxy/中继。
 
-        我先前写成"只有 standalone 不可用、proxy/relay 可以用"，理由抄的是
-        `_deploy_redline_check` 的注释（"proxy/relay 不发地址"）。但**真正生效的那一层**
-        是 `deploy_files` 里的 `dhcp.check_dhcp_conf_safety`，它的第 3 条只看
-        `interface=` 是不是承载默认路由的那张卡、**不看模式**。扫描器必须按实际会生效的
-        守卫口径说话，否则界面会推荐一个必然被拒的选项。
+        产品能力是"可以用本机任意一张网卡做装机网"（客户常常只有一张卡）；而那张卡上
+        **独立 DHCP 永远过不了** —— 池必须落在本卡网段内（红线第 6 条），池与该（上联）
+        网段重叠又被第 4 条拒。所以扫描器给 caution + blocked_modes=["standalone"]、
+        且不给建议池。
+        "站点把它声明为受保护网段之后变成 blocked" 由 tests/test_dhcp_site_protection.py
+        覆盖（那要临时改站点配置，放那边更合适）。
         """
         got = by_iface(pxe_server.list_local_networks(REAL))
         corp = got["ens18"]
         assert corp["is_default_route"] is True
-        assert corp["safety"] == "blocked"
-        assert corp["blocked_modes"] == ["standalone", "proxy", "relay"], corp["blocked_modes"]
+        assert corp["safety"] == "caution", corp
+        assert corp["blocked_modes"] == ["standalone"], corp["blocked_modes"]
         assert corp["suggest_start"] == "" and corp["suggest_end"] == ""
-        assert "默认路由" in corp["reason"]
-        assert "interface=" in corp["reason"] or "红线" in corp["reason"], corp["reason"]
+        assert "默认路由" in corp["reason"] and "ProxyDHCP" in corp["reason"], corp["reason"]
 
     def test_isolated_iface_is_ok_with_pool(self):
         got = by_iface(pxe_server.list_local_networks(REAL))
@@ -243,110 +243,6 @@ class TestIPv6Coverage:
                 assert ":" not in l.split(",", 1)[1], l
 
 
-class TestSegmentModeCouplingBackedByGuard(unittest.TestCase):
-    """界面把「选网段」和「选模式」绑在一起，所依据的**后端事实**必须成立。
-
-    用户 2026-10-15 描述的流程：基础网络配好 → 装平台 → 平台扫出本机网段 →
-    选定用哪个网段做「DHCP 广播」还是「proxy」。界面对承载默认路由的网段会说
-    「独立 DHCP 会被守卫拒绝」并自动改成 proxy —— 这三条承诺必须真能兑现，
-    否则界面就是在骗人。这里用**真实生成出来的 dnsmasq 配置** + 真机形状的宿主事实
-    去过落盘前的红线检查（check_dhcp_conf_safety），而不是只测一个布尔开关。
-    """
-
-    HOST_FACTS = {"iface_name": "ens18",           # 承载默认路由（企业网）
-                  "iface_v4": ("10.128.118.113", 24),
-                  "iface_v4_map": {"ens18": ("10.128.118.113", 24),
-                                   "ens19": ("192.168.199.1", 24)}}
-    # 扫描器还需要"本机有哪些网卡"这份清单（真机上来自 socket.if_nameindex()，
-    # 单测里必须注入，否则会去读这台 Windows 机器的真实网卡）
-    SCAN_FACTS = dict(HOST_FACTS, ifaces=["lo", "ens18", "ens19"])
-
-    def setUp(self):
-        import os
-        import tempfile
-
-        from app.core import dhcp
-        self.dhcp = dhcp
-        self._orig = os.listdir
-        real = {"lo": None, "ens18": None, "ens19": None}
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self._orig_conf = dhcp.CONF_DIR
-        dhcp.CONF_DIR = self._tmp.name
-        self.addCleanup(lambda: setattr(dhcp, "CONF_DIR", self._orig_conf))
-
-        def fake(path):
-            return list(real) if path == "/sys/class/net" else self._orig(path)
-
-        dhcp.os.listdir = fake
-        self.addCleanup(lambda: setattr(dhcp.os, "listdir", self._orig))
-
-    def _conf(self, mode, iface, start, end, server_ip):
-        from app.it.pxe.generator import PxeConfig, generate_all
-        c = PxeConfig(os_type="debian", os_version="13.7.0", hostname="h", admin_user="ops",
-                      admin_password="x", ssh_keys=[], disk_scheme="lvm",
-                      disk_config={"disk": "sda"}, net_mode="dhcp",
-                      net_config={"server_interface": iface, "dhcp_start": start,
-                                  "dhcp_end": end},
-                      mirror="http://h/repo/", server_ip=server_ip,
-                      http_root="http://%s:8000/pxe/serve" % server_ip,
-                      kernel_path="k", initrd_path="i", deploy_mode=mode)
-        return generate_all(c, [])["dnsmasq.conf"]
-
-    def test_isolated_segment_standalone_passes(self):
-        conf = self._conf("standalone", "ens19", "192.168.199.100", "192.168.199.200",
-                          "192.168.199.1")
-        ok, why = self.dhcp.check_dhcp_conf_safety(conf, self.HOST_FACTS, own_path="x.conf")
-        assert ok, why
-
-    def test_corporate_segment_standalone_is_refused(self):
-        """★ 界面承诺「承载默认路由的网段做独立 DHCP 会被守卫拒绝」—— 必须为真。"""
-        conf = self._conf("standalone", "ens18", "10.128.118.191", "10.128.118.253",
-                          "10.128.118.113")
-        ok, why = self.dhcp.check_dhcp_conf_safety(conf, self.HOST_FACTS, own_path="x.conf")
-        assert not ok, "企业网段上开独立 DHCP 竟然通过了红线检查"
-        assert ("默认路由" in why) or ("骨干" in why), why
-
-    def test_corporate_segment_proxy_is_also_refused(self):
-        """★ 更正：界面原先承诺「改用 proxy 就可以」—— **是错的**。
-
-        `check_dhcp_conf_safety` 第 3 条不看模式，proxy 的配置同样带
-        `interface=ens18`（承载默认路由），落盘前一样被拒。扫描器把它标 blocked
-        正是这个原因；界面已改成禁用该行、不再推荐 proxy。
-        """
-        conf = self._conf("proxy", "ens18", "", "", "10.128.118.113")
-        assert "dhcp-range=10.128.118.113,proxy" in conf     # 配置本身长得对
-        ok, why = self.dhcp.check_dhcp_conf_safety(conf, self.HOST_FACTS, own_path="x.conf")
-        assert not ok, "承载默认路由的网卡上 proxy 竟然通过了红线检查"
-        assert ("默认路由" in why) or ("骨干" in why), why
-
-    def test_relay_is_refused_too(self):
-        """中继同理：relay 的配置也带 interface=（它要提供 TFTP/HTTP 文件）。"""
-        conf = self._conf("relay", "ens18", "", "", "10.128.118.113")
-        assert "interface=ens18" in conf
-        ok, _why = self.dhcp.check_dhcp_conf_safety(conf, self.HOST_FACTS, own_path="x.conf")
-        assert not ok
-
-    def test_isolated_segment_proxy_passes(self):
-        """隔离网卡上 proxy 是正常可用的（对照组：别把"一律拒绝"当成修好了）。"""
-        conf = self._conf("proxy", "ens19", "", "", "192.168.199.1")
-        ok, why = self.dhcp.check_dhcp_conf_safety(conf, self.HOST_FACTS, own_path="x.conf")
-        assert ok, why
-
-    def test_scanner_is_consistent_with_the_guard_for_every_mode(self):
-        """扫描器的 safety 判定与**落盘前那道**红线检查必须**逐模式同结论**。
-
-        这是界面敢不敢推荐某个组合的唯一依据：扫出来说能用、部署却被拒 = 骗人。
-        """
-        for iface, ip, start, end in (
-                ("ens19", "192.168.199.1", "192.168.199.128", "192.168.199.227"),
-                ("ens18", "10.128.118.113", "10.128.118.191", "10.128.118.253")):
-            row = [x for x in pxe_server.list_local_networks(self.SCAN_FACTS)["interfaces"]
-                   if x["interface"] == iface][0]
-            for mode in ("standalone", "proxy", "relay"):
-                conf = self._conf(mode, iface, start, end, ip)
-                ok, _why = self.dhcp.check_dhcp_conf_safety(conf, self.HOST_FACTS, own_path="x.conf")
-                usable = (row["safety"] == "ok")
-                assert ok == usable, (
-                    "%s 模式=%s：扫描器 safety=%s（blocked_modes=%s），守卫 ok=%s —— 两者必须一致"
-                    % (iface, mode, row["safety"], row["blocked_modes"], ok))
+# 说明：界面「网段 × 模式」耦合以后端守卫为准（含「站点级受保护网段」与「产品默认」
+# 两套口径）的用例，已移到 tests/test_dhcp_site_protection.py —— 那些用例要临时改
+# 站点配置，独立成文件、并用上下文管理器保证还原，比塞在这里清楚。

@@ -20,6 +20,9 @@ from contextlib import nullcontext
 
 from app.core import dhcp as _dhcp
 from app.core import filestore as _filestore
+# 站点级配置（受保护网段 / 是否保护默认路由网卡）—— 扫描器要与落盘前那道红线检查
+# 用**同一份**口径，否则界面会推荐一个必然被拒的选项。
+from app.config import settings as _settings
 # 路径/标识净化复用生成器里那套已经过审的白名单（_safe_line / _safe_ident），
 # 不另写一套更弱的检查：server.py 这边多一个入口，注入面就多一个，标准必须一致。
 from app.it.pxe.generator import _safe_ident, _safe_line
@@ -345,23 +348,47 @@ def list_local_networks(providers=None):
 
         is_route = (name == route_iface)
         gw = route_gw if is_route else str(net.network_address + 1)
-        # 建议池：跳过服务器自己与网关；承载默认路由的网段**不给建议池**
-        if is_route:
+        # ── 谁能用、谁不能用：两个**性质不同**的来源（2026-10-15 用户澄清）──
+        #   · 站点显式声明的受保护网段（PXE_PROTECTED_NETWORKS）：**永远**不可用。
+        #     这是站点自己的约束（本项目试验环境在这里声明 10.128.118.0/24 企业内网）。
+        #   · 承载默认路由的网卡：产品**默认不拦**（"可以用本机任意网卡"是产品能力，
+        #     客户常常只有一张卡），只在站点把 PXE_PROTECT_DEFAULT_ROUTE 打开时才拦。
+        _site_hit = None
+        for _n in _dhcp.site_protected_nets():
+            if net.subnet_of(_n) or net.overlaps(_n):
+                _site_hit = _n
+                break
+        _route_guarded = bool(getattr(_settings, "pxe_protect_default_route", False))
+        if _site_hit is not None:
             s_start = s_end = ""
             safety = "blocked"
-            # ★ 2026-10-15 更正：这里原写 `blocked_modes=["standalone"]`，理由写在
-            #   `_deploy_redline_check` 里 —— "proxy/relay 不发地址，可以用"。但这与**真正
-            #   生效的那一层**不一致：PXE 落盘走 `deploy_files` → `dhcp.check_dhcp_conf_safety`，
-            #   它的第 3 条是"目标网卡就是承载默认路由的那张 ⇒ 拒绝"，**不看模式**。
-            #   也就是说：在这张网卡上，standalone / proxy / relay **一个都部署不了**
-            #   （它们的 conf 都带 `interface=<这张卡>`）。扫描器必须按**实际会生效的**
-            #   守卫口径说话，否则界面会承诺一个必然被拒的选项（我就这么错过一次）。
-            reason = ("这张网卡承载本机【默认路由】（网关 " + (route_gw or "未知") + "），通常是"
-                      "上联/管理/生产网。它**不适合也不允许**跑 PXE：三种模式（独立 DHCP / "
-                      "ProxyDHCP / 中继）生成的配置都带 `interface=" + name + "`，落盘前的"
-                      "红线检查会一律拒绝 —— 在这张卡上起 dnsmasq 等于把装机引导广播到该网段。"
-                      "请给这台机器加一张隔离网卡（例如 ens19）并配上装机网段的地址。")
+            reason = ("本站点把 " + str(_site_hit) + " 声明为**受保护网段**"
+                      "（PXE_PROTECTED_NETWORKS）：这张网卡（" + str(net) + "）落在其中，"
+                      "任何模式都不允许在这里起 PXE/DHCP 服务。请改用其它网卡，"
+                      "或由站点管理员调整该配置。")
             blocked_modes = ["standalone", "proxy", "relay"]
+        elif is_route and _route_guarded:
+            s_start = s_end = ""
+            safety = "blocked"
+            reason = ("本站点开启了「保护默认路由网卡」（PXE_PROTECT_DEFAULT_ROUTE=true），"
+                      "而这张网卡（" + str(net) + "，网关 " + (route_gw or "未知") + "）正是"
+                      "承载默认路由的那张。要在这里做 PXE 就由站点把该开关设为 false —— "
+                      "产品本身允许选任意网卡。")
+            blocked_modes = ["standalone", "proxy", "relay"]
+        elif is_route:
+            # 产品默认口径：**允许**在这张卡上做 PXE，但实际只有 ProxyDHCP / 中继可行 ——
+            # 因为"独立 DHCP"的池必须落在本网段内（红线第 6 条），而池与该网段重叠又会被
+            # 第 4 条拒绝（那等于把上联/生产网的地址分出去）。两条合起来 ⇒ standalone 在这
+            # 张卡上永远过不了。所以这里给 caution + blocked_modes=["standalone"]，
+            # **不给建议池**（给了也没用），并在 reason 里说清"只能 proxy/中继"。
+            s_start = s_end = ""
+            safety = "caution"
+            reason = ("这张网卡承载本机【默认路由】（网关 " + (route_gw or "未知") + "），"
+                      "通常是上联/管理/生产网。产品允许在这里做 PXE，但只能用 "
+                      "**ProxyDHCP / 中继**：独立 DHCP 的池必须落在本网段内，而池与该网段"
+                      "重叠会被落盘前的红线检查拒绝（等于把上联网的地址分出去）。"
+                      "ProxyDHCP / 中继不分配地址、只广播引导信息，与现有 DHCP 并存。")
+            blocked_modes = ["standalone"]
         else:
             s_start, s_end = suggest_pool(net, skip=[ip, gw])
             safety = "ok" if (s_start and s_end) else "caution"
