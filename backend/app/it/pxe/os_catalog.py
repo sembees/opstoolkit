@@ -45,10 +45,19 @@
                      找不到会如实写日志、不会误拷别的文件。
 
 verified 的口径（诚实声明，报告里同样适用）：
-  · verified=True  # ★ 2026-10-14 VM140(BIOS) 真机全自动装机六项验收全过（installed/静态IP/SSH/sudo免密/LVM分区/post_script）  —— 既有代码与真机串口实证覆盖过：ubuntu(casper/)、
-    rhel/centos/rocky/almalinux（images/pxeboot/，kickstart 链路有真机验收）。
-  · 其余一律 verified=False（含 openeuler/kylin/uos/anolis/fedora/oraclelinux/
-    debian/opensuse 的引导路径与卷标）—— 它们按家族惯例给出候选，**未经本环境实测**。
+  · verified=True —— 本环境**真机全自动装机过**（记录变 installed + 静态 IP + SSH +
+    sudo 免密 + 分区布局 + 装完回调），并且**产物侧**做过机械核对（ks/preseed 里该有的行在、
+    不该有的行不在）：
+      - ubuntu（casper/，preseed→subiquity autoinstall）
+      - rhel / centos / rocky / almalinux（images/pxeboot/，kickstart）
+      - **debian**（preseed，`_debian_preseed`；2026-10-14 起多轮真机，含 UEFI 与多盘选盘）
+  · verified=False —— **未经本环境实测**（kylin/uos/anolis/fedora/oraclelinux/opensuse
+    的引导路径与卷标），或**曾有成功记录但未能稳定复现**：
+      - **openeuler**：2026-10-09 曾用代码路径装通（RUNBOOK §5.83.50，含 1MiB biosboot
+        修复的真机验证）；但 2026-10-15 用当前代码**复现失败** —— 产物侧全部正确
+        （biosboot 在、无 auth 行、per-MAC ks 可取、内核命令行带 `inst.ks=`），
+        anaconda 36 却停在主界面未取用 kickstart。**按"不可稳定复现就不算 verified"处理**，
+        待读到安装器侧日志（TTY2 的 /tmp/anaconda.log）定界后再翻。
 """
 from __future__ import annotations
 
@@ -162,8 +171,12 @@ _OS = (
         filename_keywords=("openeuler",), label_keywords=("openeuler",),
         kernel_dirs=("images/pxeboot",), kernel_names=("vmlinuz",), initrd_names=("initrd.img",),
         version_hints=("20.03", "22.03", "24.03", "25.03"), verified=False,
-        note=("未验证：openEuler 为 RHEL 系（anaconda + kickstart），引导文件按惯例在 "
-              "images/pxeboot/；本环境无 openEuler 真机/ISO，未实测，提取按候选路径尝试。"),
+        note=("未验证（有过成功记录，但 2026-10-15 用当前代码未能复现）：openEuler 为 RHEL 系"
+              "（anaconda + kickstart），引导文件在 images/pxeboot/。2026-10-09 曾用本平台代码"
+              "路径装通（含 BIOS+GPT 必需的 1MiB biosboot 分区修复，见 RUNBOOK §5.83.50）；"
+              "2026-10-15 复现时产物侧全部正确（ks 有 part biosboot、无 auth 行、"
+              "per-MAC ks HTTP 200、内核命令行带 inst.ks=），但 anaconda 36 停在主界面"
+              "未取用 kickstart。按「不可稳定复现就不算已验证」保留 False。"),
     ),
     OsCatalogEntry(
         key="kylin", display="银河麒麟 Kylin", installer=KICKSTART, auto_install=True,
