@@ -178,6 +178,65 @@
       </el-form>
     </CardSection>
 
+    <!-- B1：离线装机仓库（带官方签名）。两个动作：
+         · **校验**（只读）：逐 suite 复算 Release 声明的 SHA256/大小是否与磁盘一致；
+         · **一键同步**：平台只写一个请求文件，宿主机的 opstk-repo-sync.path 接住并执行 ——
+           容器里没有 curl/xz、也没有 systemctl，下载只能在宿主上跑（见平台侧 repo_sync.py）。 -->
+    <CardSection title="离线装机仓库（带官方签名）" icon="Files">
+      <template #extra>
+        <el-button size="small" @click="loadRepoStatus" :loading="repoLoading">重新校验</el-button>
+      </template>
+      <el-table :data="repoStatus" size="small" empty-text="还没有仓库树">
+        <el-table-column prop="name" label="仓库" min-width="130" />
+        <el-table-column label="体积" width="90">
+          <template #default="{ row }">{{ (row.size_bytes / 1048576).toFixed(0) }} MB</template>
+        </el-table-column>
+        <el-table-column label="结论" width="84">
+          <template #default="{ row }">
+            <el-tag size="small" :type="verdictType(row.verdict)">{{ verdictLabel(row.verdict) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="suite 明细" min-width="420">
+          <template #default="{ row }">
+            <div v-for="s in row.suite_detail" :key="s.suite" class="hint-txt">
+              <b>{{ s.suite }}</b>
+              <el-tag size="small" :type="verdictType(s.verdict)">{{ verdictLabel(s.verdict) }}</el-tag>
+              索引 核对 {{ s.index_check.checked }} / 一致 {{ s.index_check.ok }}
+              / 坏 {{ s.index_check.bad_count }} / 未同步 {{ s.index_check.missing_count }}
+              —— {{ s.reason }}
+            </div>
+            <span v-if="!(row.suite_detail || []).length" class="hint-txt">{{ row.reason }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-divider content-position="left">一键同步（在宿主机上执行）</el-divider>
+      <el-form label-width="86px" size="small">
+        <el-row :gutter="8">
+          <el-col :span="6"><el-form-item label="suite">
+            <el-input v-model="syncForm.suite" placeholder="trixie" /></el-form-item></el-col>
+          <el-col :span="8"><el-form-item label="目标目录">
+            <el-input v-model="syncForm.dest" placeholder="/srv/opstk/pxe-web/repo/debian-tuna" /></el-form-item></el-col>
+          <el-col :span="10"><el-form-item label="镜像源">
+            <el-input v-model="syncForm.mirror" /></el-form-item></el-col>
+        </el-row>
+        <el-form-item label="只做计划">
+          <el-switch v-model="syncForm.dry_run" />
+          <span class="hint-txt">打开时只算「要取哪些文件」、不下载 —— 用来验证回路是否通</span>
+        </el-form-item>
+        <el-form-item label=" ">
+          <el-button size="small" type="primary" :loading="syncStarting" @click="startRepoSync">
+            一键同步
+          </el-button>
+          <el-tag v-if="syncState" size="small" :type="verdictType(syncState.state)">
+            {{ verdictLabel(syncState.state) }}
+          </el-tag>
+          <span class="hint-txt">{{ syncState ? syncState.hint : '' }}</span>
+        </el-form-item>
+      </el-form>
+      <pre v-if="syncState && (syncState.log_tail || []).length" class="repo-log">{{
+        (syncState.log_tail || []).join('\n') }}</pre>
+    </CardSection>
+
     <!-- 装机记录 -->
     <CardSection title="装机记录" icon="Monitor">
       <el-table :data="installs" stripe size="small" empty-text="暂无装机记录">
@@ -1618,6 +1677,77 @@ async function saveSitePolicy() {
   }
 }
 
+// ── B1：离线装机仓库（带官方签名）—— 校验 + 一键同步 ──
+const repoStatus = ref([])
+const repoLoading = ref(false)
+const syncForm = reactive({
+  suite: "trixie",
+  dest: "/srv/opstk/pxe-web/repo/debian-tuna",
+  mirror: "https://mirrors.tuna.tsinghua.edu.cn/debian",
+  dry_run: true,
+})
+const syncState = ref(null)
+const syncStarting = ref(false)
+let syncTimer = null
+
+// 状态与结论共用一套配色/中文（ok/warn/fail/n-a 是校验结论，idle/queued/running/done/failed 是同步状态）
+function verdictType(v) {
+  if (v === "ok" || v === "done") return "success"
+  if (v === "fail" || v === "failed") return "danger"
+  if (v === "n/a") return "info"
+  return "warning"
+}
+function verdictLabel(v) {
+  return {
+    ok: "通过", warn: "注意", fail: "有问题", "n/a": "不适用",
+    idle: "空闲", queued: "已请求", running: "同步中", done: "完成", failed: "失败",
+  }[v] || v || ""
+}
+
+async function loadRepoStatus() {
+  repoLoading.value = true
+  try {
+    const r = await http.get("/it/pxe/repo/status")
+    repoStatus.value = (r && r.repos) || []
+  } catch (e) {
+    ElMessage.error("读取仓库状态失败：" + ((e && (e.detail || e.message)) || "未知错误"))
+  } finally {
+    repoLoading.value = false
+  }
+}
+
+async function loadSyncState() {
+  try {
+    syncState.value = await http.get("/it/pxe/repo/sync")
+  } catch (e) {
+    // 状态读不到不该打扰运维（同步本身在宿主上跑），保持上一次显示
+  }
+}
+
+async function startRepoSync() {
+  syncStarting.value = true
+  try {
+    await http.post("/it/pxe/repo/sync", { ...syncForm })
+    ElMessage.success("同步请求已提交（宿主机 opstk-repo-sync.path 会接住并执行）")
+    await loadSyncState()
+    // 轮询到终态为止；跑完自动重新校验一次（这样"同步完的仓库"立刻有新结论）
+    if (syncTimer) clearInterval(syncTimer)
+    syncTimer = setInterval(async () => {
+      await loadSyncState()
+      const st = syncState.value && syncState.value.state
+      if (["done", "failed", "idle"].includes(st)) {
+        clearInterval(syncTimer)
+        syncTimer = null
+        await loadRepoStatus()
+      }
+    }, 4000)
+  } catch (e) {
+    ElMessage.error("提交同步请求失败：" + ((e && (e.detail || e.message)) || "未知错误"))
+  } finally {
+    syncStarting.value = false
+  }
+}
+
 function osLabel(row) { return row.os_type + " " + row.os_version }
 function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", installed: "success", failed: "danger" }[s] || "info" }
 function statusLabel(s) { return { pending: "待装机", booting: "引导中", installing: "安装中", done: "完成", installed: "已装完", failed: "失败" }[s] || s }
@@ -2087,6 +2217,8 @@ onMounted(() => {
   loadIsoSpace(); refreshTransfersNow()   // ISO 镜像传输：空间 + 1.5s 轮询
   loadOsCatalog()   // 系统目录：三个下拉与识别的唯一来源（后端 os_catalog.py）
   loadSitePolicy()  // 站点级策略：受保护网段 / 保护默认路由网卡（数据库，改了立刻生效）
+  loadRepoStatus()  // B1：离线签名仓库的完整性核查（只读）
+  loadSyncState()   // B1：同步状态（宿主侧写的 status/result）
 })
 </script>
 
@@ -2105,6 +2237,21 @@ onMounted(() => {
 .group-label { margin-bottom: var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 /* 本机网段扫描器里的行内提示（按钮右边的说明、表格里"可用性"后面的原因） */
 .hint-txt { margin-left: var(--ot-space-2); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
+
+/* B1：仓库同步日志尾部。限高 + 内部滚动 —— 同步日志可以有几十行，
+   直接铺开会把这一整页撑得很长（页面下半部还有装机记录表）。 */
+.repo-log {
+  max-height: 180px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: var(--ot-fill-2, #f5f7fa);
+  border-radius: 4px;
+  font-family: var(--ot-font-mono, ui-monospace, monospace);
+  font-size: var(--ot-font-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
 /* 装完能 SSH：两开关一行摆放，标签与开关间距用既有 token */
 .switch-label { margin: 0 var(--ot-space-3) 0 var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-3); }
 .switch-gap { margin-left: var(--ot-space-3); }

@@ -127,3 +127,50 @@ dnsmasq --test                                          # 配置本身合法吗
 证明不了（状态文件缺失、读不了、或报的是 `restart-failed`/`not-active`/`config-changed`）
 就**保持现状并明确写着"未回滚"**：那时把磁盘改回旧内容，只会让"磁盘 vs 正在运行的
 守护进程"更不一致。
+
+## 离线签名仓库的同步（`opstk-repo-sync.*`，2026-10-15 加）
+
+### 为什么是宿主侧单元
+
+在隔离网里装机必须用本地仓库，而 Debian 官方 DVD 的 `dists/` **不带**
+`Release.gpg`/`InRelease`，d-i 的镜像校验会失败并停在 `<Change mirror>`。所以索引与签名要从
+带官方签名的镜像站（默认清华 TUNA）**原样**搬回本地 —— 这件事只能在**宿主机**上做：
+
+* 容器里**没有** `curl`/`xz`（同步脚本就是靠它们下载/解压）；
+* 容器里**没有** `systemctl`/`systemd-run`，也**没有** `/run/systemd` ⇒ 平台**无法**命令
+  宿主机的 systemd。
+
+这与 dnsmasq 重载是同一个问题、同一个解法：**平台写状态文件，宿主用 path 单元接住**。
+
+### 契约（平台侧 `backend/app/it/pxe/repo_sync.py` 必须与 `opstk-repo-sync.sh` 一致）
+
+| 文件（都在 `/srv/opstk/state/repo-sync/`） | 谁写 | 内容 |
+|---|---|---|
+| `request.json` | 平台（**创建即触发** path 单元） | `{id, mirror, suite, dest, components, jobs, no_udeb, with_debs, dry_run}` |
+| `status.json` | 宿主 | `{state: running\|done\|failed, id, rc?, started_at?, finished_at?}` |
+| `result.json` | 宿主 | `{state, id, rc, finished_at, tail: [...最近 40 行...]}` |
+| `sync.log` | 宿主 | 完整日志 |
+
+**触发方式**：`.path` 用 `PathExists=`（不是 `PathChanged`）—— 这是一次性请求文件，
+"创建"就该触发。脚本处理完**必须删掉** `request.json`，否则 PathExists 一直是满足态、
+下一次不会再触发（这是本单元最容易踩的坑）。
+
+`dest` 必须落在 `/srv/opstk/pxe-web/repo/<名字>` 下：它决定宿主机把几个 GB 写到哪个目录，
+平台侧入口已经白名单化（不在仓库根下直接 422）。
+
+### 排查
+
+```bash
+systemctl status opstk-repo-sync.path                    # 单元活着吗
+journalctl -u opstk-repo-sync --since '-10 min'          # 它跑过吗、报了什么
+ls -l /srv/opstk/state/repo-sync/                        # 请求/状态/结果/日志
+tail -40 /srv/opstk/state/repo-sync/sync.log             # 同步日志
+```
+
+| 现象 | 原因 |
+|---|---|
+| 平台一直显示"已请求"（queued），`request.json` 还在 | 单元没装或没启用 → `bash /opt/opstk/deploy/host/install-opstk-repo-sync.sh` |
+| 状态 `failed` 且日志里有 404 | 源站没有该 suite（`-security` 在主归档里就没有）→ 换 suite 或忽略 |
+| 同步"卡住"很久 | 正常：首次同步可能要拉几个 GB（`TimeoutStartSec=6h`）；用 GET 的日志尾部看进度 |
+| 单元被反复触发 | 请求文件没被删掉（脚本异常退出）→ 手动 `rm` 后重试 |
+
