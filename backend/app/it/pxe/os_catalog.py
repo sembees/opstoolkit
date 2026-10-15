@@ -235,7 +235,12 @@ _OS = (
         key="opensuse", display="openSUSE", installer=AUTOYAST, auto_install=True,
         filename_keywords=("opensuse", "suse"), label_keywords=("opensuse", "suse"),
         kernel_dirs=("boot/x86_64/loader",),
-        kernel_names=("vmlinuz",), initrd_names=("initrd",),
+        # ★ A2 真机实测（2026-10-15，openSUSE-Leap-15.6-DVD）：内核文件叫 **linux**
+        #   （14191584 字节），不是 vmlinuz —— 只写 vmlinuz 会让平台**提取失败**
+        #   （线上 extract 实测返回 ok=false、不产出任何文件）。vmlinuz 留在候选里做前向兼容。
+        #   同一次实测还确认：ISO 顶层有 repodata/ ⇒ 解出来的树可直接当 install= 源；
+        #   UEFI 引导在 /EFI/BOOT/bootx64.efi。
+        kernel_names=("linux", "vmlinuz"), initrd_names=("initrd",),
         version_hints=("15.5", "15.6"), verified=False,
         note=("AutoYaST：应答文件由 _opensuse_autoyast() 生成（autoinst.xml），"
               "iPXE 内核行用 autoyast=<应答文件> install=<仓库>。**产物级已验证**"
