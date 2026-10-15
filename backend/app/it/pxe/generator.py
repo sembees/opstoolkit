@@ -2055,7 +2055,15 @@ def _opensuse_autoyast(c) -> str:
     # ── 网络：静态地址与网关（与其余家族同一份 net_config 语义）──
     nc = c.net_config or {}
     iface = _safe_ident(nc.get("interface") or "eth0", "net_config.interface")
-    L += ["  <networking>", "    <hostname>" + _xml(hn) + "</hostname>",
+    L += ["  <networking>",
+          # ★ 2026-10-15 真机实测（A2）：装到一半 YaST 报 "profile could not be found or retrieved"，
+          #   而应用访问日志显示同一份 profile **7 次全部 200** —— 取得到、之后又"取不到"。
+          #   机制：linuxrc 在 ip=dhcp 下取到 profile；YaST 安装开始时会应用下面的 <networking>
+          #   （静态 IP + 固定网卡名），一旦把安装器的链路弄断，后续再取就失败。
+          #   `keep_install_network` 让 YaST **保留安装器当前网络**，装完再由系统自身 ifcfg 生效
+          #   —— 这是 AutoYaST 对这一类问题的标准开关。
+          "    <keep_install_network config:type=\"boolean\">true</keep_install_network>",
+          "    <hostname>" + _xml(hn) + "</hostname>",
           "    <interfaces config:type=\"list\">", "      <interface>",
           "        <name>" + _xml(iface) + "</name>",
           "        <startmode>auto</startmode>"]

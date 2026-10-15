@@ -110,6 +110,18 @@ class AutoYaastProfileTest(unittest.TestCase):
         self.assertIn('config:type="list"', self.xml)
 
 
+    def test_keep_install_network_is_set(self):
+        """真机实测逼出来的：装到一半 YaST 报 profile "could not be found or retrieved"，
+        而应用访问日志显示同一份 profile **7 次全部 200** —— 取得到、之后又取不到。
+        机制是 YaST 在安装开始时应用 networking（静态 IP + 固定网卡名）把安装器链路弄断。
+        必须保留 keep_install_network=true，否则装机中途会失去 HTTP 安装源。
+        """
+        n = q(self.root, "networking/keep_install_network")
+        self.assertIsNotNone(n, "缺少 keep_install_network")
+        self.assertEqual(n.text, "true")
+        self.assertEqual(n.get("{http://www.suse.com/1.0/configns}type"), "boolean")
+
+
 class AutoYaastEscapingTest(unittest.TestCase):
     """进 XML 的值全部来自运维输入 —— 元字符必须转义（否则轻则解析失败，重则改结构）。"""
 
