@@ -2009,6 +2009,117 @@ def _ubuntu_user_data(c):
     return "\n".join(lines) + "\n"
 
 
+# ===== openSUSE AutoYaST（第五个家族）=====
+def _xml(v) -> str:
+    """XML 文本转义。进 XML 的值全部来自运维输入（主机名/用户名/公钥/网段…）。"""
+    return (str(v if v is not None else "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&apos;"))
+
+
+def _opensuse_autoyast(c) -> str:
+    """生成 openSUSE（AutoYaST）应答文件 autoinst.xml。
+
+    依据（写之前查过的权威来源）：AutoYaST 的 profile 是 XML，根元素 `profile` 带
+    `xmlns="http://www.suse.com/1.0/yast2ns"` 与 `xmlns:config="http://www.suse.com/1.0/configns"`；
+    布尔/列表类字段必须带 `config:type`（boolean / list），否则被当字符串解析。
+    **本实现只写"确定语义"的键**：未知键会让 AutoYaST 报错停下（比不写更糟）。
+
+    ★ 诚实声明：本函数只做到**产物级**（结构、转义、与 catalog/iPXE 的接线都有用例锁住），
+      **未在真机装过一次**（本环境没有 openSUSE 介质）。真机验收前不要把它当成"已支持"。
+    """
+    hn = _safe_hostname(c.hostname, "linux")
+    lang = _safe_line(c.locale or "en_US.UTF-8", "locale")
+    keymap = _safe_ident(c.keyboard or "us", "keyboard")
+    tz = _safe_line(c.timezone or "Asia/Shanghai", "timezone")
+    admin = _safe_ident(c.admin_user or "ops", "admin_user")
+    root_hash = _hash_pw(c.admin_password)
+    admin_hash = _hash_pw(c.admin_password)
+
+    L = ['<?xml version="1.0"?>', "<!DOCTYPE profile>",
+         '<profile xmlns="http://www.suse.com/1.0/yast2ns"'
+         ' xmlns:config="http://www.suse.com/1.0/configns">',
+         "  <general>", "    <mode>",
+         "      <confirm config:type=\"boolean\">false</confirm>",
+         "      <final_reboot config:type=\"boolean\">true</final_reboot>",
+         "    </mode>", "  </general>",
+         "  <language>",
+         "    <language>" + _xml(lang) + "</language>",
+         "    <keymap>" + _xml(keymap) + "</keymap>",
+         "  </language>",
+         "  <timezone>",
+         "    <timezone>" + _xml(tz) + "</timezone>",
+         "    <hwclock>UTC</hwclock>",
+         "  </timezone>"]
+
+    # ── 网络：静态地址与网关（与其余家族同一份 net_config 语义）──
+    nc = c.net_config or {}
+    iface = _safe_ident(nc.get("interface") or "eth0", "net_config.interface")
+    L += ["  <networking>", "    <hostname>" + _xml(hn) + "</hostname>",
+          "    <interfaces config:type=\"list\">", "      <interface>",
+          "        <name>" + _xml(iface) + "</name>",
+          "        <startmode>auto</startmode>"]
+    if c.net_mode == "static" and nc.get("ip"):
+        cidr = int(nc.get("cidr") or 24)
+        L += ["        <bootproto>static</bootproto>",
+              "        <ipaddr>" + _xml(nc.get("ip")) + "</ipaddr>",
+              "        <prefixlen>" + str(cidr) + "</prefixlen>"]
+        # AutoYaST 的默认路由写在 <route> 里（不是接口的 gateway 字段）
+    else:
+        L += ["        <bootproto>dhcp</bootproto>"]
+    L += ["      </interface>", "    </interfaces>"]
+    if c.net_mode == "static" and nc.get("ip"):
+        if nc.get("gateway"):
+            L += ["    <routing>", "      <routes config:type=\"list\">", "        <route>",
+                  "          <destination>default</destination>",
+                  "          <gateway>" + _xml(nc.get("gateway")) + "</gateway>",
+                  "          <netmask>-</netmask>",
+                  "          <device>" + _xml(iface) + "</device>",
+                  "        </route>", "      </routes>", "    </routing>"]
+        if nc.get("dns"):
+            L += ["    <dns>", "      <hostname>" + _xml(hn) + "</hostname>",
+                  "      <nameservers config:type=\"list\">"]
+            for d in nc.get("dns") or []:
+                L += ["        <nameserver>" + _xml(d) + "</nameserver>"]
+            L += ["      </nameservers>", "    </dns>"]
+    L += ["  </networking>"]
+
+    # ── 分区：只写"用整盘、LVM"这类确定语义；具体分区表交给 AutoYaST 默认方案 ──
+    L += ['  <partitioning config:type="list">', "    <drive>",
+          "      <device>/dev/sda</device>",
+          "      <use>all</use>",
+          "      <initialize config:type=\"boolean\">true</initialize>",
+          "    </drive>", "  </partitioning>"]
+
+    # ── 用户：管理员 + root，口令全部用 $6$ 哈希（与其它家族同一套 _hash_pw）──
+    L += ['  <users config:type="list">', "    <user>",
+          "      <username>" + _xml(admin) + "</username>",
+          "      <user_password>" + _xml(admin_hash) + "</user_password>",
+          "      <uid>1000</uid>", "      <gid>100</gid>",
+          "      <shell>/bin/bash</shell>",
+          "      <create_home config:type=\"boolean\">true</create_home>",
+          "      <groups>wheel</groups>"]
+    if c.ssh_keys:
+        L += ['      <authorized_keys config:type="list">']
+        for k in c.ssh_keys:
+            L += ["        <listentry>" + _xml(k) + "</listentry>"]
+        L += ["      </authorized_keys>"]
+    L += ["    </user>", "    <user>", "      <username>root</username>",
+          "      <user_password>" + _xml(root_hash) + "</user_password>", "    </user>",
+          "  </users>"]
+    if c.sudo_nopasswd:
+        # sudo 免密：AutoYaST 写文件的规范落点（与其它家族"运维要 sudo 免密"同一诉求）
+        L += ["  <files config:type=\"list\">", "    <file>",
+              "      <file_path>/etc/sudoers.d/90-opstk-" + _xml(admin) + "</file_path>",
+              "      <file_contents>" + _xml(admin + " ALL=(ALL) NOPASSWD: ALL")
+              + "</file_contents>",
+              "      <permissions>440</permissions>",
+              "      <owner>root</owner>", "      <group>root</group>",
+              "    </file>", "  </files>"]
+    L += ["</profile>", ""]
+    return "\n".join(L)
+
+
 # ===== Debian preseed (debian-installer) =====
 
 # 目标盘解析失败时的**哨兵设备名**：不可能存在的设备。
@@ -3436,6 +3547,10 @@ def generate_all(c, installs=None, extra=None, registered_anywhere=None):
     elif entry.key == "debian":
         # ★ Debian（d-i preseed）：与 Ubuntu/RHEL 同级的第四家族
         files["preseed.cfg"] = _debian_preseed(c)
+    elif entry.key == "opensuse":
+        # ★ A2（2026-10-15）openSUSE（AutoYaST）：第五个家族。
+        #   产物级已验证（结构/转义/接线有用例），**真机未验**（本环境无 openSUSE 介质）。
+        files["autoinst.xml"] = _opensuse_autoyast(c)
     else:
         files["ks.cfg"] = _rhel_ks(c)
     # 默认菜单（= dnsmasq 里 tag:fw-menu-def 指向的那份扁平 boot.ipxe）取什么内容：
