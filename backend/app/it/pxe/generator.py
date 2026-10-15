@@ -3622,6 +3622,14 @@ def generate_all(c, installs=None, extra=None, registered_anywhere=None):
             # （此前只有 ubuntu/ks 两种分支，debian 会落到 ks 的每机路径 -> d-i 取到 ks.cfg -> 装不动；2026-10-09 真机实证）
             files["preseed/" + tag + "/preseed.cfg"] = _debian_preseed(ic)
             answer = answer_base + "/preseed/" + tag + "/preseed.cfg"
+        elif entry.key == "opensuse":
+            # ★ 2026-10-15（A2 真机产物实证）：openSUSE 的**每机**应答文件也漏了家族分派 ——
+            #   落到 else 分支去写 `ks/<tag>/ks.cfg`，内容却是 `_rhel_ks()` 的 kickstart，
+            #   而 `boot/<mac>.ipxe` 里写的是 `autoyast=<那份 ks.cfg>` ⇒ 安装器拿到 kickstart
+            #   当 AutoYaST 用，必然解析失败（实测该文件开头是 "# RHEL / Rocky / Alma Linux
+            #   Kickstart"）。**这正是上面 debian 那条注释警告过的同一个坑，我在 openSUSE 上又踩了一次。**
+            files["ks/" + tag + "/autoinst.xml"] = _opensuse_autoyast(ic)
+            answer = answer_base + "/ks/" + tag + "/autoinst.xml"
         else:
             answer = answer_base + "/ks/" + tag + "/ks.cfg"
             files["ks/" + tag + "/ks.cfg"] = _rhel_ks(ic)
