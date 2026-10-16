@@ -49,7 +49,11 @@ class PerMachineOpensuseTest(unittest.TestCase):
         """内核行的 `autoyast=` 必须指向那份 autoinst.xml（指错=白装）。"""
         menu = self.files["boot/" + TAG + ".ipxe"]
         self.assertIn("autoyast=", menu)
-        self.assertIn("ks/" + TAG + "/autoinst.xml", menu)
+        # ★ 2026-10-15：改成**目录**形式（YaST 在目录里按机器名找、回落 default）
+        self.assertIn("ks/" + TAG + "/", menu)
+        self.assertNotIn("ks/" + TAG + "/autoinst.xml", menu)
+        self.assertIn("ks/" + TAG + "/default", self.files,
+                      "AutoYaST 的目录里必须有 default（它按名找、找不到用 default）")
         self.assertNotIn("ks/" + TAG + "/ks.cfg", menu)
         self.assertIn("install=", menu)
         self.assertNotIn("inst.ks=", menu)

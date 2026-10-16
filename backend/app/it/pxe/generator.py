@@ -3662,7 +3662,19 @@ def generate_all(c, installs=None, extra=None, registered_anywhere=None):
             #   当 AutoYaST 用，必然解析失败（实测该文件开头是 "# RHEL / Rocky / Alma Linux
             #   Kickstart"）。**这正是上面 debian 那条注释警告过的同一个坑，我在 openSUSE 上又踩了一次。**
             files["ks/" + tag + "/autoinst.xml"] = _opensuse_autoyast(ic)
-            answer = answer_base + "/ks/" + tag + "/autoinst.xml"
+            # ★ 2026-10-15 真机实验（A2）确定的关键事实：`autoyast=` 指向**文件**时，linuxrc
+            #   确实把它取走了（应用日志 7 次 200），但 YaST 仍报
+            #   "A profile for this machine could not be found or retrieved"。
+            #   指向**目录**后，访问日志暴露出它一直在按**机器名/MAC**找 profile：
+            #       GET …/ks/<tag>/BC2411668BEA  404
+            #       GET …/ks/<tag>/bc2411668bea  404
+            #       GET …/ks/<tag>/default       404
+            #   ⇒ AutoYaST 的目录形式是"按机器名找、找不到用 `default`"。目录里只有
+            #     `autoinst.xml`（别的名字），所以它怎么找都找不到 —— 这才是真正的根因。
+            #   修法：目录里放 `default`（并把 `autoinst.xml` 留着便于人核对），
+            #   同时把 answer 改成**目录** URL。
+            files["ks/" + tag + "/default"] = _opensuse_autoyast(ic)
+            answer = answer_base + "/ks/" + tag + "/"
         else:
             answer = answer_base + "/ks/" + tag + "/ks.cfg"
             files["ks/" + tag + "/ks.cfg"] = _rhel_ks(ic)
