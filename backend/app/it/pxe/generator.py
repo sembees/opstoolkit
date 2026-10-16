@@ -3176,7 +3176,32 @@ def _dnsmasq(c, installs=None, extra=None):
     _srv_ok = _ipv4_octets(c.server_ip)
     gateway = (nc.get("gateway") if _ipv4_octets(nc.get("gateway"))
                else (".".join(_srv_ok) if _srv_ok else "192.168.1.1"))
-    _dns_srv = nc.get("dns_server") if _ipv4_octets(nc.get("dns_server")) else gateway
+    # ★ 红线相关（2026-10-15 实测）：发给客户机的 DNS **必须在装机网内**。
+    #   线上曾出现 `dhcp-option=option:dns-server,10.128.118.1` —— 那是**宿主自己的 resolver**
+    #   （企业网 DNS）被上游填进了 net_config.dns_server，于是企业网地址被写进发给客户机的
+    #   DHCP 选项。装机网到企业网本来没有路由、客户机拿到也解析不了，但
+    #   **"生成的配置里带着企业网地址"本身就不该发生**。
+    #   规则：只有当 dns_server 与 server_ip **同网段**（按 net_config.cidr，缺省 24）时才采用，
+    #   否则一律回落到网关（= 装机服务器自己）。越界的值宁可不用，也不发出去。
+    _cidr = nc.get("cidr")
+    if not (isinstance(_cidr, int) and 1 <= _cidr <= 32):
+        _cidr = 24
+
+    def _in_install_net(ip) -> bool:
+        """ip 与 server_ip 是否同网段（按 _cidr）。非法/空/越界一律 False。"""
+        o = _ipv4_octets(ip)
+        if not o or not _srv_ok:
+            return False
+        full, rem = _cidr // 8, _cidr % 8
+        if o[:full] != _srv_ok[:full]:
+            return False
+        if rem:
+            m = (0xFF << (8 - rem)) & 0xFF
+            if (o[full] & m) != (_srv_ok[full] & m):
+                return False
+        return True
+
+    _dns_srv = nc.get("dns_server") if _in_install_net(nc.get("dns_server")) else gateway
     mode = c.deploy_mode or "standalone"
     # 每台【已登记】机器的第二阶段引导脚本放在 answer_root 下（按模板隔离）。
     # 未登记机器的默认引导脚本仍然是**扁平**的 <http_root>/boot.ipxe：
