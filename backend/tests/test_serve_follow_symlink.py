@@ -86,6 +86,24 @@ class FollowSymlinkTest(unittest.TestCase):
         self.assertEqual(_get(st, "repo-link/nope.rpm").status_code, 404)
         self.assertEqual(_get(st, "no-such-dir/repomd.xml").status_code, 404)
 
+    def test_extensionless_file_is_served_as_xml(self):
+        """★ 真机实测：AutoYaST 按**无扩展名**的名字找 profile（`default`/`<MAC>`），
+        而 starlette 按扩展名猜类型 ⇒ 会被发成 `text/plain`，安装器拒收（HTTP 200 也没用）。
+        无扩展名的路径必须发成 `application/xml`；有扩展名的一律不动。"""
+        self._require_symlink()
+        st = _TokenStatic(directory=self.root, follow_symlink=True)
+        with open(os.path.join(self.root, "default"), "w", encoding="utf-8") as f:
+            f.write("<?xml version=\"1.0\"?><profile/>")
+        resp = _get(st, "default")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("content-type"), "application/xml")
+        with open(os.path.join(self.root, "ks.cfg"), "w", encoding="utf-8") as f:
+            f.write("lang en_US\n")
+        resp2 = _get(st, "ks.cfg")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertNotEqual(resp2.headers.get("content-type"), "application/xml")
+
+
     def test_source_mounts_pass_the_flag(self):
         """两个无认证静态挂载都必须显式带上这个开关（漏一个就是那次 404 复发）。
 

@@ -114,6 +114,26 @@ class _TokenStatic(StaticFiles):
         self.scope = scope or serve_token.PXE
         super().__init__(*args, **kwargs)
 
+    async def get_response(self, path, scope):
+        """★ 2026-10-15 真机实测：**无扩展名的文件按 XML 发**。
+
+        AutoYaST 的目录形式（`autoyast=<dir>/`）会去找**没有扩展名**的 profile 名
+        （实测它依次探测 `<MAC 大写>`、`<MAC 小写>`、`default`）。而 starlette 的
+        StaticFiles 按**扩展名**猜 content-type ⇒ 这些文件被发成 `text/plain`，
+        安装器拿到"纯文本"而不是 XML，报 "profile could not be found or retrieved"
+        —— 尽管 HTTP 状态是 200（`curl -sI` 看到的头就是这个）。
+
+        只对**无扩展名**的路径改类型：`.xml`/`.cfg`/`.img` 一律不动，避免影响
+        kickstart（`ks.cfg`）、preseed、内核/initrd 等既有产物。
+        """
+        resp = await super().get_response(path, scope)
+        try:
+            if not Path(path).suffix:
+                resp.headers["content-type"] = "application/xml"
+        except Exception:  # noqa: BLE001
+            pass
+        return resp
+
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http" or not self.scope.get_token():
             return await super().__call__(scope, receive, send)
