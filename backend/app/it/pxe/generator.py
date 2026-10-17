@@ -2029,7 +2029,14 @@ def _opensuse_autoyast(c) -> str:
       **未在真机装过一次**（本环境没有 openSUSE 介质）。真机验收前不要把它当成"已支持"。
     """
     hn = _safe_hostname(c.hostname, "linux")
-    lang = _safe_line(c.locale or "en_US.UTF-8", "locale")
+    lang = _safe_line(c.locale or "en_US", "locale")
+    # ★ 2026-10-17 真机：YaST 的语言列表里是 `en_US`，**不认** `en_US.UTF-8`。
+    #   给错了会弹 "Language ... was not found ... Fallback language en_US"
+    #   并停在 [OK] 上 —— 一个非致命警告足以把无人值守安装卡死（实测按回车才继续）。
+    #   所以这里把常见的 `.UTF-8` 后缀去掉；其它值原样保留（不猜）。
+    _m = __import__("re").match(r"^([A-Za-z]{2,3}_[A-Za-z]{2,4})\.(UTF-8|utf-8|utf8)$", lang)
+    if _m:
+        lang = _m.group(1)
     keymap = _safe_ident(c.keyboard or "us", "keyboard")
     tz = _safe_line(c.timezone or "Asia/Shanghai", "timezone")
     admin = _safe_ident(c.admin_user or "ops", "admin_user")

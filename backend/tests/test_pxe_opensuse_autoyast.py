@@ -56,7 +56,8 @@ class AutoYaastProfileTest(unittest.TestCase):
         self.assertIn("http://www.suse.com/1.0/configns", self.xml)
 
     def test_identity_and_timezone(self):
-        self.assertEqual(q(self.root, "language/language").text, "en_US.UTF-8")
+        self.assertEqual(q(self.root, "language/language").text, "en_US",
+                         "YaST 的语言列表里是 en_US，不接受 en_US.UTF-8（真机实测会弹警告并卡住）")
         self.assertEqual(q(self.root, "keyboard/keymap").text, "us")
         self.assertEqual(q(self.root, "timezone/timezone").text, "Asia/Shanghai")
         self.assertEqual(q(self.root, "networking/dns/hostname").text, "suse140")
