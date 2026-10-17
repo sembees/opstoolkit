@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="keyboard">
+    <element name="keyboard">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="keyboard_values"/>
+        </optional>
+        <optional>
+          <ref name="keymap"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="keymap">
+    <element name="keymap">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="keyboard_values">
+    <element name="keyboard_values">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="capslock">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="delay">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="discaps">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="numlock">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="rate">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="scrlock">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="tty">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

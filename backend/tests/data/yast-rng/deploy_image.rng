@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="deploy_image">
+    <element name="deploy_image">
+      <ref name="MAP"/>
+      <optional>
+        <element name="image_installation">
+          <ref name="BOOLEAN"/>
+        </element>
+      </optional>
+    </element>
+  </define>
+</grammar>

@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="software">
+    <element name="software">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="kernel"/>
+        </optional>
+        <optional>
+          <ref name="packages"/>
+        </optional>
+        <optional>
+          <ref name="post-packages"/>
+        </optional>
+        <optional>
+          <ref name="post-patterns"/>
+        </optional>
+        <optional>
+          <ref name="remove-packages"/>
+        </optional>
+        <optional>
+          <ref name="patterns"/>
+        </optional>
+        <optional>
+          <ref name="remove-patterns"/>
+        </optional>
+        <optional>
+          <ref name="products"/>
+        </optional>
+        <optional>
+          <ref name="remove-products"/>
+        </optional>
+        <optional>
+          <element name="do_online_update">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="install_recommended">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="instsource">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="patterns">
+    <element name="patterns">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element>
+          <choice>
+            <name>pattern</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="kernel">
+    <element name="kernel">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="post-packages">
+    <element name="post-packages">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element>
+          <choice>
+            <name>package</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="post-patterns">
+    <element name="post-patterns">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element>
+          <choice>
+            <name>pattern</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="packages">
+    <element name="packages">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element>
+          <choice>
+            <name>package</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="remove-packages">
+    <element name="remove-packages">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element>
+          <choice>
+            <name>package</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="remove-patterns">
+    <element name="remove-patterns">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element>
+          <choice>
+            <name>pattern</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="products">
+    <element name="products">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element>
+          <choice>
+            <name>product</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="remove-products">
+    <element name="remove-products">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element>
+          <choice>
+            <name>product</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+</grammar>

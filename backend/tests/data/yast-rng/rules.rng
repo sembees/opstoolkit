@@ -1,0 +1,480 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  
+  this rnc describes the autoyast rules syntax.
+  The rules file is always named "rules.xml" in
+  the directory "rules/".
+  The rules are not part of the autoyast profile.
+  It's a seperate file.
+  
+-->
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="autoinstall">
+    <element name="autoinstall">
+      <ref name="MAP"/>
+      <ref name="rules"/>
+    </element>
+  </define>
+  <define name="rules">
+    <element name="rules">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="rule"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="rule">
+    <element name="rule">
+      <ref name="MAP"/>
+      <interleave>
+        <choice>
+          <oneOrMore>
+            <ref name="y2_match_to"/>
+          </oneOrMore>
+          <interleave>
+            <zeroOrMore>
+              <ref name="y2_match_to"/>
+            </zeroOrMore>
+            <ref name="dialog"/>
+          </interleave>
+        </choice>
+        <ref name="result"/>
+        <optional>
+          <ref name="operator"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="y2_match_to">
+    <choice>
+      <ref name="arch"/>
+      <ref name="board"/>
+      <ref name="board_vendor"/>
+      <ref name="custom1"/>
+      <ref name="custom2"/>
+      <ref name="custom3"/>
+      <ref name="custom4"/>
+      <ref name="custom5"/>
+      <ref name="disksize"/>
+      <ref name="domain"/>
+      <ref name="hostname"/>
+      <ref name="hostaddress"/>
+      <ref name="hostid"/>
+      <ref name="efi"/>
+      <ref name="karch"/>
+      <ref name="linux"/>
+      <ref name="installed_product"/>
+      <ref name="installed_product_version"/>
+      <ref name="mac"/>
+      <ref name="memsize"/>
+      <ref name="network"/>
+      <ref name="others"/>
+      <ref name="product"/>
+      <ref name="product_vendor"/>
+      <ref name="totaldisk"/>
+      <ref name="xserver"/>
+    </choice>
+  </define>
+  <define name="arch">
+    <element name="arch">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="board">
+    <element name="board">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="board_vendor">
+    <element name="board_vendor">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="custom1">
+    <element name="custom1">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+        <ref name="script"/>
+      </interleave>
+    </element>
+  </define>
+  <define name="custom2">
+    <element name="custom2">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+        <ref name="script"/>
+      </interleave>
+    </element>
+  </define>
+  <define name="custom3">
+    <element name="custom3">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+        <ref name="script"/>
+      </interleave>
+    </element>
+  </define>
+  <define name="custom4">
+    <element name="custom4">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+        <ref name="script"/>
+      </interleave>
+    </element>
+  </define>
+  <define name="custom5">
+    <element name="custom5">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+        <ref name="script"/>
+      </interleave>
+    </element>
+  </define>
+  <define name="disksize">
+    <element name="disksize">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="domain">
+    <element name="domain">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="efi">
+    <element name="efi">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="hostname">
+    <element name="hostname">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="hostaddress">
+    <element name="hostaddress">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="hostid">
+    <element name="hostid">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="installed_product">
+    <element name="installed_product">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="installed_product_version">
+    <element name="installed_product_version">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="karch">
+    <element name="karch">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="linux">
+    <element name="linux">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="mac">
+    <element name="mac">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="memsize">
+    <element name="memsize">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="network">
+    <element name="network">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="others">
+    <element name="others">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="product">
+    <element name="product">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="product_vendor">
+    <element name="product_vendor">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="totaldisk">
+    <element name="totaldisk">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="xserver">
+    <element name="xserver">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="match_text"/>
+        <optional>
+          <ref name="match_type"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="match_type">
+    <element name="match_type">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>greater</value>
+        <value>exact</value>
+        <value>lower</value>
+        <value>range</value>
+        <value>regex</value>
+      </choice>
+    </element>
+  </define>
+  <define name="match_text">
+    <element name="match">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="script">
+    <element name="script">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="result">
+    <element name="result">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="profile"/>
+        <optional>
+          <element name="dont_merge">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element name="element">
+                <ref name="STRING"/>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <ref name="continue"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="dialog">
+    <element name="dialog">
+      <interleave>
+        <optional>
+          <element name="dialog_nr">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="element">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="title">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="question">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="timeout">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="conflicts">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element>
+                <choice>
+                  <name>element</name>
+                  <name>listentry</name>
+                </choice>
+                <ref name="INTEGER"/>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="profile">
+    <element name="profile">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="continue">
+    <element name="continue">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="operator">
+    <element name="operator">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>or</value>
+        <value>and</value>
+      </choice>
+    </element>
+  </define>
+  <start>
+    <ref name="autoinstall"/>
+  </start>
+</grammar>

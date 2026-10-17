@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <define name="upgrade">
+    <element name="upgrade">
+      <ref name="MAP"/>
+      <optional>
+        <element name="stop_on_solver_conflict">
+          <ref name="BOOLEAN"/>
+        </element>
+      </optional>
+    </element>
+  </define>
+</grammar>

@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="kdump">
+    <element name="kdump">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <choice>
+            <ref name="kdump_crash_kernel_value"/>
+            <ref name="kdump_crash_kernel_list"/>
+          </choice>
+        </optional>
+        <optional>
+          <!-- parameter specify crashkernel value for xen hypervisor -->
+          <choice>
+            <ref name="kdump_crash_xen_kernel_value"/>
+            <ref name="kdump_crash_xen_kernel_list"/>
+          </choice>
+        </optional>
+        <optional>
+          <ref name="kdump_add_crash_kernel"/>
+        </optional>
+        <optional>
+          <ref name="kdump_general"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="kdump_crash_kernel_value">
+    <element name="crash_kernel">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="kdump_crash_xen_kernel_value">
+    <element name="crash_xen_kernel">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="kdump_crash_kernel_list">
+    <element name="crash_kernel">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="kdump_crash_kernel_entry"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="kdump_crash_xen_kernel_list">
+    <element name="crash_xen_kernel">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="kdump_crash_kernel_entry"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="kdump_crash_kernel_entry">
+    <element name="listentry">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="kdump_add_crash_kernel">
+    <element name="add_crash_kernel">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="kdump_general">
+    <element name="general">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="KDUMP_KERNELVER">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_CPUS">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_COMMANDLINE">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_COMMANDLINE_APPEND">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_AUTO_RESIZE">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_CONTINUE_ON_ERROR">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_REQUIRED_PROGRAMS">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_PRESCRIPT">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_POSTSCRIPT">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- deprecated and ignored option. Will be dropped -->
+          <element name="KDUMPTOOL_FLAGS">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_NETCONFIG">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- deprecated and ignored option. Will be dropped -->
+          <element name="KDUMP_COPY_KERNEL">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_NET_TIMEOUT">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KEXEC_OPTIONS">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_RUNLEVEL">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_IMMEDIATE_REBOOT">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_TRANSFER">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_SAVEDIR">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_KEEP_OLD_DUMPS">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_FREE_DISK_SIZE">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_VERBOSE">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_DUMPLEVEL">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_DUMPFORMAT">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_SMTP_SERVER">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_SMTP_USER">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_SMTP_PASSWORD">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_NOTIFICATION_TO">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_NOTIFICATION_CC">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="KDUMP_HOST_KEY">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

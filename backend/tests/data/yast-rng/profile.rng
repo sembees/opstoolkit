@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <include href="includes.rng"/>
+  <include href="classes-use.rng"/>
+  <define name="any_content">
+    <interleave>
+      <zeroOrMore>
+        <ref name="any_element"/>
+      </zeroOrMore>
+      <text/>
+    </interleave>
+  </define>
+  <define name="any_element">
+    <element>
+      <anyName>
+        <except>
+          <name>classes</name>
+          <name>runlevel</name>
+          <name>add-on</name>
+          <name>audit-laf</name>
+          <name>auth-client</name>
+          <name>bootloader</name>
+          <name>configuration_management</name>
+          <name>dhcp-server</name>
+          <name>dns-server</name>
+          <name>fcoe-client</name>
+          <name>ftp-server</name>
+          <name>firewall</name>
+          <name>geo-cluster</name>
+          <name>http-server</name>
+          <name>host</name>
+          <name>kdump</name>
+          <name>keyboard</name>
+          <name>networking</name>
+          <name>language</name>
+          <name>mail</name>
+          <name>nfs</name>
+          <name>nfs_server</name>
+          <name>nis</name>
+          <name>nis_server</name>
+          <name>ntp-client</name>
+          <name>online_update_configuration</name>
+          <name>printer</name>
+          <name>proxy</name>
+          <name>remote</name>
+          <name>suse_register</name>
+          <name>samba-client</name>
+          <name>samba-server</name>
+          <name>security</name>
+          <name>services-manager</name>
+          <name>sound</name>
+          <name>squid</name>
+          <name>sysconfig</name>
+          <name>tftp-server</name>
+          <name>timezone</name>
+          <name>users</name>
+          <name>user_defaults</name>
+          <name>groups</name>
+          <name>login_settings</name>
+          <name>iscsi-client</name>
+          <name>backup</name>
+          <name>deploy_image</name>
+          <name>files</name>
+          <name>general</name>
+          <name>general</name>
+          <name>pxe</name>
+          <name>firstboot</name>
+          <name>partitioning</name>
+          <name>report</name>
+          <name>scripts</name>
+          <name>software</name>
+          <name>ssh_import</name>
+          <name>upgrade</name>
+        </except>
+      </anyName>
+      <zeroOrMore>
+        <ref name="any_attribute"/>
+      </zeroOrMore>
+      <ref name="any_content"/>
+    </element>
+  </define>
+  <define name="any_attribute">
+    <attribute>
+      <anyName/>
+    </attribute>
+  </define>
+  <define name="profile">
+    <element name="profile">
+      <interleave>
+        <optional>
+          <ref name="classes"/>
+        </optional>
+        <optional>
+          <ref name="audit-laf"/>
+        </optional>
+        <optional>
+          <ref name="auth-client"/>
+        </optional>
+        <optional>
+          <ref name="configuration_management"/>
+        </optional>
+        <optional>
+          <ref name="dhcp-server"/>
+        </optional>
+        <optional>
+          <ref name="dns-server"/>
+        </optional>
+        <optional>
+          <ref name="fcoe-client"/>
+        </optional>
+        <optional>
+          <ref name="ftp-server"/>
+        </optional>
+        <optional>
+          <ref name="firewall"/>
+        </optional>
+        <optional>
+          <ref name="geo-cluster"/>
+        </optional>
+        <optional>
+          <ref name="http-server"/>
+        </optional>
+        <optional>
+          <ref name="host"/>
+        </optional>
+        <optional>
+          <ref name="keyboard"/>
+        </optional>
+        <optional>
+          <ref name="networking"/>
+        </optional>
+        <optional>
+          <ref name="language"/>
+        </optional>
+        <optional>
+          <ref name="mail"/>
+        </optional>
+        <optional>
+          <ref name="nfs"/>
+        </optional>
+        <optional>
+          <ref name="nfs_server"/>
+        </optional>
+        <optional>
+          <ref name="nis"/>
+        </optional>
+        <optional>
+          <ref name="nis_server"/>
+        </optional>
+        <optional>
+          <ref name="ntp-client"/>
+        </optional>
+        <optional>
+          <ref name="online_update_configuration"/>
+        </optional>
+        <optional>
+          <ref name="printer"/>
+        </optional>
+        <optional>
+          <ref name="proxy"/>
+        </optional>
+        <optional>
+          <ref name="suse_register"/>
+        </optional>
+        <optional>
+          <ref name="samba-client"/>
+        </optional>
+        <optional>
+          <ref name="samba-server"/>
+        </optional>
+        <optional>
+          <ref name="security"/>
+        </optional>
+        <optional>
+          <ref name="services-manager"/>
+        </optional>
+        <optional>
+          <ref name="sound"/>
+        </optional>
+        <optional>
+          <ref name="squid"/>
+        </optional>
+        <optional>
+          <ref name="sysconfig"/>
+        </optional>
+        <optional>
+          <ref name="tftp-server"/>
+        </optional>
+        <optional>
+          <ref name="timezone"/>
+        </optional>
+        <optional>
+          <ref name="user_defaults"/>
+        </optional>
+        <optional>
+          <ref name="groups"/>
+        </optional>
+        <optional>
+          <ref name="login_settings"/>
+        </optional>
+        <optional>
+          <ref name="users"/>
+        </optional>
+        <optional>
+          <ref name="iscsi-client"/>
+        </optional>
+        <optional>
+          <ref name="files"/>
+        </optional>
+        <optional>
+          <ref name="firstboot"/>
+        </optional>
+        <optional>
+          <ref name="scripts"/>
+        </optional>
+        <optional>
+          <ref name="add-on"/>
+        </optional>
+        <optional>
+          <ref name="bootloader"/>
+        </optional>
+        <optional>
+          <ref name="kdump"/>
+        </optional>
+        <optional>
+          <ref name="backup"/>
+        </optional>
+        <optional>
+          <ref name="deploy_image"/>
+        </optional>
+        <optional>
+          <ref name="general"/>
+        </optional>
+        <optional>
+          <ref name="pxe"/>
+        </optional>
+        <optional>
+          <ref name="partitioning"/>
+        </optional>
+        <optional>
+          <ref name="report"/>
+        </optional>
+        <optional>
+          <ref name="software"/>
+        </optional>
+        <optional>
+          <ref name="ssh_import"/>
+        </optional>
+        <optional>
+          <ref name="upgrade"/>
+        </optional>
+        <optional>
+          <ref name="any_content"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <start>
+    <ref name="profile"/>
+  </start>
+</grammar>

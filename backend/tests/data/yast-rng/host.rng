@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns:a="http://relaxng.org/ns/compatibility/annotations/1.0" xmlns:config="http://www.suse.com/1.0/configns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <!-- start = element profile { host } -->
+  <define name="host">
+    <a:documentation>to be overriden if included</a:documentation>
+    <element name="host">
+      <ref name="MAP"/>
+      <optional>
+        <ref name="hosts"/>
+      </optional>
+    </element>
+  </define>
+  <define name="hosts">
+    <element name="hosts">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="hosts_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="hosts_entry">
+    <element name="hosts_entry">
+      <ref name="MAP"/>
+      <interleave>
+        <element name="host_address">
+          <ref name="STRING"/>
+        </element>
+        <!-- we do not declare "names =, name =" because the conflict potential is big -->
+        <element name="names">
+          <ref name="LIST"/>
+          <oneOrMore>
+            <element name="name">
+              <ref name="STRING"/>
+            </element>
+          </oneOrMore>
+        </element>
+      </interleave>
+    </element>
+  </define>
+</grammar>

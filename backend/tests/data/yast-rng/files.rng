@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- <!ENTITY % y2_files_scripts "source|interpreter"> -->
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="file_src">
+    <choice>
+      <ref name="file_contents"/>
+      <ref name="file_location"/>
+    </choice>
+  </define>
+  <define name="files">
+    <element name="files">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element name="file">
+          <ref name="MAP"/>
+          <interleave>
+            <optional>
+              <ref name="file_src"/>
+            </optional>
+            <ref name="file_path"/>
+            <optional>
+              <ref name="file_permissions"/>
+            </optional>
+            <optional>
+              <ref name="file_owner"/>
+            </optional>
+            <optional>
+              <ref name="file_script"/>
+            </optional>
+          </interleave>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="file_contents">
+    <element name="file_contents">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="file_location">
+    <element name="file_location">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="file_path">
+    <element name="file_path">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="file_permissions">
+    <element name="file_permissions">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="file_owner">
+    <element name="file_owner">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="file_script">
+    <element name="file_script">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="interpreter"/>
+        <optional>
+          <ref name="source"/>
+        </optional>
+        <optional>
+          <element name="location">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="online_update_configuration">
+    <element name="online_update_configuration">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="enable_automatic_online_update"/>
+        </optional>
+        <optional>
+          <ref name="skip_interactive_patches"/>
+        </optional>
+        <optional>
+          <ref name="auto_agree_with_licenses"/>
+        </optional>
+        <optional>
+          <ref name="include_recommends"/>
+        </optional>
+        <optional>
+          <ref name="update_interval"/>
+        </optional>
+        <optional>
+          <choice>
+            <ref name="category_filter"/>
+            <ref name="nested_category_filter"/>
+          </choice>
+        </optional>
+        <optional>
+          <ref name="use_deltarpm"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="enable_automatic_online_update">
+    <element name="enable_automatic_online_update">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="skip_interactive_patches">
+    <element name="skip_interactive_patches">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="auto_agree_with_licenses">
+    <element name="auto_agree_with_licenses">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="include_recommends">
+    <element name="include_recommends">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="use_deltarpm">
+    <element name="use_deltarpm">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="update_interval">
+    <element name="update_interval">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="category_filter">
+    <element name="category_filter">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="category"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="category">
+    <element>
+      <choice>
+        <name>category</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!-- Support for the old category_filter format (bsc#1198848) -->
+  <define name="nested_category_filter">
+    <element name="category_filter">
+      <ref name="MAP"/>
+      <element name="category">
+        <ref name="LIST"/>
+        <zeroOrMore>
+          <ref name="category"/>
+        </zeroOrMore>
+      </element>
+    </element>
+  </define>
+</grammar>

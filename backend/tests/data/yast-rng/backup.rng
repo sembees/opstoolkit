@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <define name="backup">
+    <element name="backup">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="modified">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="remove_old">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="sysconfig">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

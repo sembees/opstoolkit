@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="scripts">
+    <element name="scripts">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="chroot-scripts"/>
+        </optional>
+        <optional>
+          <ref name="post-scripts"/>
+        </optional>
+        <optional>
+          <ref name="pre-scripts"/>
+        </optional>
+        <optional>
+          <ref name="init-scripts"/>
+        </optional>
+        <optional>
+          <ref name="postpartitioning-scripts"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="chroot-scripts">
+    <element name="chroot-scripts">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="autoinstall-chroot-script"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="post-scripts">
+    <element name="post-scripts">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="autoinstall-script"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="pre-scripts">
+    <element name="pre-scripts">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="autoinstall-script"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="init-scripts">
+    <element name="init-scripts">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="autoinstall-init-script"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="postpartitioning-scripts">
+    <element name="postpartitioning-scripts">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="autoinstall-script"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <!-- script is overloaded -->
+  <define name="autoinstall-script">
+    <element name="script">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="filename"/>
+        </optional>
+        <optional>
+          <ref name="interpreter"/>
+        </optional>
+        <optional>
+          <element name="location">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="source"/>
+        </optional>
+        <optional>
+          <ref name="debug"/>
+        </optional>
+        <optional>
+          <ref name="feedback"/>
+        </optional>
+        <optional>
+          <ref name="feedback_type"/>
+        </optional>
+        <optional>
+          <ref name="param-list"/>
+        </optional>
+        <optional>
+          <ref name="rerun"/>
+        </optional>
+        <optional>
+          <element name="notification">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="autoinstall-init-script">
+    <element name="script">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="debug"/>
+        </optional>
+        <optional>
+          <ref name="filename"/>
+        </optional>
+        <optional>
+          <element name="location">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="source"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="autoinstall-chroot-script">
+    <element name="script">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="chrooted"/>
+        </optional>
+        <optional>
+          <ref name="filename"/>
+        </optional>
+        <optional>
+          <ref name="interpreter"/>
+        </optional>
+        <optional>
+          <element name="location">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="source"/>
+        </optional>
+        <optional>
+          <ref name="debug"/>
+        </optional>
+        <optional>
+          <ref name="feedback"/>
+        </optional>
+        <optional>
+          <ref name="feedback_type"/>
+        </optional>
+        <optional>
+          <ref name="param-list"/>
+        </optional>
+        <optional>
+          <ref name="rerun"/>
+        </optional>
+        <optional>
+          <element name="notification">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="param-list">
+    <element name="param-list">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="param">
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="chrooted">
+    <element name="chrooted">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="debug">
+    <element name="debug">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="feedback">
+    <element name="feedback">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="feedback_type">
+    <element name="feedback_type">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="filename">
+    <element name="filename">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="interpreter">
+    <element name="interpreter">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="rerun">
+    <element name="rerun">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="source">
+    <element name="source">
+      <ref name="STRING"/>
+    </element>
+  </define>
+</grammar>

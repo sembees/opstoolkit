@@ -1,0 +1,980 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns:a="http://relaxng.org/ns/compatibility/annotations/1.0" xmlns:config="http://www.suse.com/1.0/configns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="networking">
+    <a:documentation>networking</a:documentation>
+    <element name="networking">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="setup_before_proposal">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="start_immediately">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="keep_install_network">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="virt_bridge_proposal">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="backend">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="ipv6"/>
+        </optional>
+        <optional>
+          <ref name="managed"/>
+        </optional>
+        <optional>
+          <ref name="strict_IP_check_timeout"/>
+        </optional>
+        <optional>
+          <ref name="interfaces"/>
+        </optional>
+        <optional>
+          <ref name="modules"/>
+        </optional>
+        <optional>
+          <ref name="dhcp_options"/>
+        </optional>
+        <optional>
+          <ref name="routing"/>
+        </optional>
+        <optional>
+          <ref name="dns"/>
+        </optional>
+        <optional>
+          <ref name="s390-devices"/>
+        </optional>
+        <optional>
+          <ref name="net-udev"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="managed">
+    <element name="managed">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="ipv6">
+    <element name="ipv6">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="strict_IP_check_timeout">
+    <element name="strict_IP_check_timeout">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <!--
+    
+    INTERFACES
+    
+  -->
+  <define name="interfaces">
+    <element name="interfaces">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="interface"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="interface">
+    <element>
+      <choice>
+        <name>interface</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="device">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- overloaded -->
+          <element name="name">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="description">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="lladdr"/>
+        </optional>
+        <optional>
+          <ref name="bootproto"/>
+        </optional>
+        <optional>
+          <ref name="startmode"/>
+        </optional>
+        <optional>
+          <ref name="ifplugd_priority"/>
+        </optional>
+        <optional>
+          <!-- ignored, present for backward compatibility -->
+          <ref name="usercontrol"/>
+        </optional>
+        <optional>
+          <ref name="dhclient_set_hostname"/>
+        </optional>
+        <optional>
+          <!-- address -->
+          <ref name="ipaddr"/>
+        </optional>
+        <optional>
+          <ref name="prefixlen"/>
+        </optional>
+        <optional>
+          <ref name="remote_ipaddr"/>
+        </optional>
+        <optional>
+          <element name="netmask">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- overloaded -->
+          <element name="bonding_master">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave0">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave1">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave2">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave3">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave4">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave5">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave6">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave7">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave8">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_slave9">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bonding_module_opts">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="aliases">
+            <ref name="Anything"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="broadcast"/>
+        </optional>
+        <optional>
+          <ref name="network"/>
+        </optional>
+        <optional>
+          <!-- link -->
+          <ref name="mtu"/>
+        </optional>
+        <optional>
+          <ref name="ethtool_options"/>
+        </optional>
+        <optional>
+          <ref name="wireless"/>
+        </optional>
+        <optional>
+          <ref name="wifi_settings"/>
+        </optional>
+        <optional>
+          <ref name="bridge_settings"/>
+        </optional>
+        <optional>
+          <ref name="vlan_settings"/>
+        </optional>
+        <optional>
+          <ref name="dhclient_set_down_link"/>
+        </optional>
+        <optional>
+          <ref name="dhclient_set_default_route"/>
+        </optional>
+        <optional>
+          <element name="zone">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="firewall">
+            <ref name="STRING_ATTR"/>
+            <choice>
+              <value>yes</value>
+              <value>no</value>
+            </choice>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="s390-devices">
+    <element name="s390-devices">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="device"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="device">
+    <element>
+      <choice>
+        <name>device</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="layer2">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="chanids">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- ignored, present for backward compatibility -->
+          <element name="portname">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="protocol">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="router">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="net-udev">
+    <element name="net-udev">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="rule"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="rule">
+    <element>
+      <choice>
+        <name>rule</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="rule">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="value">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="name">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="remote_ipaddr">
+    <element name="remote_ipaddr">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="bootproto">
+    <element name="bootproto">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="broadcast">
+    <element name="broadcast">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="dhclient_set_down_link">
+    <element name="dhclient_set_down_link">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="dhclient_set_default_route">
+    <element name="dhclient_set_default_route">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>yes</value>
+        <value>no</value>
+      </choice>
+    </element>
+  </define>
+  <define name="lladdr">
+    <element name="lladdr">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ipaddr">
+    <element name="ipaddr">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="prefixlen">
+    <element name="prefixlen">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="usercontrol">
+    <element name="usercontrol">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="dhclient_set_hostname">
+    <element name="dhclient_set_hostname">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="mtu">
+    <element name="mtu">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ethtool_options">
+    <element name="ethtool_options">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ifplugd_priority">
+    <element name="ifplugd_priority">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="network">
+    <element name="network">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="startmode">
+    <element name="startmode">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless">
+    <element name="wireless">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!-- ? -->
+  <define name="wifi_settings">
+    <interleave>
+      <optional>
+        <ref name="wireless_auth_mode"/>
+      </optional>
+      <optional>
+        <ref name="wireless_ap"/>
+      </optional>
+      <optional>
+        <ref name="wireless_bitrate"/>
+      </optional>
+      <optional>
+        <ref name="wireless_ca_cert"/>
+      </optional>
+      <optional>
+        <ref name="wireless_channel"/>
+      </optional>
+      <optional>
+        <ref name="wireless_client_cert"/>
+      </optional>
+      <optional>
+        <ref name="wireless_client_key"/>
+      </optional>
+      <optional>
+        <ref name="wireless_client_key_password"/>
+      </optional>
+      <optional>
+        <ref name="wireless_default_key"/>
+      </optional>
+      <optional>
+        <ref name="wireless_eap_auth"/>
+      </optional>
+      <optional>
+        <ref name="wireless_eap_mode"/>
+      </optional>
+      <optional>
+        <ref name="wireless_essid"/>
+      </optional>
+      <optional>
+        <ref name="wireless_frequency"/>
+      </optional>
+      <optional>
+        <ref name="wireless_key"/>
+      </optional>
+      <optional>
+        <ref name="wireless_key_0"/>
+      </optional>
+      <optional>
+        <ref name="wireless_key_1"/>
+      </optional>
+      <optional>
+        <ref name="wireless_key_2"/>
+      </optional>
+      <optional>
+        <ref name="wireless_key_3"/>
+      </optional>
+      <optional>
+        <ref name="wireless_key_length"/>
+      </optional>
+      <optional>
+        <ref name="wireless_mode"/>
+      </optional>
+      <optional>
+        <ref name="wireless_nick"/>
+      </optional>
+      <optional>
+        <ref name="wireless_nwid"/>
+      </optional>
+      <optional>
+        <ref name="wireless_peap_version"/>
+      </optional>
+      <optional>
+        <ref name="wireless_power"/>
+      </optional>
+      <optional>
+        <ref name="wireless_wpa_anonid"/>
+      </optional>
+      <optional>
+        <ref name="wireless_wpa_identity"/>
+      </optional>
+      <optional>
+        <ref name="wireless_wpa_password"/>
+      </optional>
+      <optional>
+        <ref name="wireless_wpa_psk"/>
+      </optional>
+    </interleave>
+  </define>
+  <define name="wireless_auth_mode">
+    <element name="wireless_auth_mode">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_ap">
+    <element name="wireless_ap">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_bitrate">
+    <element name="wireless_bitrate">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_ca_cert">
+    <element name="wireless_ca_cert">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_channel">
+    <element name="wireless_channel">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_client_cert">
+    <element name="wireless_client_cert">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_client_key">
+    <element name="wireless_client_key">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_client_key_password">
+    <element name="wireless_client_key_password">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_default_key">
+    <element name="wireless_default_key">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_eap_auth">
+    <element name="wireless_eap_auth">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_eap_mode">
+    <element name="wireless_eap_mode">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_essid">
+    <element name="wireless_essid">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_frequency">
+    <element name="wireless_frequency">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_key">
+    <element name="wireless_key">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_key_1">
+    <element name="wireless_key_1">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_key_0">
+    <element name="wireless_key_0">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_key_2">
+    <element name="wireless_key_2">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_key_3">
+    <element name="wireless_key_3">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_key_length">
+    <element name="wireless_key_length">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_mode">
+    <element name="wireless_mode">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_nick">
+    <element name="wireless_nick">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_nwid">
+    <element name="wireless_nwid">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_peap_version">
+    <element name="wireless_peap_version">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_power">
+    <element name="wireless_power">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_wpa_anonid">
+    <element name="wireless_wpa_anonid">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_wpa_identity">
+    <element name="wireless_wpa_identity">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_wpa_password">
+    <element name="wireless_wpa_password">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="wireless_wpa_psk">
+    <element name="wireless_wpa_psk">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!--
+    
+    Bridge
+    
+  -->
+  <define name="bridge_settings">
+    <interleave>
+      <optional>
+        <element name="bridge">
+          <ref name="STRING_ATTR"/>
+          <choice>
+            <value>yes</value>
+            <value>no</value>
+          </choice>
+        </element>
+      </optional>
+      <optional>
+        <element name="bridge_ports">
+          <ref name="STRING"/>
+        </element>
+      </optional>
+      <optional>
+        <element name="bridge_stp">
+          <ref name="STRING_ATTR"/>
+          <choice>
+            <value>on</value>
+            <value>off</value>
+          </choice>
+        </element>
+      </optional>
+      <optional>
+        <element name="bridge_forward_delay">
+          <ref name="STRING"/>
+        </element>
+      </optional>
+      <optional>
+        <!-- backward compatibility (bsc#1180944) -->
+        <element name="bridge_forwarddelay">
+          <ref name="STRING"/>
+        </element>
+      </optional>
+    </interleave>
+  </define>
+  <!--
+    
+    VLAN
+    
+  -->
+  <define name="vlan_settings">
+    <interleave>
+      <optional>
+        <element name="etherdevice">
+          <ref name="STRING"/>
+        </element>
+      </optional>
+      <optional>
+        <element name="vlan_id">
+          <ref name="STRING"/>
+        </element>
+      </optional>
+    </interleave>
+  </define>
+  <!--
+    
+    MODULES
+    
+  -->
+  <define name="modules">
+    <element name="modules">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="module_entry"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="module_entry">
+    <element>
+      <choice>
+        <name>module_entry</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="ccw_chan_ids">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="ccw_chan_num">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <element name="device">
+          <ref name="STRING"/>
+        </element>
+        <optional>
+          <!-- overloaded -->
+          <element name="module">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- likely overloaded -->
+          <element name="options">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+      <!-- overloaded -->
+    </element>
+  </define>
+  <!--
+    
+    DHCP_OPTIONS
+    
+  -->
+  <define name="dhcp_options">
+    <element name="dhcp_options">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="dhclient_additional_options"/>
+        </optional>
+        <optional>
+          <ref name="dhclient_client_id"/>
+        </optional>
+        <optional>
+          <ref name="dhclient_hostname_option"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="dhclient_additional_options">
+    <element name="dhclient_additional_options">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="dhclient_client_id">
+    <element name="dhclient_client_id">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="dhclient_hostname_option">
+    <element name="dhclient_hostname_option">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!--
+    
+    ROUTING
+    
+  -->
+  <define name="routing">
+    <element name="routing">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="ip_forward">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="ipv4_forward">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="ipv6_forward">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="routes"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="routes">
+    <element name="routes">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="route"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="route">
+    <element>
+      <choice>
+        <name>route</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="destination"/>
+        <optional>
+          <element name="netmask">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- overloaded -->
+          <element name="device">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- overloaded -->
+          <ref name="gateway"/>
+        </optional>
+        <optional>
+          <ref name="extrapara"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="destination">
+    <element name="destination">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="gateway">
+    <element name="gateway">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="extrapara">
+    <element name="extrapara">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!--
+    
+    DNS (fqdn + resolver)
+    
+  -->
+  <define name="dns">
+    <element name="dns">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="dhcp_hostname"/>
+        </optional>
+        <optional>
+          <!-- ignored, present for backward compatibility -->
+          <ref name="write_hostname"/>
+        </optional>
+        <optional>
+          <ref name="resolv_conf_policy"/>
+        </optional>
+        <optional>
+          <ref name="hostname"/>
+        </optional>
+        <optional>
+          <ref name="domain"/>
+        </optional>
+        <optional>
+          <ref name="nameservers"/>
+        </optional>
+        <optional>
+          <ref name="searchlist"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="dhcp_hostname">
+    <element name="dhcp_hostname">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="write_hostname">
+    <element name="write_hostname">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="resolv_conf_policy">
+    <element name="resolv_conf_policy">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="hostname">
+    <element name="hostname">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="domain">
+    <element name="domain">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="nameservers">
+    <element name="nameservers">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="nameserver"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="nameserver">
+    <element name="nameserver">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="searchlist">
+    <element name="searchlist">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="search"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="search">
+    <element name="search">
+      <ref name="STRING"/>
+    </element>
+  </define>
+</grammar>

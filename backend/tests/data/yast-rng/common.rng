@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns:a="http://relaxng.org/ns/compatibility/annotations/1.0" xmlns:config="http://www.suse.com/1.0/configns" xmlns="http://relaxng.org/ns/structure/1.0" datatypeLibrary="http://www.w3.org/2001/XMLSchema-datatypes">
+  <!--
+    Single hash comments #  become <!- - XML comments- ->
+    Double hash comments ## are preserved in .rng as <a:documentation>
+  -->
+  <define name="BOOLEAN" combine="choice">
+    <a:documentation>Defined data-types</a:documentation>
+    <!--
+      This could be expressed also as
+      'attribute ( t | type | config:type ) { "boolean" }'
+      but libxml2-2.9.7 xmllint considers it incorrect schema :-(
+    -->
+    <choice>
+      <a:documentation>Historically we used config:type
+but it is unnecessarily long to type and read.
+Shorter variants are allowed.</a:documentation>
+      <attribute name="t">
+        <value>boolean</value>
+      </attribute>
+      <attribute name="type">
+        <value>boolean</value>
+      </attribute>
+      <attribute name="config:type">
+        <value>boolean</value>
+      </attribute>
+    </choice>
+    <choice>
+      <value>true</value>
+      <value>false</value>
+    </choice>
+  </define>
+  <define name="INTEGER" combine="choice">
+    <choice>
+      <attribute name="t">
+        <value>integer</value>
+      </attribute>
+      <attribute name="type">
+        <value>integer</value>
+      </attribute>
+      <attribute name="config:type">
+        <value>integer</value>
+      </attribute>
+    </choice>
+    <data type="integer"/>
+  </define>
+  <!-- Usage: foo = element foo { STRING_ATTR, ( "bar" | "baz") } -->
+  <define name="STRING_ATTR" combine="choice">
+    <optional>
+      <choice>
+        <attribute name="t">
+          <value>string</value>
+        </attribute>
+        <attribute name="type">
+          <value>string</value>
+        </attribute>
+        <attribute name="config:type">
+          <value>string</value>
+        </attribute>
+      </choice>
+    </optional>
+  </define>
+  <define name="STRING" combine="choice">
+    <ref name="STRING_ATTR"/>
+    <text/>
+  </define>
+  <define name="SYMBOL" combine="choice">
+    <choice>
+      <attribute name="t">
+        <value>symbol</value>
+      </attribute>
+      <attribute name="type">
+        <value>symbol</value>
+      </attribute>
+      <attribute name="config:type">
+        <value>symbol</value>
+      </attribute>
+    </choice>
+    <text/>
+  </define>
+  <define name="LIST" combine="choice">
+    <choice>
+      <attribute name="t">
+        <value>list</value>
+      </attribute>
+      <attribute name="type">
+        <value>list</value>
+      </attribute>
+      <attribute name="config:type">
+        <value>list</value>
+      </attribute>
+    </choice>
+  </define>
+  <define name="MAP" combine="choice">
+    <optional>
+      <choice>
+        <attribute name="t">
+          <value>map</value>
+        </attribute>
+        <attribute name="type">
+          <value>map</value>
+        </attribute>
+        <attribute name="config:type">
+          <value>map</value>
+        </attribute>
+      </choice>
+    </optional>
+  </define>
+  <!-- this is useful for testing -->
+  <define name="Anything" combine="choice">
+    <zeroOrMore>
+      <choice>
+        <attribute>
+          <anyName/>
+        </attribute>
+        <text/>
+        <element>
+          <anyName/>
+          <ref name="Anything"/>
+        </element>
+      </choice>
+    </zeroOrMore>
+  </define>
+</grammar>

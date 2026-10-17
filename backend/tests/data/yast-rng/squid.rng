@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="squid">
+    <element name="squid">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="acls">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element name="listentry">
+                <ref name="MAP"/>
+                <interleave>
+                  <optional>
+                    <element name="name">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="options">
+                      <ref name="LIST"/>
+                      <zeroOrMore>
+                        <element name="option">
+                          <ref name="STRING"/>
+                        </element>
+                      </zeroOrMore>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="type">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                </interleave>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="http_accesses">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element name="listentry">
+                <ref name="MAP"/>
+                <interleave>
+                  <optional>
+                    <element name="acl">
+                      <ref name="LIST"/>
+                      <zeroOrMore>
+                        <element name="listentry">
+                          <ref name="STRING"/>
+                        </element>
+                      </zeroOrMore>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="allow">
+                      <ref name="BOOLEAN"/>
+                    </element>
+                  </optional>
+                </interleave>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="http_ports">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element name="listentry">
+                <ref name="MAP"/>
+                <interleave>
+                  <optional>
+                    <element name="host">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="port">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="transparent">
+                      <ref name="BOOLEAN"/>
+                    </element>
+                  </optional>
+                </interleave>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="refresh_patterns">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element name="listentry">
+                <ref name="MAP"/>
+                <interleave>
+                  <optional>
+                    <element name="case_sensitive">
+                      <ref name="BOOLEAN"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="max">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="min">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="percent">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="regexp">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                </interleave>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="settings">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="access_log">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="cache_dir">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="cache_log">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="cache_mem">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="cache_mgr">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="cache_replacement_policy">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="cache_store_log">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="cache_swap_high">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="cache_swap_low">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="client_lifetime">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="connect_timeout">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="emulate_httpd_log">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="error_directory">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="ftp_passive">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="maximum_object_size">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="memory_replacement_policy">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="minimum_object_size">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <element name="listentry">
+                      <ref name="STRING"/>
+                    </element>
+                  </zeroOrMore>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="service_enabled_on_startup">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

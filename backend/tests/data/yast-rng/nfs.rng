@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <!-- It is complicated. -->
+  <include href="common.rng"/>
+  <define name="nfs_entry_content">
+    <interleave>
+      <element name="server_path">
+        <text/>
+      </element>
+      <element name="mount_point">
+        <text/>
+      </element>
+      <optional>
+        <element name="vfstype">
+          <text/>
+        </element>
+      </optional>
+      <element name="nfs_options">
+        <text/>
+      </element>
+    </interleave>
+  </define>
+  <!--
+    SLE11-SP2 and earlier, openSUSE 11.2 and earlier:
+    A list of entries
+    (This definition is unused below but provided for historical context)
+  -->
+  <define name="nfs_sle11_sp2">
+    <element name="nfs">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="nfs_entry">
+          <ref name="MAP"/>
+          <ref name="nfs_entry_content"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!--
+    openSUSE 11.3-12.3 (since yast2-nfs-client-2.19.1, openSUSE-11.3, 2010):
+    Switched to a map so that we can have global options
+  -->
+  <define name="nfs_global_options_content">
+    <interleave>
+      <optional>
+        <element name="enable_nfs4">
+          <ref name="BOOLEAN"/>
+        </element>
+      </optional>
+      <optional>
+        <element name="enable_nfs_gss">
+          <ref name="BOOLEAN"/>
+        </element>
+      </optional>
+      <optional>
+        <element name="idmapd_domain">
+          <text/>
+        </element>
+      </optional>
+    </interleave>
+  </define>
+  <define name="nfs_os113_123">
+    <element name="nfs">
+      <ref name="MAP"/>
+      <group>
+        <ref name="nfs_global_options_content"/>
+        <element name="nfs_entries">
+          <ref name="LIST"/>
+          <zeroOrMore>
+            <element name="nfs_entry">
+              <ref name="MAP"/>
+              <ref name="nfs_entry_content"/>
+            </element>
+          </zeroOrMore>
+        </element>
+      </group>
+    </element>
+  </define>
+  <!--
+    Now we want to port the options to SLE11-SP3.
+    But the AutoYaST core does not allow switching a list to a map!
+    bnc#820989
+  -->
+  <!--
+    SLE11-SP3:
+    a list, like in SLE11-SP2, but
+    with an optional first entry which carries the global options
+  -->
+  <define name="nfs_sle11_sp3">
+    <element name="nfs">
+      <ref name="LIST"/>
+      <optional>
+        <element name="nfs_entry">
+          <ref name="MAP"/>
+          <ref name="nfs_global_options_content"/>
+        </element>
+      </optional>
+      <zeroOrMore>
+        <element name="nfs_entry">
+          <ref name="MAP"/>
+          <ref name="nfs_entry_content"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!--
+    openSUSE-13.1:
+    Merge: allow all formats
+    Well, on this layer only. The AY core still allows a map only.
+    Needs to be fixed there.
+  -->
+  <define name="nfs">
+    <choice>
+      <ref name="nfs_os113_123"/>
+      <ref name="nfs_sle11_sp3"/>
+    </choice>
+  </define>
+</grammar>

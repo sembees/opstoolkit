@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="add-on">
+    <element name="add-on">
+      <ref name="MAP"/>
+      <interleave>
+        <zeroOrMore>
+          <ref name="add_on_products"/>
+        </zeroOrMore>
+        <zeroOrMore>
+          <ref name="add_on_others"/>
+        </zeroOrMore>
+      </interleave>
+    </element>
+  </define>
+  <define name="listentry">
+    <element name="listentry">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="media_url"/>
+        <optional>
+          <!-- here it is mandatory -->
+          <ref name="product"/>
+        </optional>
+        <optional>
+          <ref name="name"/>
+        </optional>
+        <optional>
+          <ref name="alias"/>
+        </optional>
+        <optional>
+          <ref name="product_dir"/>
+        </optional>
+        <optional>
+          <ref name="ask_on_error"/>
+        </optional>
+        <optional>
+          <ref name="confirm_license"/>
+        </optional>
+        <optional>
+          <ref name="priority"/>
+        </optional>
+        <optional>
+          <element name="signature-handling">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="accept_unsigned_file">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="accept_file_without_checksum">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="accept_verification_failed">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="accept_unknown_gpg_key">
+                  <ref name="MAP"/>
+                  <interleave>
+                    <optional>
+                      <element name="all">
+                        <ref name="BOOLEAN"/>
+                      </element>
+                    </optional>
+                    <optional>
+                      <element name="keys">
+                        <ref name="LIST"/>
+                        <zeroOrMore>
+                          <element name="keyid">
+                            <ref name="STRING"/>
+                          </element>
+                        </zeroOrMore>
+                      </element>
+                    </optional>
+                  </interleave>
+                </element>
+              </optional>
+              <optional>
+                <element name="accept_non_trusted_gpg_key">
+                  <ref name="MAP"/>
+                  <interleave>
+                    <optional>
+                      <element name="all">
+                        <ref name="BOOLEAN"/>
+                      </element>
+                    </optional>
+                    <optional>
+                      <element name="keys">
+                        <ref name="LIST"/>
+                        <zeroOrMore>
+                          <element name="keyid">
+                            <ref name="STRING"/>
+                          </element>
+                        </zeroOrMore>
+                      </element>
+                    </optional>
+                  </interleave>
+                </element>
+              </optional>
+              <optional>
+                <element name="import_gpg_key">
+                  <ref name="MAP"/>
+                  <interleave>
+                    <optional>
+                      <element name="all">
+                        <ref name="BOOLEAN"/>
+                      </element>
+                    </optional>
+                    <optional>
+                      <element name="keys">
+                        <ref name="LIST"/>
+                        <zeroOrMore>
+                          <element name="keyid">
+                            <ref name="STRING"/>
+                          </element>
+                        </zeroOrMore>
+                      </element>
+                    </optional>
+                  </interleave>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="media_url">
+    <element name="media_url">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="product">
+    <element name="product">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="name">
+    <element name="name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="alias">
+    <element name="alias">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="product_dir">
+    <element name="product_dir">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_on_error">
+    <element name="ask_on_error">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="confirm_license">
+    <element name="confirm_license">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="priority">
+    <element name="priority">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <!--
+    
+    Describes all Add-On products which have to be added
+    while and after the installation.
+    
+  -->
+  <define name="add_on_products">
+    <element name="add_on_products">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="listentry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!--
+    
+    Describes all Add-Ons which are not Add-On-Products or Base-Products.
+    Usually custom or 3rd party repositories.
+    
+    Add-On products and other user defined repos will be split in order to
+     1. keep a better overview about the repos
+     2. ensure backward compatibility
+    
+  -->
+  <define name="add_on_others">
+    <element name="add_on_others">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="listentry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

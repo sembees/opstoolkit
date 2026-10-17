@@ -2045,8 +2045,14 @@ def _opensuse_autoyast(c) -> str:
          "    </mode>", "  </general>",
          "  <language>",
          "    <language>" + _xml(lang) + "</language>",
-         "    <keymap>" + _xml(keymap) + "</keymap>",
+         "    <languages>" + _xml(lang) + "</languages>",
          "  </language>",
+         # ★ 2026-10-17 YaST 官方 RNG 判定：<language> 只允许 language/languages，
+         #   keymap 属顶层 <keyboard>；放错位置会让整份 profile 校验失败，
+         #   而 YaST 报的是后面那个元素 "extra"（RelaxNG interleave 的误导）。
+         "  <keyboard>",
+         "    <keymap>" + _xml(keymap) + "</keymap>",
+         "  </keyboard>",
          "  <timezone>",
          "    <timezone>" + _xml(tz) + "</timezone>",
          "    <hwclock>UTC</hwclock>",
@@ -2063,7 +2069,6 @@ def _opensuse_autoyast(c) -> str:
           #   `keep_install_network` 让 YaST **保留安装器当前网络**，装完再由系统自身 ifcfg 生效
           #   —— 这是 AutoYaST 对这一类问题的标准开关。
           "    <keep_install_network config:type=\"boolean\">true</keep_install_network>",
-          "    <hostname>" + _xml(hn) + "</hostname>",
           "    <interfaces config:type=\"list\">", "      <interface>",
           "        <name>" + _xml(iface) + "</name>",
           "        <startmode>auto</startmode>"]
@@ -2105,7 +2110,6 @@ def _opensuse_autoyast(c) -> str:
           "      <user_password>" + _xml(admin_hash) + "</user_password>",
           "      <uid>1000</uid>", "      <gid>100</gid>",
           "      <shell>/bin/bash</shell>",
-          "      <create_home config:type=\"boolean\">true</create_home>",
           "      <groups>wheel</groups>"]
     if c.ssh_keys:
         L += ['      <authorized_keys config:type="list">']
@@ -2121,8 +2125,6 @@ def _opensuse_autoyast(c) -> str:
               "      <file_path>/etc/sudoers.d/90-opstk-" + _xml(admin) + "</file_path>",
               "      <file_contents>" + _xml(admin + " ALL=(ALL) NOPASSWD: ALL")
               + "</file_contents>",
-              "      <permissions>440</permissions>",
-              "      <owner>root</owner>", "      <group>root</group>",
               "    </file>", "  </files>"]
     L += ["</profile>", ""]
     return "\n".join(L)

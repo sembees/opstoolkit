@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="fcoe-client">
+    <element name="fcoe-client">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="fcoe_cfg"/>
+        </optional>
+        <optional>
+          <ref name="fcoe_interfaces"/>
+        </optional>
+        <optional>
+          <ref name="fcoe_service_start"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="fcoe_cfg">
+    <element name="fcoe_cfg">
+      <ref name="MAP"/>
+      <interleave>
+        <element name="DEBUG">
+          <ref name="STRING_ATTR"/>
+          <choice>
+            <value>yes</value>
+            <value>no</value>
+          </choice>
+        </element>
+        <element name="USE_SYSLOG">
+          <ref name="STRING_ATTR"/>
+          <choice>
+            <value>yes</value>
+            <value>no</value>
+          </choice>
+        </element>
+      </interleave>
+    </element>
+  </define>
+  <define name="fcoe_interfaces">
+    <element name="interfaces">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element>
+          <choice>
+            <name>interface</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="MAP"/>
+          <interleave>
+            <element name="dev_name">
+              <ref name="STRING"/>
+            </element>
+            <element name="mac_addr">
+              <ref name="STRING"/>
+            </element>
+            <element name="device">
+              <ref name="STRING"/>
+            </element>
+            <element name="vlan_interface">
+              <ref name="STRING"/>
+            </element>
+            <element name="fcoe_vlan">
+              <ref name="STRING"/>
+            </element>
+            <element name="fcoe_enable">
+              <ref name="STRING_ATTR"/>
+              <choice>
+                <value>yes</value>
+                <value>no</value>
+              </choice>
+            </element>
+            <element name="dcb_required">
+              <ref name="STRING_ATTR"/>
+              <choice>
+                <value>yes</value>
+                <value>no</value>
+              </choice>
+            </element>
+            <element name="auto_vlan">
+              <ref name="STRING_ATTR"/>
+              <choice>
+                <value>yes</value>
+                <value>no</value>
+              </choice>
+            </element>
+            <element name="dcb_capable">
+              <ref name="STRING_ATTR"/>
+              <choice>
+                <value>yes</value>
+                <value>no</value>
+              </choice>
+            </element>
+            <element name="cfg_device">
+              <ref name="STRING"/>
+            </element>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="fcoe_service_start">
+    <element name="service_start">
+      <ref name="MAP"/>
+      <interleave>
+        <element name="fcoe">
+          <ref name="BOOLEAN"/>
+        </element>
+        <element name="lldpad">
+          <ref name="BOOLEAN"/>
+        </element>
+      </interleave>
+    </element>
+  </define>
+</grammar>

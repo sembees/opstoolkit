@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="proxy">
+    <element name="proxy">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="enabled">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="ftp_proxy">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="http_proxy">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="https_proxy">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="no_proxy">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="proxy_password">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="proxy_user">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

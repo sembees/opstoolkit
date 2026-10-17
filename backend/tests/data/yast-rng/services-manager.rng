@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns:config="http://www.suse.com/1.0/configns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <!-- runlevel legacy schema -->
+  <define name="runlevel_service_name">
+    <element name="service_name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel_service_status">
+    <element name="service_status">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel_service_start">
+    <element name="service_start">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel_service_stop">
+    <element name="service_stop">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel_service">
+    <element name="service">
+      <interleave>
+        <optional>
+          <attribute name="config:type"/>
+        </optional>
+        <optional>
+          <ref name="runlevel_service_name"/>
+        </optional>
+        <optional>
+          <ref name="runlevel_service_start"/>
+        </optional>
+        <optional>
+          <ref name="runlevel_service_stop"/>
+        </optional>
+        <optional>
+          <ref name="runlevel_service_status"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="runlevel_services">
+    <element name="services">
+      <optional>
+        <attribute name="config:type">
+          <value>list</value>
+        </attribute>
+      </optional>
+      <zeroOrMore>
+        <ref name="runlevel_service"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="runlevel_default">
+    <element name="default">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel_content">
+    <element name="runlevel">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="runlevel_default"/>
+        </optional>
+        <optional>
+          <ref name="runlevel_services"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <!-- current services-manager schema -->
+  <!-- by default, AutoYast exports list entries as 'listentry' -->
+  <define name="service">
+    <choice>
+      <element name="service">
+        <ref name="STRING"/>
+      </element>
+      <element name="listentry">
+        <ref name="STRING"/>
+      </element>
+    </choice>
+  </define>
+  <define name="sm_enable">
+    <element name="enable">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="service"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="sm_disable">
+    <element name="disable">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="service"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="sm_on_demand">
+    <element name="on_demand">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="service"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="new_services_list">
+    <element name="services">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="sm_disable"/>
+        </optional>
+        <optional>
+          <ref name="sm_enable"/>
+        </optional>
+        <optional>
+          <ref name="sm_on_demand"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="old_services_list">
+    <element name="services">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="service"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="services">
+    <choice>
+      <ref name="old_services_list"/>
+      <ref name="new_services_list"/>
+    </choice>
+  </define>
+  <define name="default_target">
+    <element name="default_target">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="services_manager_content">
+    <interleave>
+      <optional>
+        <ref name="default_target"/>
+      </optional>
+      <optional>
+        <ref name="services"/>
+      </optional>
+    </interleave>
+  </define>
+  <define name="services-manager">
+    <choice>
+      <element name="services-manager">
+        <ref name="MAP"/>
+        <ref name="services_manager_content"/>
+      </element>
+      <element name="runlevel">
+        <ref name="MAP"/>
+        <ref name="runlevel_content"/>
+      </element>
+    </choice>
+  </define>
+</grammar>

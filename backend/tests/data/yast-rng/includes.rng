@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="add-on.rng"/>
+  <!-- yast2-add-on -->
+  <include href="audit-laf.rng"/>
+  <!-- yast2-audit-laf -->
+  <include href="auth-client.rng"/>
+  <!-- yast2-auth-client -->
+  <include href="bootloader.rng"/>
+  <!-- yast2-bootloader -->
+  <include href="configuration_management.rng"/>
+  <!-- yast2-configuration-management -->
+  <include href="dhcp-server.rng"/>
+  <!-- yast2-dhcp-server -->
+  <include href="dns-server.rng"/>
+  <!-- yast2-dns-server -->
+  <include href="fcoe-client.rng"/>
+  <!-- yast2-fcoe-client -->
+  <include href="ftp-server.rng"/>
+  <!-- yast2-ftp-server -->
+  <include href="firewall.rng"/>
+  <!-- yast2-firewall -->
+  <include href="geo-cluster.rng"/>
+  <!-- yast2-geo-cluster -->
+  <include href="http-server.rng"/>
+  <!-- yast2-http-server -->
+  <include href="host.rng"/>
+  <!-- yast2-network -->
+  <include href="kdump.rng"/>
+  <!-- yast2-kdump -->
+  <include href="keyboard.rng"/>
+  <!-- yast2-country -->
+  <include href="networking.rng"/>
+  <!-- yast2-network -->
+  <include href="language.rng"/>
+  <!-- yast2-country -->
+  <include href="mail.rng"/>
+  <!-- yast2-mail -->
+  <include href="nfs.rng"/>
+  <!-- yast2-nfs-client -->
+  <include href="nfs_server.rng"/>
+  <!-- yast2-nfs-server -->
+  <include href="nis.rng"/>
+  <!-- yast2-nis-client -->
+  <include href="nis_server.rng"/>
+  <!-- yast2-nis-server -->
+  <include href="ntpclient.rng"/>
+  <!-- yast2-ntp-client -->
+  <include href="online_update_configuration.rng"/>
+  <!-- yast2-online-update-configuration -->
+  <include href="printer.rng"/>
+  <!-- yast2-printer -->
+  <include href="proxy.rng"/>
+  <!-- yast2-proxy -->
+  <include href="registration.rng"/>
+  <!-- yast2-registration -->
+  <include href="samba-client.rng"/>
+  <!-- yast2-samba-client -->
+  <include href="samba-server.rng"/>
+  <!-- yast2-samba-server -->
+  <include href="security.rng"/>
+  <!-- yast2-security -->
+  <include href="services-manager.rng"/>
+  <!-- yast2-services-manager -->
+  <include href="sound.rng"/>
+  <!-- yast2-sound -->
+  <include href="squid.rng"/>
+  <!-- yast2-squid -->
+  <include href="sysconfig.rng"/>
+  <!-- yast2-sysconfig -->
+  <include href="tftp-server.rng"/>
+  <!-- yast2-tftp-server -->
+  <include href="timezone.rng"/>
+  <!-- yast2-country -->
+  <include href="users.rng"/>
+  <!-- yast2-users -->
+  <include href="iscsi-client.rng"/>
+  <!-- yast2-iscsi-client -->
+  <include href="backup.rng"/>
+  <!-- autoyast2 -->
+  <include href="deploy_image.rng"/>
+  <!-- yast2-installation -->
+  <include href="files.rng"/>
+  <!-- autoyast2 -->
+  <include href="pxe.rng"/>
+  <!-- autoyast2 -->
+  <include href="general.rng"/>
+  <!-- autoyast2 -->
+  <include href="firstboot.rng"/>
+  <!-- yast2-firstboot -->
+  <include href="partitioning.rng"/>
+  <!-- autoyast2 -->
+  <include href="reporting.rng"/>
+  <!-- autoyast2 -->
+  <include href="scripts.rng"/>
+  <!-- autoyast2 -->
+  <include href="software.rng"/>
+  <!-- autoyast2 -->
+  <include href="ssh_import.rng"/>
+  <!-- yast2-installation -->
+  <include href="upgrade.rng"/>
+</grammar>
+<!-- autoyast2 -->

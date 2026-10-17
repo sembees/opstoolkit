@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="printer">
+    <element name="printer">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="client_conf_content">
+            <ref name="MAP"/>
+            <optional>
+              <element name="file_contents">
+                <ref name="STRING"/>
+              </element>
+            </optional>
+          </element>
+        </optional>
+        <optional>
+          <element name="cupsd_conf_content">
+            <ref name="MAP"/>
+            <optional>
+              <element name="file_contents">
+                <ref name="STRING"/>
+              </element>
+            </optional>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

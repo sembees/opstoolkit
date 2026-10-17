@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  This describes a part of the autoinstallation profile.
+  
+  Do not confuse with classes-decl.rn[cg] which declares
+  the classes for the UI.
+-->
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="classes">
+    <element name="classes">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="class"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="class">
+    <element name="class">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="class_name"/>
+        <ref name="configuration"/>
+        <optional>
+          <element name="dont_merge">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element name="element">
+                <ref name="STRING"/>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="class_name">
+    <element name="class_name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="configuration">
+    <element name="configuration">
+      <ref name="STRING"/>
+    </element>
+  </define>
+</grammar>

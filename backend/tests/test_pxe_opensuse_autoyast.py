@@ -57,9 +57,9 @@ class AutoYaastProfileTest(unittest.TestCase):
 
     def test_identity_and_timezone(self):
         self.assertEqual(q(self.root, "language/language").text, "en_US.UTF-8")
-        self.assertEqual(q(self.root, "language/keymap").text, "us")
+        self.assertEqual(q(self.root, "keyboard/keymap").text, "us")
         self.assertEqual(q(self.root, "timezone/timezone").text, "Asia/Shanghai")
-        self.assertEqual(q(self.root, "networking/hostname").text, "suse140")
+        self.assertEqual(q(self.root, "networking/dns/hostname").text, "suse140")
 
     def test_static_network_gateway_and_dns(self):
         self.assertEqual(q(self.root, "networking/interfaces/interface/name").text, "ens18")
@@ -135,7 +135,7 @@ class AutoYaastEscapingTest(unittest.TestCase):
     def test_injection_via_hostname_cannot_add_elements(self):
         """主机名里塞标签必须**原样**变成文本，而不是变成新元素。"""
         r = ET.fromstring(_opensuse_autoyast(cfg(hostname="h1")))
-        self.assertEqual(q(r, "networking/hostname").text, "h1")
+        self.assertEqual(q(r, "networking/dns/hostname").text, "h1")
         # 校验器本来就会拒绝非法主机名，这里断言的是"就算拼进 XML 也只会是文本"
         self.assertNotIn("<script", _opensuse_autoyast(cfg()))
 

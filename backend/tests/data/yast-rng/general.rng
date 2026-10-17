@@ -1,0 +1,647 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="general">
+    <element name="general">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="mode">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="activate_systemd_default_target">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="confirm">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="confirm_base_product_license">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="final_halt">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="final_reboot">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="final_restart_services">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="forceboot">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="halt">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="max_systemd_wait">
+                  <ref name="INTEGER"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="ntp_sync_time_before_installation">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="second_stage">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <ref name="ask-list"/>
+        </optional>
+        <optional>
+          <ref name="semi-automatic"/>
+        </optional>
+        <optional>
+          <ref name="minimal-configuration"/>
+        </optional>
+        <optional>
+          <ref name="signature-handling"/>
+        </optional>
+        <optional>
+          <element name="self_update">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="self_update_url">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="proposals">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element name="proposal">
+                <ref name="STRING"/>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="storage">
+            <ref name="MAP"/>
+            <optional>
+              <element name="start_multipath">
+                <ref name="BOOLEAN"/>
+              </element>
+            </optional>
+          </element>
+        </optional>
+        <optional>
+          <element name="wait">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="pre-modules">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <ref name="module"/>
+                  </zeroOrMore>
+                </element>
+              </optional>
+              <optional>
+                <element name="post-modules">
+                  <ref name="LIST"/>
+                  <zeroOrMore>
+                    <ref name="module"/>
+                  </zeroOrMore>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <ref name="cio_ignore"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="ask-list">
+    <element name="ask-list">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="ask"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="ask">
+    <element name="ask">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="ask_question"/>
+        </optional>
+        <optional>
+          <ref name="ask_default"/>
+        </optional>
+        <optional>
+          <ref name="ask_help"/>
+        </optional>
+        <optional>
+          <ref name="ask_title"/>
+        </optional>
+        <optional>
+          <ref name="ask_type"/>
+        </optional>
+        <optional>
+          <ref name="ask_password"/>
+        </optional>
+        <optional>
+          <ref name="ask_path"/>
+        </optional>
+        <optional>
+          <ref name="ask_pathlist"/>
+        </optional>
+        <optional>
+          <ref name="ask_stage"/>
+        </optional>
+        <optional>
+          <ref name="ask_selection"/>
+        </optional>
+        <optional>
+          <ref name="ask_file"/>
+        </optional>
+        <optional>
+          <ref name="ask_dialog"/>
+        </optional>
+        <optional>
+          <ref name="ask_element"/>
+        </optional>
+        <optional>
+          <ref name="ask_width"/>
+        </optional>
+        <optional>
+          <ref name="ask_height"/>
+        </optional>
+        <optional>
+          <ref name="ask_frametitle"/>
+        </optional>
+        <optional>
+          <ref name="ask_script"/>
+        </optional>
+        <optional>
+          <ref name="ask_timeout"/>
+        </optional>
+        <optional>
+          <ref name="ask_ok_label"/>
+        </optional>
+        <optional>
+          <ref name="ask_back_label"/>
+        </optional>
+        <optional>
+          <ref name="ask_default_value_script"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="ask_question">
+    <element name="question">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_default">
+    <element name="default">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_help">
+    <element name="help">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_title">
+    <element name="title">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_type">
+    <element name="type">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>symbol</value>
+        <value>integer</value>
+        <value>boolean</value>
+        <value>string</value>
+        <value>static_text</value>
+      </choice>
+    </element>
+  </define>
+  <define name="ask_password">
+    <element name="password">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="ask_path">
+    <element name="path">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_stage">
+    <element name="stage">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>cont</value>
+        <value>initial</value>
+      </choice>
+    </element>
+  </define>
+  <define name="ask_selection">
+    <element name="selection">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="ask_selection_entry"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="ask_selection_entry">
+    <element name="entry">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="ask_entry_value"/>
+        <ref name="ask_entry_label"/>
+      </interleave>
+    </element>
+  </define>
+  <define name="ask_file">
+    <element name="file">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_entry_value">
+    <element name="value">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_entry_label">
+    <element name="label">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_dialog">
+    <element name="dialog">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="ask_element">
+    <element name="element">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="ask_width">
+    <element name="width">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="ask_height">
+    <element name="height">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="ask_frametitle">
+    <element name="frametitle">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_timeout">
+    <element name="timeout">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="ask_pathlist">
+    <element name="pathlist">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="ask_path"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="ask_ok_label">
+    <element name="ok_label">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ask_back_label">
+    <element name="back_label">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="semi-automatic">
+    <element name="semi-automatic">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="semi-automatic-modules"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!-- allow here both module which is original one and also semi-automatic_entry from documenation (bsc#1183512) -->
+  <define name="semi-automatic-modules">
+    <element>
+      <choice>
+        <name>semi-automatic_entry</name>
+        <name>module</name>
+      </choice>
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>networking</value>
+        <value>partitioning</value>
+        <value>scc</value>
+      </choice>
+    </element>
+  </define>
+  <define name="minimal-configuration">
+    <element name="minimal-configuration">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="signature-handling">
+    <element name="signature-handling">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="accept_unsigned_file"/>
+        </optional>
+        <optional>
+          <ref name="accept_file_without_checksum"/>
+        </optional>
+        <optional>
+          <ref name="accept_verification_failed"/>
+        </optional>
+        <optional>
+          <ref name="accept_unknown_gpg_key"/>
+        </optional>
+        <optional>
+          <ref name="import_gpg_key"/>
+        </optional>
+        <optional>
+          <ref name="accept_non_trusted_gpg_key"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="accept_unsigned_file">
+    <element name="accept_unsigned_file">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="accept_file_without_checksum">
+    <element name="accept_file_without_checksum">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="accept_verification_failed">
+    <element name="accept_verification_failed">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="accept_unknown_gpg_key">
+    <element name="accept_unknown_gpg_key">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="accept_non_trusted_gpg_key">
+    <element name="accept_non_trusted_gpg_key">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="import_gpg_key">
+    <element name="import_gpg_key">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="ask_script">
+    <element name="script">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="filename">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="interpreter">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="location">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="source">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="debug">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="feedback">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="feedback_type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="ask-param-list"/>
+        </optional>
+        <optional>
+          <element name="rerun">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="notification">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="environment">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="rerun_on_error">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="ask_default_value_script">
+    <element name="default_value_script">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="filename">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="interpreter">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="location">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="source">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="debug">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="feedback">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="feedback_type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="ask-param-list"/>
+        </optional>
+        <optional>
+          <element name="rerun">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="notification">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="ask-param-list">
+    <element name="param-list">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="param">
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="confirm">
+    <element name="confirm">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="final_halt">
+    <element name="final_halt">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="final_reboot">
+    <element name="final_reboot">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="forceboot">
+    <element name="forceboot">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="ntp_sync_time_before_installation">
+    <element name="ntp_sync_time_before_installation">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="halt">
+    <element name="halt">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="second_stage">
+    <element name="second_stage">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="module">
+    <element name="module">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="name">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="sleep">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="time">
+                  <ref name="INTEGER"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="feedback">
+                  <ref name="BOOLEAN"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <element name="script">
+          <ref name="MAP"/>
+          <interleave>
+            <optional>
+              <element name="debug">
+                <ref name="BOOLEAN"/>
+              </element>
+            </optional>
+            <optional>
+              <element name="source">
+                <ref name="STRING"/>
+              </element>
+            </optional>
+          </interleave>
+        </element>
+      </interleave>
+    </element>
+  </define>
+  <define name="cio_ignore">
+    <element name="cio_ignore">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+</grammar>

@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns:config="http://www.suse.com/1.0/configns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="LOAD_ALSA_SEQ">
+    <element name="LOAD_ALSA_SEQ">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="module_conf">
+    <element name="module_conf">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="alias">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="model">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="module">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="options">
+            <zeroOrMore>
+              <ref name="Anything"/>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="unique_key">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bus">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="bus_id">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="device_id">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="hwcfg">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="sub_device_id">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="sub_vendor_id">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="vendor_id">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="modules_conf">
+    <element name="modules_conf">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="module_conf"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="new">
+    <element name="new">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="rc_vars">
+    <element name="rc_vars">
+      <ref name="MAP"/>
+      <zeroOrMore>
+        <ref name="LOAD_ALSA_SEQ"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="snd_enable">
+    <element name="snd_enable">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="snd_index">
+    <element name="snd_index">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="sound">
+    <element name="sound">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="configure_detected"/>
+        </optional>
+        <optional>
+          <ref name="modules_conf"/>
+        </optional>
+        <optional>
+          <ref name="rc_vars"/>
+        </optional>
+        <optional>
+          <ref name="volume_settings"/>
+        </optional>
+        <optional>
+          <ref name="pulse_audio_status"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="pulse_audio_status">
+    <element name="pulse_audio_status">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="state">
+    <element name="state">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="unique_key">
+    <element name="unique_key">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="unknown-state">
+    <element name="unknown-state">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="volume_component_settings">
+    <element name="volume_component_settings">
+      <optional>
+        <attribute name="config:type"/>
+      </optional>
+      <text/>
+    </element>
+  </define>
+  <define name="volume_entry">
+    <element name="volume_entry">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="volume_component">
+          <ref name="MAP"/>
+          <interleave>
+            <optional>
+              <element name="mute">
+                <ref name="BOOLEAN"/>
+              </element>
+            </optional>
+            <optional>
+              <element name="name">
+                <ref name="STRING"/>
+              </element>
+            </optional>
+            <optional>
+              <element name="volume">
+                <ref name="INTEGER"/>
+              </element>
+            </optional>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="volume_settings">
+    <element name="volume_settings">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="volume_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="configure_detected">
+    <element name="configure_detected">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="enable">
+    <element name="enable">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="index">
+    <element name="index">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="isapnp">
+    <element name="isapnp">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="joystick">
+    <element name="joystick">
+      <ref name="STRING"/>
+    </element>
+  </define>
+</grammar>

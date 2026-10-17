@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="language">
+    <element name="language">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="language_val"/>
+        </optional>
+        <optional>
+          <ref name="languages"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="language_val">
+    <element name="language">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="languages">
+    <element name="languages">
+      <ref name="STRING"/>
+    </element>
+  </define>
+</grammar>

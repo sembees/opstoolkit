@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="suse_register">
+    <element name="suse_register">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="addons"/>
+        </optional>
+        <optional>
+          <ref name="do_registration"/>
+        </optional>
+        <optional>
+          <ref name="email"/>
+        </optional>
+        <optional>
+          <ref name="install_updates"/>
+        </optional>
+        <optional>
+          <ref name="reg_code"/>
+        </optional>
+        <optional>
+          <ref name="reg_server"/>
+        </optional>
+        <optional>
+          <ref name="reg_server_cert"/>
+        </optional>
+        <optional>
+          <ref name="reg_server_cert_fingerprint_type"/>
+        </optional>
+        <optional>
+          <ref name="reg_server_cert_fingerprint"/>
+        </optional>
+        <optional>
+          <ref name="slp_discovery"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="addons">
+    <element name="addons">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="addon"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="addon">
+    <element name="addon">
+      <ref name="MAP"/>
+      <interleave>
+        <ref name="addon_name"/>
+        <optional>
+          <ref name="addon_version"/>
+        </optional>
+        <optional>
+          <ref name="addon_arch"/>
+        </optional>
+        <optional>
+          <ref name="addon_release_type"/>
+        </optional>
+        <optional>
+          <ref name="addon_reg_code"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="addon_name">
+    <element name="name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="addon_version">
+    <element name="version">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="addon_arch">
+    <element name="arch">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="addon_release_type">
+    <element name="release_type">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="addon_reg_code">
+    <element name="reg_code">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="do_registration">
+    <element name="do_registration">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="reg_server">
+    <element name="reg_server">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="reg_server_cert">
+    <element name="reg_server_cert">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="reg_server_cert_fingerprint_type">
+    <element name="reg_server_cert_fingerprint_type">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="reg_server_cert_fingerprint">
+    <element name="reg_server_cert_fingerprint">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="email">
+    <element name="email">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="reg_code">
+    <element name="reg_code">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="install_updates">
+    <element name="install_updates">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="slp_discovery">
+    <element name="slp_discovery">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+</grammar>

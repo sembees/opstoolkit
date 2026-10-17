@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="ftp-server">
+    <element name="ftp-server">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="ChrootEnable">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="VerboseLogging">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="FtpDirLocal">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="FtpDirAnon">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="Umask">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="UmaskAnon">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="UmaskLocal">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="PasMinPort">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="PasMaxPort">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="MaxIdleTime">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="MaxClientsPerIP">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="MaxClientsNumber">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="LocalMaxRate">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="AnonMaxRate">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="AnonAuthen">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="AnonReadOnly">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="AnonCreatDirs">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="Banner">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="SSLEnable">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="TLS">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="AntiWarez">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="SSL">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="StartXinetd">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="StartDaemon">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="PassiveMode">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="CertFile">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="VirtualUser">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="FTPUser">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="GuestUser">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="EnableUpload">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

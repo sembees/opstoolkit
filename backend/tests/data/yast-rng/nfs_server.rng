@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <!-- NFS Server -->
+  <define name="nfs_server">
+    <element name="nfs_server">
+      <ref name="MAP"/>
+      <interleave>
+        <element name="nfs_exports">
+          <ref name="LIST"/>
+          <oneOrMore>
+            <ref name="nfs_export"/>
+          </oneOrMore>
+        </element>
+        <optional>
+          <element name="start_nfsserver">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="nfs_export">
+    <element name="nfs_export">
+      <ref name="MAP"/>
+      <interleave>
+        <element name="mountpoint">
+          <ref name="STRING"/>
+        </element>
+        <element name="allowed">
+          <ref name="LIST"/>
+          <oneOrMore>
+            <element name="allowed_clients">
+              <ref name="STRING"/>
+            </element>
+          </oneOrMore>
+        </element>
+      </interleave>
+    </element>
+  </define>
+</grammar>

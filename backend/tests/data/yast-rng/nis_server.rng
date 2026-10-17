@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <!-- NIS Server -->
+  <define name="y2_nisserver">
+    <choice>
+      <ref name="domain"/>
+      <ref name="maps_to_serve"/>
+      <ref name="merge_group"/>
+      <ref name="merge_passwd"/>
+      <ref name="nopush"/>
+      <ref name="pwd_chfn"/>
+      <ref name="pwd_chsh"/>
+      <ref name="pwd_srcdir"/>
+      <ref name="securenets"/>
+      <ref name="server_type"/>
+      <ref name="slaves"/>
+      <ref name="start_ypbind"/>
+      <ref name="start_yppasswdd"/>
+      <ref name="start_ypxfrd"/>
+      <ref name="mingid"/>
+      <ref name="minuid"/>
+    </choice>
+  </define>
+  <define name="comment">
+    <element name="comment">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="flag">
+    <element name="flag">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="forename">
+    <element name="forename">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="mingid">
+    <element name="mingid">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="grouplist">
+    <element name="grouplist">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="hash">
+    <element name="hash">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="nis_server_home">
+    <element name="home">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="inact">
+    <element name="inact">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="last_change">
+    <element name="last_change">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="maps_to_serve">
+    <element name="maps_to_serve">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="nis_map"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="max">
+    <element name="max">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="merge_passwd">
+    <element name="merge_passwd">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="merge_group">
+    <element name="merge_group">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="min">
+    <element name="min">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="nis_map">
+    <element name="nis_map">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="nopush">
+    <element name="nopush">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="y2_password_settings">
+    <choice>
+      <ref name="expire"/>
+      <ref name="flag"/>
+      <ref name="inact"/>
+      <ref name="last_change"/>
+      <ref name="max"/>
+      <ref name="min"/>
+      <ref name="warn"/>
+    </choice>
+  </define>
+  <define name="nis_server_password_settings">
+    <element name="password_settings">
+      <ref name="MAP"/>
+      <zeroOrMore>
+        <ref name="y2_password_settings"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="pwd_chfn">
+    <element name="pwd_chfn">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="pwd_chsh">
+    <element name="pwd_chsh">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="pwd_srcdir">
+    <element name="pwd_srcdir">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="nis_server_netmask">
+    <element name="netmask">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="securenet">
+    <element name="securenet">
+      <ref name="MAP"/>
+      <group>
+        <optional>
+          <ref name="comment"/>
+        </optional>
+        <optional>
+          <ref name="hash"/>
+        </optional>
+        <optional>
+          <ref name="nis_server_netmask"/>
+        </optional>
+        <optional>
+          <ref name="network"/>
+        </optional>
+      </group>
+    </element>
+  </define>
+  <define name="securenets">
+    <element name="securenets">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="securenet"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="server_type">
+    <element name="server_type">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="slave">
+    <element name="slave">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="slaves">
+    <element name="slaves">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="slave"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="start_ypbind">
+    <element name="start_ypbind">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="start_yppasswdd">
+    <element name="start_yppasswdd">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="start_ypxfrd">
+    <element name="start_ypxfrd">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="minuid">
+    <element name="minuid">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="warn">
+    <element name="warn">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!-- Common -->
+  <define name="nis_server">
+    <element name="nis_server">
+      <ref name="MAP"/>
+      <zeroOrMore>
+        <ref name="y2_nisserver"/>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

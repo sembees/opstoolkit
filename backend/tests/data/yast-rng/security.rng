@@ -1,0 +1,427 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="console_shutdown">
+    <element name="console_shutdown">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="cracklib_dict_path">
+    <element name="cracklib_dict_path">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="cwd_in_root_path">
+    <element name="cwd_in_root_path">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="cwd_in_user_path">
+    <element name="cwd_in_user_path">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="disable_restart_on_update">
+    <element name="disable_restart_on_update">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="disable_stop_on_removal">
+    <element name="disable_stop_on_removal">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="extra_services">
+    <element name="extra_services">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="selinux_mode">
+    <element name="selinux_mode">
+      <choice>
+        <value>permissive</value>
+        <value>enforcing</value>
+        <value>disabled</value>
+      </choice>
+    </element>
+  </define>
+  <!-- Major Linux Security Module to be activated after installation -->
+  <define name="lsm_select">
+    <element name="lsm_select">
+      <choice>
+        <value>apparmor</value>
+        <value>selinux</value>
+        <value>none</value>
+      </choice>
+    </element>
+  </define>
+  <define name="displaymanager_remote_access">
+    <element name="displaymanager_remote_access">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="displaymanager_root_login_remote">
+    <element name="displaymanager_root_login_remote">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="displaymanager_shutdown">
+    <element name="displaymanager_shutdown">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="displaymanager_xserver_tcp_port_6000_open">
+    <element name="displaymanager_xserver_tcp_port_6000_open">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="enable_sysrq">
+    <element name="enable_sysrq">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="encryption">
+    <element name="encryption">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="fail_delay">
+    <element name="fail_delay">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="faillog_auth">
+    <element name="faillog_auth">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="faillog_enab">
+    <element name="faillog_enab">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="gid_max">
+    <element name="gid_max">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="gid_min">
+    <element name="gid_min">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="group_encryption">
+    <element name="group_encryption">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="sec_ip_forward">
+    <element name="ip_forward">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ip_tcp_syncookies">
+    <element name="ip_tcp_syncookies">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ipv6_forward">
+    <element name="ipv6_forward">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="kdm_shutdown">
+    <element name="kdm_shutdown">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="lastlog_enab">
+    <element name="lastlog_enab">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="obscure_checks_enab">
+    <element name="obscure_checks_enab">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="pass_max_days">
+    <element name="pass_max_days">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="pass_max_len">
+    <element name="pass_max_len">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="pass_min_days">
+    <element name="pass_min_days">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="pass_min_len">
+    <element name="pass_min_len">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="pass_warn_age">
+    <element name="pass_warn_age">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="passwd_encryption">
+    <element name="passwd_encryption">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="passwd_remember_history">
+    <element name="passwd_remember_history">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="passwd_use_cracklib">
+    <element name="passwd_use_cracklib">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="passwd_use_pwquality">
+    <element name="passwd_use_pwquality">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="permission_security">
+    <element name="permission_security">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="run_updatedb_as">
+    <element name="run_updatedb_as">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel3_extra_services">
+    <element name="runlevel3_extra_services">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel3_mandatory_services">
+    <element name="runlevel3_mandatory_services">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel5_extra_services">
+    <element name="runlevel5_extra_services">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="runlevel5_mandatory_services">
+    <element name="runlevel5_mandatory_services">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="smtpd_listen_remote">
+    <element name="smtpd_listen_remote">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="security_policy">
+    <element name="security_policy">
+      <ref name="MAP"/>
+      <interleave>
+        <element name="policy">
+          <ref name="STRING"/>
+        </element>
+        <optional>
+          <element name="action">
+            <choice>
+              <value>none</value>
+              <value>scan</value>
+              <value>remediate</value>
+            </choice>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="syslog_on_no_error">
+    <element name="syslog_on_no_error">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="system_gid_max">
+    <element name="system_gid_max">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="system_gid_min">
+    <element name="system_gid_min">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="system_uid_max">
+    <element name="system_uid_max">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="system_uid_min">
+    <element name="system_uid_min">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="sys_gid_max">
+    <element name="sys_gid_max">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="sys_gid_min">
+    <element name="sys_gid_min">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="sys_uid_max">
+    <element name="sys_uid_max">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="sys_uid_min">
+    <element name="sys_uid_min">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="systohc">
+    <element name="systohc">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="uid_max">
+    <element name="uid_max">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="uid_min">
+    <element name="uid_min">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="useradd_cmd">
+    <element name="useradd_cmd">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="userdel_postcmd">
+    <element name="userdel_postcmd">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="userdel_precmd">
+    <element name="userdel_precmd">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="hibernate_system">
+    <element name="hibernate_system">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="kernel.sysrq">
+    <element name="kernel.sysrq">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="mandatory_services">
+    <element name="mandatory_services">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="net.ipv4.ip_forward">
+    <element name="net.ipv4.ip_forward">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="net.ipv4.tcp_syncookies">
+    <element name="net.ipv4.tcp_syncookies">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="net.ipv6.conf.all.forwarding">
+    <element name="net.ipv6.conf.all.forwarding">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="y2_security">
+    <choice>
+      <ref name="console_shutdown"/>
+      <ref name="cracklib_dict_path"/>
+      <ref name="cwd_in_root_path"/>
+      <ref name="cwd_in_user_path"/>
+      <ref name="disable_restart_on_update"/>
+      <ref name="disable_stop_on_removal"/>
+      <ref name="extra_services"/>
+      <ref name="selinux_mode"/>
+      <ref name="lsm_select"/>
+      <ref name="displaymanager_remote_access"/>
+      <ref name="displaymanager_root_login_remote"/>
+      <ref name="displaymanager_xserver_tcp_port_6000_open"/>
+      <ref name="enable_sysrq"/>
+      <ref name="passwd_encryption"/>
+      <ref name="fail_delay"/>
+      <ref name="faillog_enab"/>
+      <ref name="gid_max"/>
+      <ref name="gid_min"/>
+      <ref name="ip_tcp_syncookies"/>
+      <ref name="ipv6_forward"/>
+      <ref name="kdm_shutdown"/>
+      <ref name="lastlog_enab"/>
+      <ref name="obscure_checks_enab"/>
+      <ref name="pass_max_days"/>
+      <ref name="pass_max_len"/>
+      <ref name="pass_min_days"/>
+      <ref name="pass_min_len"/>
+      <ref name="pass_warn_age"/>
+      <ref name="passwd_use_cracklib"/>
+      <ref name="passwd_use_pwquality"/>
+      <ref name="permission_security"/>
+      <ref name="run_updatedb_as"/>
+      <ref name="runlevel3_extra_services"/>
+      <ref name="runlevel3_mandatory_services"/>
+      <ref name="runlevel5_extra_services"/>
+      <ref name="runlevel5_mandatory_services"/>
+      <ref name="security_policy"/>
+      <ref name="smtpd_listen_remote"/>
+      <ref name="syslog_on_no_error"/>
+      <ref name="system_gid_max"/>
+      <ref name="system_gid_min"/>
+      <ref name="system_uid_max"/>
+      <ref name="system_uid_min"/>
+      <ref name="sys_gid_max"/>
+      <ref name="sys_gid_min"/>
+      <ref name="sys_uid_max"/>
+      <ref name="sys_uid_min"/>
+      <ref name="systohc"/>
+      <ref name="uid_max"/>
+      <ref name="uid_min"/>
+      <ref name="useradd_cmd"/>
+      <ref name="userdel_postcmd"/>
+      <ref name="userdel_precmd"/>
+      <ref name="hibernate_system"/>
+      <ref name="kernel.sysrq"/>
+      <ref name="mandatory_services"/>
+      <ref name="net.ipv4.ip_forward"/>
+      <ref name="net.ipv4.tcp_syncookies"/>
+      <ref name="net.ipv6.conf.all.forwarding"/>
+      <ref name="group_encryption"/>
+      <ref name="sec_ip_forward"/>
+      <ref name="displaymanager_shutdown"/>
+      <ref name="passwd_remember_history"/>
+    </choice>
+  </define>
+  <define name="security">
+    <element name="security">
+      <ref name="MAP"/>
+      <zeroOrMore>
+        <ref name="y2_security"/>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

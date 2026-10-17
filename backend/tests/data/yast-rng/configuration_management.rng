@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="configuration_management">
+    <element name="configuration_management">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="master">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="auth_attempts">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="auth_time_out">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="enable_services">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="formulas_roots">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <ref name="formulas_root"/>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="states_roots">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <ref name="states_root"/>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="pillar_root">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="pillar_url">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="keys_url">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="states_url">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="modules_url">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <ref name="modules_url"/>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="enabled_states">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <ref name="enabled_state"/>
+            </zeroOrMore>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="formulas_root">
+    <element>
+      <choice>
+        <name>path</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="states_root">
+    <element>
+      <choice>
+        <name>path</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="modules_url">
+    <element>
+      <choice>
+        <name>url</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="enabled_state">
+    <element>
+      <choice>
+        <name>state</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="STRING"/>
+    </element>
+  </define>
+</grammar>

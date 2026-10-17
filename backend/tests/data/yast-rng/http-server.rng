@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="http-server">
+    <element name="http-server">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="firewall">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="service">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="version">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="http-listen"/>
+        </optional>
+        <optional>
+          <ref name="http-hosts"/>
+        </optional>
+        <optional>
+          <ref name="http-modules"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="http-listen">
+    <element name="Listen">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="listentry">
+          <ref name="MAP"/>
+          <interleave>
+            <element name="ADDRESS">
+              <ref name="STRING"/>
+            </element>
+            <element name="PORT">
+              <ref name="STRING"/>
+            </element>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="http-hosts">
+    <element name="hosts">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="hosts_entry">
+          <ref name="MAP"/>
+          <interleave>
+            <element name="KEY">
+              <ref name="STRING"/>
+            </element>
+            <element name="VALUE">
+              <ref name="LIST"/>
+              <zeroOrMore>
+                <element name="listentry">
+                  <ref name="MAP"/>
+                  <interleave>
+                    <optional>
+                      <element name="KEY">
+                        <ref name="STRING"/>
+                      </element>
+                    </optional>
+                    <optional>
+                      <element name="OVERHEAD">
+                        <ref name="STRING"/>
+                      </element>
+                    </optional>
+                    <optional>
+                      <element name="SECTIONNAME">
+                        <ref name="STRING"/>
+                      </element>
+                    </optional>
+                    <optional>
+                      <element name="SECTIONPARAM">
+                        <ref name="STRING"/>
+                      </element>
+                    </optional>
+                    <optional>
+                      <element name="VALUE">
+                        <ref name="STRING"/>
+                      </element>
+                    </optional>
+                  </interleave>
+                </element>
+              </zeroOrMore>
+            </element>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="http-modules">
+    <element name="modules">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="module_entry">
+          <interleave>
+            <element name="change">
+              <ref name="STRING"/>
+            </element>
+            <element name="default">
+              <ref name="STRING_ATTR"/>
+              <choice>
+                <value>1</value>
+                <value>0</value>
+              </choice>
+            </element>
+            <element name="name">
+              <ref name="STRING"/>
+            </element>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

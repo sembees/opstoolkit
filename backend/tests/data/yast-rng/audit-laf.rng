@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="audit-laf">
+    <element name="audit-laf">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="auditd">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="action_mail_acct">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="admin_space_left">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="admin_space_left_action">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="disk_error_action">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="disk_full_action">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="disp_qos">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="dispatcher">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="flush">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="freq">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="log_file">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="log_format">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="log_group">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="max_log_file">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="max_log_file_action">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="name_format">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="num_logs">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="priority_boost">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="space_left">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="space_left_action">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="tcp_client_max_idle">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="tcp_client_ports">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="tcp_listen_port">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="tcp_listen_queue">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="tcp_max_per_addr">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="rules">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

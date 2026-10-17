@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="sysconfig">
+    <element name="sysconfig">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element name="sysconfig_entry">
+          <ref name="MAP"/>
+          <interleave>
+            <element name="sysconfig_key">
+              <ref name="STRING"/>
+            </element>
+            <element name="sysconfig_path">
+              <ref name="STRING"/>
+            </element>
+            <element name="sysconfig_value">
+              <ref name="STRING"/>
+            </element>
+          </interleave>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+</grammar>

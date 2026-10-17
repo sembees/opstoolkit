@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="pxe">
+    <element name="pxe">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="pxe_localboot">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="pxelinux-config">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="tftp-server">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="pxelinux-dir">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

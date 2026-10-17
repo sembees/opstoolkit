@@ -1,0 +1,487 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="y2_firewall">
+    <choice>
+      <ref name="fw_allow_fw_traceroute"/>
+      <ref name="fw_autoprotect_services"/>
+      <ref name="FW_DEV_EXT"/>
+      <ref name="FW_ALLOW_FW_TRACEROUTE"/>
+      <ref name="FW_DEV_INT"/>
+      <ref name="FW_DEV_DMZ"/>
+      <ref name="fw_ipsec_trust"/>
+      <ref name="FW_IPSEC_TRUST"/>
+      <ref name="FW_LOG_ACCEPT_ALL"/>
+      <ref name="FW_LOG_ACCEPT_CRIT"/>
+      <ref name="FW_LOG_DROP_ALL"/>
+      <ref name="FW_LOG_DROP_CRIT"/>
+      <ref name="fw_masq_nets"/>
+      <ref name="FW_MASQUERADE"/>
+      <ref name="fw_protect_from_internal"/>
+      <ref name="FW_ROUTE"/>
+      <ref name="FW_SERVICES_EXT_TCP"/>
+      <ref name="FW_SERVICES_EXT_UDP"/>
+      <ref name="FW_SERVICES_EXT_IP"/>
+      <ref name="start_firewall"/>
+      <ref name="enable_firewall"/>
+      <ref name="FW_ALLOW_FW_BROADCAST_DMZ"/>
+      <ref name="FW_ALLOW_FW_BROADCAST_INT"/>
+      <ref name="FW_ALLOW_FW_BROADCAST_EXT"/>
+      <ref name="FW_IGNORE_FW_BROADCAST_DMZ"/>
+      <ref name="FW_IGNORE_FW_BROADCAST_EXT"/>
+      <ref name="FW_IGNORE_FW_BROADCAST_INT"/>
+      <ref name="FW_FORWARD_ALWAYS_INOUT_DEV"/>
+      <ref name="FW_FORWARD_MASQ"/>
+      <ref name="FW_IPSEC_TRUST"/>
+      <ref name="FW_PROTECT_FROM_INT"/>
+      <ref name="FW_SERVICES_ACCEPT_DMZ"/>
+      <ref name="FW_SERVICES_ACCEPT_EXT"/>
+      <ref name="FW_SERVICES_ACCEPT_INT"/>
+      <ref name="FW_SERVICES_ACCEPT_RELATED_DMZ"/>
+      <ref name="FW_SERVICES_ACCEPT_RELATED_EXT"/>
+      <ref name="FW_SERVICES_ACCEPT_RELATED_INT"/>
+      <ref name="FW_SERVICES_DMZ_IP"/>
+      <ref name="FW_SERVICES_DMZ_RPC"/>
+      <ref name="FW_SERVICES_DMZ_TCP"/>
+      <ref name="FW_SERVICES_DMZ_UDP"/>
+      <ref name="FW_SERVICES_EXT_RPC"/>
+      <ref name="FW_SERVICES_INT_IP"/>
+      <ref name="FW_SERVICES_INT_RPC"/>
+      <ref name="FW_SERVICES_INT_TCP"/>
+      <ref name="FW_SERVICES_INT_UDP"/>
+      <ref name="FW_CONFIGURATIONS_DMZ"/>
+      <ref name="FW_CONFIGURATIONS_EXT"/>
+      <ref name="FW_CONFIGURATIONS_INT"/>
+      <ref name="FW_LOAD_MODULES"/>
+      <ref name="FW_ALLOW_PING_FW"/>
+      <ref name="FW_STOP_KEEP_ROUTING_STATE"/>
+      <ref name="FW_BOOT_FULL_INIT"/>
+    </choice>
+  </define>
+  <define name="YESNO">
+    <ref name="STRING_ATTR"/>
+    <choice>
+      <value>yes</value>
+      <value>no</value>
+    </choice>
+  </define>
+  <define name="firewall">
+    <element name="firewall">
+      <ref name="MAP"/>
+      <choice>
+        <zeroOrMore>
+          <ref name="y2_firewall"/>
+        </zeroOrMore>
+        <zeroOrMore>
+          <ref name="y2_firewalld"/>
+        </zeroOrMore>
+      </choice>
+    </element>
+  </define>
+  <define name="FW_CONFIGURATIONS_DMZ">
+    <element name="FW_CONFIGURATIONS_DMZ">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_CONFIGURATIONS_EXT">
+    <element name="FW_CONFIGURATIONS_EXT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_CONFIGURATIONS_INT">
+    <element name="FW_CONFIGURATIONS_INT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_LOAD_MODULES">
+    <element name="FW_LOAD_MODULES">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="fw_allow_fw_traceroute">
+    <element name="fw_allow_fw_traceroute">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_ALLOW_FW_TRACEROUTE">
+    <element name="FW_ALLOW_FW_TRACEROUTE">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="fw_autoprotect_services">
+    <element name="fw_autoprotect_services">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_DEV_EXT">
+    <element name="FW_DEV_EXT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_DEV_INT">
+    <element name="FW_DEV_INT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_DEV_DMZ">
+    <element name="FW_DEV_DMZ">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_LOG_ACCEPT_ALL">
+    <element name="FW_LOG_ACCEPT_ALL">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="FW_LOG_ACCEPT_CRIT">
+    <element name="FW_LOG_ACCEPT_CRIT">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="FW_LOG_DROP_ALL">
+    <element name="FW_LOG_DROP_ALL">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="FW_LOG_DROP_CRIT">
+    <element name="FW_LOG_DROP_CRIT">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="fw_masq_nets">
+    <element name="fw_masq_nets">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_MASQUERADE">
+    <element name="FW_MASQUERADE">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="fw_protect_from_internal">
+    <element name="fw_protect_from_internal">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_ROUTE">
+    <element name="FW_ROUTE">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="fw_services_ext_tcp">
+    <element name="fw_services_ext_tcp">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="fw_ipsec_trust">
+    <element name="fw_ipsec_trust">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_EXT_UDP">
+    <element name="FW_SERVICES_EXT_UDP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_EXT_TCP">
+    <element name="FW_SERVICES_EXT_TCP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_EXT_IP">
+    <element name="FW_SERVICES_EXT_IP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="start_firewall">
+    <element name="start_firewall">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="enable_firewall">
+    <element name="enable_firewall">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="FW_ALLOW_FW_BROADCAST_DMZ">
+    <element name="FW_ALLOW_FW_BROADCAST_DMZ">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_ALLOW_FW_BROADCAST_EXT">
+    <element name="FW_ALLOW_FW_BROADCAST_EXT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_ALLOW_FW_BROADCAST_INT">
+    <element name="FW_ALLOW_FW_BROADCAST_INT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_IGNORE_FW_BROADCAST_DMZ">
+    <element name="FW_IGNORE_FW_BROADCAST_DMZ">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_IGNORE_FW_BROADCAST_EXT">
+    <element name="FW_IGNORE_FW_BROADCAST_EXT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_IGNORE_FW_BROADCAST_INT">
+    <element name="FW_IGNORE_FW_BROADCAST_INT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_FORWARD_ALWAYS_INOUT_DEV">
+    <element name="FW_FORWARD_ALWAYS_INOUT_DEV">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_FORWARD_MASQ">
+    <element name="FW_FORWARD_MASQ">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_IPSEC_TRUST">
+    <element name="FW_IPSEC_TRUST">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_PROTECT_FROM_INT">
+    <element name="FW_PROTECT_FROM_INT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_ACCEPT_DMZ">
+    <element name="FW_SERVICES_ACCEPT_DMZ">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_ACCEPT_EXT">
+    <element name="FW_SERVICES_ACCEPT_EXT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_ACCEPT_INT">
+    <element name="FW_SERVICES_ACCEPT_INT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_ACCEPT_RELATED_DMZ">
+    <element name="FW_SERVICES_ACCEPT_RELATED_DMZ">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_ACCEPT_RELATED_EXT">
+    <element name="FW_SERVICES_ACCEPT_RELATED_EXT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_ACCEPT_RELATED_INT">
+    <element name="FW_SERVICES_ACCEPT_RELATED_INT">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_DMZ_IP">
+    <element name="FW_SERVICES_DMZ_IP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_DMZ_RPC">
+    <element name="FW_SERVICES_DMZ_RPC">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_DMZ_TCP">
+    <element name="FW_SERVICES_DMZ_TCP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_DMZ_UDP">
+    <element name="FW_SERVICES_DMZ_UDP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_EXT_RPC">
+    <element name="FW_SERVICES_EXT_RPC">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_INT_IP">
+    <element name="FW_SERVICES_INT_IP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_INT_RPC">
+    <element name="FW_SERVICES_INT_RPC">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_INT_TCP">
+    <element name="FW_SERVICES_INT_TCP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_SERVICES_INT_UDP">
+    <element name="FW_SERVICES_INT_UDP">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="FW_ALLOW_PING_FW">
+    <element name="FW_ALLOW_PING_FW">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="FW_STOP_KEEP_ROUTING_STATE">
+    <element name="FW_STOP_KEEP_ROUTING_STATE">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="FW_BOOT_FULL_INIT">
+    <element name="FW_BOOT_FULL_INIT">
+      <ref name="YESNO"/>
+    </element>
+  </define>
+  <define name="y2_firewalld">
+    <choice>
+      <ref name="zones"/>
+      <ref name="enable_firewall"/>
+      <ref name="start_firewall"/>
+      <ref name="default_zone"/>
+      <ref name="log_denied_packets"/>
+    </choice>
+  </define>
+  <define name="zones">
+    <element name="zones">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element>
+          <choice>
+            <name>zone</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="MAP"/>
+          <interleave>
+            <ref name="zone_name"/>
+            <optional>
+              <ref name="zone_short"/>
+            </optional>
+            <optional>
+              <ref name="zone_description"/>
+            </optional>
+            <optional>
+              <ref name="zone_target"/>
+            </optional>
+            <optional>
+              <ref name="fwd_interfaces"/>
+            </optional>
+            <optional>
+              <ref name="fwd_ports"/>
+            </optional>
+            <optional>
+              <ref name="fwd_protocols"/>
+            </optional>
+            <optional>
+              <ref name="fwd_services"/>
+            </optional>
+            <optional>
+              <ref name="masquerade"/>
+            </optional>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="fwd_services">
+    <element name="services">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element>
+          <choice>
+            <name>service</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="fwd_interfaces">
+    <element name="interfaces">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element>
+          <choice>
+            <name>interface</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="fwd_ports">
+    <element name="ports">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element>
+          <choice>
+            <name>port</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="fwd_protocols">
+    <element name="protocols">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element>
+          <choice>
+            <name>protocol</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="zone_name">
+    <element name="name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="zone_short">
+    <element name="short">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="zone_description">
+    <element name="description">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="zone_target">
+    <element name="target">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="default_zone">
+    <element name="default_zone">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="masquerade">
+    <element name="masquerade">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="log_denied_packets">
+    <element name="log_denied_packets">
+      <ref name="STRING"/>
+    </element>
+  </define>
+</grammar>

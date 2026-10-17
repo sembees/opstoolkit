@@ -1,0 +1,322 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- <!ELEMENT group (gid, group_password, groupname, userlist)> -->
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="login_settings">
+    <element name="login_settings">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="autologin_user">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="password_less_login">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="groups">
+    <element name="groups">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="gr_group"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!--
+    TODO: "group_password" is no longer supported by YaST. We should remove it
+    along with "encrypted" from the schema at some point.
+  -->
+  <define name="gr_group">
+    <element name="group">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="encrypted"/>
+        </optional>
+        <optional>
+          <element name="group_password">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="groupname">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="userlist">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="gid">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <!--
+    TODO: groups, no_groups and skel are not longer read by AutoYaST (see
+    https://github.com/yast/yast-users/pull/306) or documented (see
+    https://github.com/SUSE/doc-sle/pull/901). We should remove them from the
+    schema at some point. We cannot do it yet because the attributes are still
+    exported (export uses old code not yet converted to Y2Users), but that
+    limitation should disappear at some point.
+  -->
+  <define name="user_defaults">
+    <element name="user_defaults">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="expire"/>
+        </optional>
+        <optional>
+          <ref name="ud_group"/>
+        </optional>
+        <optional>
+          <ref name="ud_groups"/>
+        </optional>
+        <optional>
+          <ref name="home"/>
+        </optional>
+        <optional>
+          <ref name="inactive"/>
+        </optional>
+        <optional>
+          <ref name="no_groups"/>
+        </optional>
+        <optional>
+          <ref name="shell"/>
+        </optional>
+        <optional>
+          <ref name="skel"/>
+        </optional>
+        <optional>
+          <ref name="umask"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <!-- by default, AutoYaST exports list entries as 'listentry' -->
+  <define name="authorized_key">
+    <choice>
+      <element name="authorized_key">
+        <ref name="STRING"/>
+      </element>
+      <element name="listentry">
+        <ref name="STRING"/>
+      </element>
+    </choice>
+  </define>
+  <define name="authorized_keys">
+    <element name="authorized_keys">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="authorized_key"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="expire">
+    <element name="expire">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ud_group">
+    <element name="group">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ud_groups">
+    <element name="groups">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="inactive">
+    <element name="inactive">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="no_groups">
+    <element name="no_groups">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="shell">
+    <element name="shell">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="skel">
+    <element name="skel">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="umask">
+    <element name="umask">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="user">
+    <element name="user">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="encrypted"/>
+        </optional>
+        <optional>
+          <ref name="fullname"/>
+        </optional>
+        <optional>
+          <ref name="surname"/>
+        </optional>
+        <optional>
+          <ref name="u_forename"/>
+        </optional>
+        <optional>
+          <ref name="u_gid"/>
+        </optional>
+        <optional>
+          <ref name="home"/>
+        </optional>
+        <optional>
+          <ref name="home_btrfs_subvolume"/>
+        </optional>
+        <optional>
+          <ref name="shell"/>
+        </optional>
+        <optional>
+          <ref name="uid"/>
+        </optional>
+        <optional>
+          <ref name="user_password"/>
+        </optional>
+        <optional>
+          <ref name="username"/>
+        </optional>
+        <optional>
+          <ref name="u_group"/>
+        </optional>
+        <optional>
+          <ref name="u_groups"/>
+        </optional>
+        <optional>
+          <ref name="password_settings"/>
+        </optional>
+        <optional>
+          <ref name="authorized_keys"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="encrypted">
+    <element name="encrypted">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="fullname">
+    <element name="fullname">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="u_forename">
+    <element name="forename">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="surname">
+    <element name="surname">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="u_gid">
+    <element name="gid">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="home">
+    <element name="home">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="home_btrfs_subvolume">
+    <element name="home_btrfs_subvolume">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="user_password">
+    <element name="user_password">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="username">
+    <element name="username">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="uid">
+    <element name="uid">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="u_group">
+    <element name="group">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="u_groups">
+    <element name="groups">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="password_settings">
+    <element name="password_settings">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="expire">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="flag">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="inact">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="max">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="min">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="warn">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="users">
+    <element name="users">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="user"/>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Declaration of classes for the UI
+  
+  Do not confuse with classes-use.rn[cg]
+  which describes the use of classes in a profile
+-->
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="autoinstall">
+    <element name="autoinstall">
+      <ref name="MAP"/>
+      <ref name="classes"/>
+    </element>
+  </define>
+  <define name="classes">
+    <element name="classes">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="class"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="class">
+    <element name="class">
+      <interleave>
+        <ref name="description"/>
+        <ref name="name"/>
+        <ref name="order"/>
+      </interleave>
+    </element>
+  </define>
+  <define name="description">
+    <element name="description">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="name">
+    <element name="name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="order">
+    <element name="order">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <start>
+    <ref name="autoinstall"/>
+  </start>
+</grammar>

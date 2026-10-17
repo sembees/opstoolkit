@@ -1,0 +1,656 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="partitioning">
+    <element name="partitioning">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="drive"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="drive">
+    <element name="drive">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="device">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="initialize">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="is_lvm_vg">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="lvm2">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="keep_unknown_lv">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="pesize">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="SYMBOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="use">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="imsmdriver">
+            <ref name="SYMBOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="disklabel">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="enable_snapshots">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="skip_list"/>
+        </optional>
+        <optional>
+          <ref name="partitions"/>
+        </optional>
+        <optional>
+          <ref name="raid_options"/>
+        </optional>
+        <optional>
+          <ref name="bcache_options"/>
+        </optional>
+        <optional>
+          <ref name="btrfs_options"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="skip_list">
+    <element name="skip_list">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="skip_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="skip_entry">
+    <element name="listentry">
+      <ref name="MAP"/>
+      <interleave>
+        <element name="skip_key">
+          <ref name="STRING"/>
+        </element>
+        <element name="skip_value">
+          <ref name="STRING"/>
+        </element>
+        <optional>
+          <choice>
+            <element name="skip_if_less_than">
+              <ref name="BOOLEAN"/>
+            </element>
+            <element name="skip_if_more_than">
+              <ref name="BOOLEAN"/>
+            </element>
+          </choice>
+        </optional>
+        <optional>
+          <element name="skip_if_equal">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="prefer_remove">
+    <element name="prefer_remove">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="partitions">
+    <element name="partitions">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="partition"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="y2_partition">
+    <choice>
+      <ref name="part_create"/>
+      <ref name="part_crypt"/>
+      <ref name="part_crypt_fs"/>
+      <ref name="part_crypt_method"/>
+      <ref name="part_crypt_key"/>
+      <ref name="part_crypt_pbkdf"/>
+      <ref name="part_crypt_label"/>
+      <ref name="part_crypt_cipher"/>
+      <ref name="part_crypt_key_size"/>
+      <ref name="part_filesystem"/>
+      <ref name="part_format"/>
+      <ref name="part_fs_options"/>
+      <ref name="part_fstopt"/>
+      <ref name="part_label"/>
+      <ref name="part_uuid"/>
+      <ref name="part_loop_fs"/>
+      <ref name="part_lv_name"/>
+      <ref name="part_lvm_group"/>
+      <ref name="part_mkfs_options"/>
+      <ref name="part_mount"/>
+      <ref name="part_mountby"/>
+      <ref name="part_filesystem_id"/>
+      <ref name="part_partition_id"/>
+      <ref name="part_partition_nr"/>
+      <ref name="part_partition_type"/>
+      <ref name="part_resize"/>
+      <ref name="part_raid_type"/>
+      <ref name="part_region"/>
+      <ref name="part_size"/>
+      <ref name="part_stripes"/>
+      <ref name="part_stripesize"/>
+      <ref name="part_pool"/>
+      <ref name="part_used_pool"/>
+      <ref name="part_subvolumes_prefix"/>
+      <ref name="device_order"/>
+      <ref name="raid_name"/>
+      <ref name="raid_options"/>
+      <ref name="subvolumes"/>
+      <ref name="create_subvolumes"/>
+      <ref name="bcache_backing_for"/>
+      <ref name="bcache_caching_for"/>
+      <ref name="btrfs_name"/>
+      <ref name="quotas"/>
+    </choice>
+  </define>
+  <define name="partition">
+    <element name="partition">
+      <ref name="MAP"/>
+      <zeroOrMore>
+        <ref name="y2_partition"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="part_create">
+    <element name="create">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="part_crypt">
+    <element name="crypt">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_crypt_fs">
+    <element name="crypt_fs">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="part_crypt_method">
+    <element name="crypt_method">
+      <ref name="SYMBOL"/>
+    </element>
+  </define>
+  <define name="part_crypt_key">
+    <element name="crypt_key">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_crypt_pbkdf">
+    <element name="crypt_pbkdf">
+      <ref name="SYMBOL"/>
+    </element>
+  </define>
+  <define name="part_crypt_label">
+    <element name="crypt_label">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_crypt_cipher">
+    <element name="crypt_cipher">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_crypt_key_size">
+    <element name="crypt_key_size">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="part_filesystem">
+    <element name="filesystem">
+      <ref name="SYMBOL"/>
+    </element>
+  </define>
+  <define name="part_format">
+    <element name="format">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="part_subvolumes_prefix">
+    <element name="subvolumes_prefix">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_fs_options">
+    <element name="fs_options">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="opt_blocksize"/>
+        </optional>
+        <optional>
+          <ref name="opt_block_size"/>
+        </optional>
+        <optional>
+          <ref name="opt_bytes_per_inode"/>
+        </optional>
+        <optional>
+          <ref name="opt_format"/>
+        </optional>
+        <optional>
+          <ref name="opt_hash"/>
+        </optional>
+        <optional>
+          <ref name="opt_inode_align"/>
+        </optional>
+        <optional>
+          <ref name="opt_max_inode_space"/>
+        </optional>
+        <optional>
+          <ref name="opt_raid"/>
+        </optional>
+        <optional>
+          <ref name="opt_reserved_blocks"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="fs_option">
+    <ref name="MAP"/>
+    <group>
+      <ref name="option_str"/>
+      <ref name="option_value"/>
+    </group>
+  </define>
+  <define name="blank_option">
+    <ref name="MAP"/>
+    <group>
+      <ref name="option_blank"/>
+      <ref name="option_str"/>
+      <ref name="option_value"/>
+    </group>
+  </define>
+  <define name="opt_block_size">
+    <element name="opt_block_size">
+      <ref name="fs_option"/>
+    </element>
+  </define>
+  <define name="opt_blocksize">
+    <element name="opt_blocksize">
+      <ref name="fs_option"/>
+    </element>
+  </define>
+  <define name="opt_bytes_per_inode">
+    <element name="opt_bytes_per_inode">
+      <ref name="fs_option"/>
+    </element>
+  </define>
+  <define name="opt_format">
+    <element name="opt_format">
+      <ref name="blank_option"/>
+    </element>
+  </define>
+  <define name="opt_hash">
+    <element name="opt_hash">
+      <ref name="blank_option"/>
+    </element>
+  </define>
+  <define name="opt_inode_align">
+    <element name="opt_inode_align">
+      <ref name="fs_option"/>
+    </element>
+  </define>
+  <define name="opt_max_inode_space">
+    <element name="opt_max_inode_space">
+      <ref name="fs_option"/>
+    </element>
+  </define>
+  <define name="opt_raid">
+    <element name="opt_raid">
+      <ref name="fs_option"/>
+    </element>
+  </define>
+  <define name="opt_reserved_blocks">
+    <element name="opt_reserved_blocks">
+      <ref name="fs_option"/>
+    </element>
+  </define>
+  <define name="raid_name">
+    <element name="raid_name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="raid_options">
+    <element name="raid_options">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="persistent_superblock"/>
+        </optional>
+        <optional>
+          <ref name="chunk_size"/>
+        </optional>
+        <optional>
+          <ref name="parity_algorithm"/>
+        </optional>
+        <optional>
+          <ref name="raid_type"/>
+        </optional>
+        <optional>
+          <ref name="device_order"/>
+        </optional>
+        <optional>
+          <ref name="raid_name"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="persistent_superblock">
+    <element name="persistent_superblock">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="raid_type">
+    <element name="raid_type">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="chunk_size">
+    <element name="chunk_size">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="parity_algorithm">
+    <element name="parity_algorithm">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="device_order">
+    <element name="device_order">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="device">
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="cache_mode">
+    <element name="cache_mode">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>writethrough</value>
+        <value>writeback</value>
+        <value>writearound</value>
+        <value>none</value>
+      </choice>
+    </element>
+  </define>
+  <define name="bcache_options">
+    <element name="bcache_options">
+      <ref name="MAP"/>
+      <optional>
+        <ref name="cache_mode"/>
+      </optional>
+    </element>
+  </define>
+  <define name="btrfs_name">
+    <element name="btrfs_name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!-- jsc#SLE-7742: add support for Btrfs subvolumes quotas -->
+  <define name="quotas">
+    <element name="quotas">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="btrfs_options">
+    <element name="btrfs_options">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="data_raid_level"/>
+        </optional>
+        <optional>
+          <ref name="metadata_raid_level"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="data_raid_level">
+    <element name="data_raid_level">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="metadata_raid_level">
+    <element name="metadata_raid_level">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="subvolumes">
+    <element name="subvolumes">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="subvolume"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!-- keep backward compatibility with listentry when subvolumes use generic list items -->
+  <define name="subvolume">
+    <choice>
+      <element>
+        <choice>
+          <name>subvolume</name>
+          <name>listentry</name>
+        </choice>
+        <ref name="STRING"/>
+      </element>
+      <ref name="subvolume_full"/>
+    </choice>
+  </define>
+  <define name="subvolume_full">
+    <element>
+      <choice>
+        <name>subvolume</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="MAP"/>
+      <interleave>
+        <element name="path">
+          <ref name="STRING"/>
+        </element>
+        <optional>
+          <!-- FATE#320342: add support to enable copy-on-write for Btrfs subvolumes -->
+          <element name="copy_on_write">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- jsc#SLE-7742: add support for Btrfs subvolumes quotas -->
+          <element name="referenced_limit">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="create_subvolumes">
+    <element name="create_subvolumes">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="part_fstopt">
+    <element name="fstopt">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_label">
+    <element name="label">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_uuid">
+    <element name="uuid">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_loop_fs">
+    <element name="loop_fs">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="part_mkfs_options">
+    <element name="mkfs_options">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_mount">
+    <element name="mount">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_mountby">
+    <element name="mountby">
+      <ref name="SYMBOL"/>
+    </element>
+  </define>
+  <define name="option_blank">
+    <element name="option_blank">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="option_str">
+    <element name="option_str">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="option_value">
+    <element name="option_value">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_raid_type">
+    <element name="raid_type">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_partition_nr">
+    <element name="partition_nr">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="part_partition_type">
+    <element name="partition_type">
+      <ref name="STRING_ATTR"/>
+      <value>primary</value>
+    </element>
+  </define>
+  <define name="part_partition_id">
+    <element name="partition_id">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="part_filesystem_id">
+    <element name="filesystem_id">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="part_stripes">
+    <element name="stripes">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="part_stripesize">
+    <element name="stripesize">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="part_pool">
+    <element name="pool">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="part_used_pool">
+    <element name="used_pool">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_region">
+    <element name="region">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="region_entry"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="region_entry">
+    <element name="region_entry">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="part_size">
+    <element name="size">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_lv_name">
+    <element name="lv_name">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_lvm_group">
+    <element name="lvm_group">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="part_resize">
+    <element name="resize">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="bcache_backing_for">
+    <element name="bcache_backing_for">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="bcache_caching_for">
+    <element name="bcache_caching_for">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="listentry">
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

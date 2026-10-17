@@ -1,0 +1,521 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="STRING_BOOL">
+    <ref name="STRING_ATTR"/>
+    <choice>
+      <value>true</value>
+      <value>false</value>
+    </choice>
+  </define>
+  <define name="bootloader">
+    <element name="bootloader">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="activate"/>
+        </optional>
+        <optional>
+          <ref name="bl_global"/>
+        </optional>
+        <optional>
+          <ref name="initrd_modules"/>
+        </optional>
+        <optional>
+          <ref name="loader_device"/>
+        </optional>
+        <optional>
+          <ref name="loader_type"/>
+        </optional>
+        <optional>
+          <ref name="bl_location"/>
+        </optional>
+        <optional>
+          <ref name="repl_mbr"/>
+        </optional>
+        <optional>
+          <ref name="device_map"/>
+        </optional>
+        <optional>
+          <ref name="sections"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="device_map">
+    <element name="device_map">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="device_map_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="device_map_entry">
+    <element name="device_map_entry">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="bl_firmware"/>
+        </optional>
+        <optional>
+          <ref name="bl_linux"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="bl_firmware">
+    <element name="firmware">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="bl_linux">
+    <element name="linux">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="activate">
+    <element name="activate">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="repl_mbr">
+    <element name="repl_mbr">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="initrd_modules">
+    <element name="initrd_modules">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="initrd_module"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="initrd_module">
+    <element name="initrd_module">
+      <ref name="MAP"/>
+      <group>
+        <ref name="bl_module"/>
+        <optional>
+          <ref name="module_args"/>
+        </optional>
+      </group>
+    </element>
+  </define>
+  <define name="module_args">
+    <element name="module_args">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="bl_module">
+    <element name="module">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="loader_device">
+    <element name="loader_device">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="loader_type">
+    <element name="loader_type">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="bl_location">
+    <element name="location">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="bl_global">
+    <element name="global">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="append">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="append_failsafe">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="cryptodisk">
+            <ref name="INTEGER"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="distributor">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="gfxbackground">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="gfxmode">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="gfxtheme">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- really "true"|"false", without config:type=boolean -->
+          <element name="failsafe_disabled">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="hiddenmenu">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="os_prober">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="secure_boot">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="update_nvram">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="xen_append">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="xen_kernel_append">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="boot_custom">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="generic_mbr">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="trusted_grub">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="serial">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="terminal">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="lines_cache_id"/>
+        </optional>
+        <optional>
+          <ref name="bl_timeout"/>
+        </optional>
+        <optional>
+          <ref name="gfxmenu"/>
+        </optional>
+        <optional>
+          <element name="default">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="bl_activate"/>
+        </optional>
+        <optional>
+          <ref name="boot_root"/>
+        </optional>
+        <optional>
+          <ref name="boot_boot"/>
+        </optional>
+        <optional>
+          <ref name="boot_extended"/>
+        </optional>
+        <optional>
+          <ref name="boot_mbr"/>
+        </optional>
+        <optional>
+          <ref name="stage1_dev"/>
+        </optional>
+        <optional>
+          <ref name="cpu_mitigations"/>
+        </optional>
+        <optional>
+          <ref name="password"/>
+        </optional>
+        <optional>
+          <element name="vgamode">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="lines_cache_id">
+    <element name="lines_cache_id">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="stage1_dev">
+    <element name="stage1_dev">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="bl_timeout">
+    <element name="timeout">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+  <define name="gfxmenu">
+    <element name="gfxmenu">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!-- really "true"|"false", without config:type=boolean -->
+  <define name="bl_activate">
+    <element name="activate">
+      <ref name="STRING_BOOL"/>
+    </element>
+  </define>
+  <define name="boot_root">
+    <element name="boot_root">
+      <ref name="STRING_BOOL"/>
+    </element>
+  </define>
+  <define name="boot_boot">
+    <element name="boot_boot">
+      <ref name="STRING_BOOL"/>
+    </element>
+  </define>
+  <define name="boot_extended">
+    <element name="boot_extended">
+      <ref name="STRING_BOOL"/>
+    </element>
+  </define>
+  <define name="boot_mbr">
+    <element name="boot_mbr">
+      <ref name="STRING_BOOL"/>
+    </element>
+  </define>
+  <define name="cpu_mitigations">
+    <element name="cpu_mitigations">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>nosmt</value>
+        <value>auto</value>
+        <value>off</value>
+        <value>manual</value>
+      </choice>
+    </element>
+  </define>
+  <define name="password">
+    <element name="password">
+      <ref name="MAP"/>
+      <interleave>
+        <!-- mandatory -->
+        <element name="value">
+          <ref name="STRING"/>
+        </element>
+        <optional>
+          <!-- if value is already encrypted or not. Default is false -->
+          <element name="encrypted">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <!-- if password protection is unrestricted. Default is true -->
+          <element name="unrestricted">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <!-- Backward compatibility only. Ignored for new profiles as sections are generated by grub2 -->
+  <define name="sections">
+    <element name="sections">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="section"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="section">
+    <element name="section">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="menuentry">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="usage">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="append">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="initial">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="console">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="initrd">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="kernel">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="name">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="original_name">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="root">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="vga">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="chainloader">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="lines_cache_id">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="sectors">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="blockoffset">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="vgamode">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="measures"/>
+        </optional>
+        <optional>
+          <element name="xen">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="xen_append">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="noverifyroot">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="makeactive">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="remap">
+            <ref name="STRING_BOOL"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="configfile">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="image">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="kernel_parameters">
+    <element name="kernel_parameters">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="measure">
+    <element name="measure">
+      <ref name="MAP"/>
+      <interleave>
+        <element name="file">
+          <ref name="STRING"/>
+        </element>
+        <element name="pcr">
+          <ref name="STRING"/>
+        </element>
+      </interleave>
+    </element>
+  </define>
+  <define name="measures">
+    <element name="measures">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <ref name="measure"/>
+      </oneOrMore>
+    </element>
+  </define>
+</grammar>

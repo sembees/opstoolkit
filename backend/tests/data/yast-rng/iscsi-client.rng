@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="iscsi-client">
+    <element name="iscsi-client">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="initiatorname">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="targets">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <element name="listentry">
+                <ref name="MAP"/>
+                <interleave>
+                  <optional>
+                    <element name="authmethod">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="password">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="password_in">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="portal">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="startup">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="target">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="username">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="username_in">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                  <optional>
+                    <element name="iface">
+                      <ref name="STRING"/>
+                    </element>
+                  </optional>
+                </interleave>
+              </element>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="version">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

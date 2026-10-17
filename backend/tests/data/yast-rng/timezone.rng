@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="timezone">
+    <element name="timezone">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="hwclock"/>
+        </optional>
+        <optional>
+          <ref name="timezone_val"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="hwclock">
+    <element name="hwclock">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>localtime</value>
+        <value>UTC</value>
+      </choice>
+    </element>
+  </define>
+  <define name="timezone_val">
+    <element name="timezone">
+      <ref name="STRING"/>
+    </element>
+  </define>
+</grammar>

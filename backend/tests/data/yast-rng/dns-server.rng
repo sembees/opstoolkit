@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="ONE_ZERO">
+    <ref name="STRING_ATTR"/>
+    <choice>
+      <value>1</value>
+      <value>0</value>
+    </choice>
+  </define>
+  <define name="dns-server">
+    <element name="dns-server">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="chroot">
+            <ref name="ONE_ZERO"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="start_service">
+            <ref name="ONE_ZERO"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="use_ldap">
+            <ref name="ONE_ZERO"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="dns-allowed_interfaces"/>
+        </optional>
+        <optional>
+          <ref name="dns-server_logging"/>
+        </optional>
+        <optional>
+          <ref name="dns-server_options"/>
+        </optional>
+        <optional>
+          <ref name="dns-server_zones"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="dns-allowed_interfaces">
+    <element name="allowed_interfaces">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="dns-allowed_interface"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="dns-allowed_interface">
+    <element name="allowed_interface">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="dns-server_logging">
+    <element name="logging">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="dns-server_logging_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="dns-server_logging_entry">
+    <element name="listentry">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="key">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="value">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="dns-server_options">
+    <element name="options">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="dns-server_option_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="dns-server_option_entry">
+    <element name="option">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="key">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="value">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="dns-server_zones">
+    <element name="zones">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="dns-server_zones_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="dns-server_zones_entry">
+    <element>
+      <choice>
+        <name>zone</name>
+        <name>listentry</name>
+      </choice>
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="is_new">
+            <ref name="ONE_ZERO"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="modified">
+            <ref name="ONE_ZERO"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="soa_modified">
+            <ref name="ONE_ZERO"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="ttl">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="zone">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="file">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="this_zone_had_NS_record_at_start">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="connected_with">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="zone_options"/>
+        </optional>
+        <optional>
+          <ref name="zone_records"/>
+        </optional>
+        <optional>
+          <ref name="zone_soa"/>
+        </optional>
+        <optional>
+          <ref name="zone_update_actions"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="zone_options">
+    <element name="options">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="zone_option_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="zone_option_entry">
+    <element name="option">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="key">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="value">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="zone_records">
+    <element name="records">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="zone_records_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="zone_records_entry">
+    <element name="listentry">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="key">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="value">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="zone_soa">
+    <element name="soa">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="expiry">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="mail">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="minimum">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="refresh">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="retry">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="serial">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="server">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="zone">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="zone_update_actions">
+    <element name="update_actions">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="update_actions_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="update_actions_entry">
+    <element name="listentry">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="key">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="value">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="operation">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

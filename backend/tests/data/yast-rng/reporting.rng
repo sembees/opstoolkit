@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- <!ELEMENT default (#PCDATA)> -->
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="report">
+    <element name="report">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="errors"/>
+        </optional>
+        <optional>
+          <ref name="messages"/>
+        </optional>
+        <optional>
+          <ref name="warnings"/>
+        </optional>
+        <optional>
+          <ref name="yesno_messages"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="errors">
+    <element name="errors">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="log"/>
+        </optional>
+        <optional>
+          <ref name="show"/>
+        </optional>
+        <optional>
+          <ref name="timeout"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="yesno_messages">
+    <element name="yesno_messages">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="log"/>
+        </optional>
+        <optional>
+          <ref name="show"/>
+        </optional>
+        <optional>
+          <ref name="timeout"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="messages">
+    <element name="messages">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="log"/>
+        </optional>
+        <optional>
+          <ref name="show"/>
+        </optional>
+        <optional>
+          <ref name="timeout"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="warnings">
+    <element name="warnings">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="log"/>
+        </optional>
+        <optional>
+          <ref name="show"/>
+        </optional>
+        <optional>
+          <ref name="timeout"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <!-- <!ELEMENT location (#PCDATA)> -->
+  <define name="log">
+    <element name="log">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="show">
+    <element name="show">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="timeout">
+    <element name="timeout">
+      <ref name="INTEGER"/>
+    </element>
+  </define>
+</grammar>

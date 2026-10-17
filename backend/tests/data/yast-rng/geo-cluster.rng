@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0" datatypeLibrary="http://www.w3.org/2001/XMLSchema-datatypes">
+  <include href="common.rng"/>
+  <define name="int_noempty">
+    <ref name="STRING_ATTR"/>
+    <choice>
+      <data type="integer"/>
+      <empty/>
+    </choice>
+  </define>
+  <define name="simple_listentry">
+    <element name="listentry">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="geo-cluster">
+    <element name="geo-cluster">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="booth_config"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="booth_config">
+    <element name="listentry">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="filename">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="authfile">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="port">
+            <ref name="int_noempty"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="transport">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="arbitrator">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <ref name="simple_listentry"/>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="site">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <ref name="simple_listentry"/>
+            </zeroOrMore>
+          </element>
+        </optional>
+        <optional>
+          <element name="ticket">
+            <ref name="LIST"/>
+            <zeroOrMore>
+              <ref name="ticket_listentry"/>
+            </zeroOrMore>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="ticket_listentry">
+    <element name="listentry">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="acquire-after">
+            <ref name="int_noempty"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="before-acquire-handler">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="expire">
+            <ref name="int_noempty"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="retries">
+            <ref name="int_noempty"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="ticketname">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="timeout">
+            <ref name="int_noempty"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="weights">
+            <ref name="int_noempty"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="mode">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

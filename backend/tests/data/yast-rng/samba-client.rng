@@ -1,0 +1,347 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="samba-client">
+    <element name="samba-client">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="active_directory">
+            <ref name="MAP"/>
+            <optional>
+              <element name="kdc">
+                <ref name="STRING"/>
+              </element>
+            </optional>
+          </element>
+        </optional>
+        <optional>
+          <element name="global">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="cups_options">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="include">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="logon_drive">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="logon_home">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="logon_path">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="map_to_guest">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="passdb_backend">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="printcap_cache_time">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="printcap_name">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="printing">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="cached_login">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="idmap_gid">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="idmap_uid">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="security">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="template_shell">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="usershare_allow_guests">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="usershare_max_shares">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="winbind_offline_logon">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="workgroup">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="groups">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="comment">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="inherit_acls">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="path">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="read_only">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="homes">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="browseable">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="comment">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="inherit_acls">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="read_only">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="valid_users">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="print_dollarsign_">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="comment">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="create_mask">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="directory_mask">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="force_group">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="path">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="write_list">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="printers">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="browseable">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="comment">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="create_mask">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="path">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="printable">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="profiles">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="comment">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="create_mask">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="directory_mask">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="path">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="read_only">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="store_dos_attributes">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="users">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="comment">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="inherit_acls">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="path">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="read_only">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="veto_files">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="join">
+            <ref name="MAP"/>
+            <interleave>
+              <optional>
+                <element name="password">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+              <optional>
+                <element name="user">
+                  <ref name="STRING"/>
+                </element>
+              </optional>
+            </interleave>
+          </element>
+        </optional>
+        <optional>
+          <element name="mkhomedir">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="winbind">
+            <ref name="BOOLEAN"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

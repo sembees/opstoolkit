@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="auth-client">
+    <element name="auth-client">
+      <ref name="MAP"/>
+      <optional>
+        <element name="conf_json">
+          <ref name="STRING"/>
+        </element>
+      </optional>
+    </element>
+  </define>
+</grammar>

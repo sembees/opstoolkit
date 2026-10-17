@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="ntp-client">
+    <element name="ntp-client">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="ntp_policy"/>
+        </optional>
+        <optional>
+          <ref name="ntp_sync"/>
+        </optional>
+        <optional>
+          <ref name="ntp_servers"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="ntp_policy">
+    <element name="ntp_policy">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <!--
+    Possible values are "systemd", "manual",
+    or a positive integer which means the interval in seconds between synchronizations
+  -->
+  <define name="ntp_sync">
+    <element name="ntp_sync">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="ntp_servers">
+    <element name="ntp_servers">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element>
+          <choice>
+            <name>ntp_server</name>
+            <name>listentry</name>
+          </choice>
+          <ref name="MAP"/>
+          <interleave>
+            <element name="address">
+              <ref name="STRING"/>
+            </element>
+            <optional>
+              <element name="iburst">
+                <ref name="BOOLEAN"/>
+              </element>
+            </optional>
+            <optional>
+              <element name="offline">
+                <ref name="BOOLEAN"/>
+              </element>
+            </optional>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="dhcp-server">
+    <element name="dhcp-server">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="allowed_interfaces"/>
+        </optional>
+        <optional>
+          <element name="chroot">
+            <ref name="STRING_ATTR"/>
+            <choice>
+              <value>1</value>
+              <value>0</value>
+            </choice>
+          </element>
+        </optional>
+        <optional>
+          <element name="start_service">
+            <ref name="STRING_ATTR"/>
+            <choice>
+              <value>1</value>
+              <value>0</value>
+            </choice>
+          </element>
+        </optional>
+        <optional>
+          <element name="use_ldap">
+            <ref name="STRING_ATTR"/>
+            <choice>
+              <value>1</value>
+              <value>0</value>
+            </choice>
+          </element>
+        </optional>
+        <element name="other_options">
+          <ref name="STRING"/>
+        </element>
+        <optional>
+          <ref name="dhcp-server-settings"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="allowed_interfaces">
+    <element name="allowed_interfaces">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="allowed_interface"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="allowed_interface">
+    <element name="allowed_interface">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="dhcp-server-settings">
+    <element name="settings">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="dhcp-server-settings_entry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="dhcp-server-settings_entry">
+    <element name="settings_entry">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="settings_entry_children"/>
+        </optional>
+        <optional>
+          <ref name="settings_entry_directives"/>
+        </optional>
+        <optional>
+          <element name="id">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <ref name="options"/>
+        </optional>
+        <optional>
+          <element name="parent_id">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="parent_type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="settings_entry_children">
+    <element name="children">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="settings_entry_child"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="settings_entry_child">
+    <element name="child">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="id">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="settings_entry_directives">
+    <element name="directives">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="settings_entry_directives_listentry"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="settings_entry_directives_listentry">
+    <element name="listentry">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="key">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="value">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <define name="options">
+    <element name="options">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <ref name="option"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="option">
+    <element name="option">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <element name="key">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="type">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="value">
+            <ref name="STRING"/>
+          </element>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+</grammar>

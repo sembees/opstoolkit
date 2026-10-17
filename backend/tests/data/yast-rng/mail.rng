@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar ns="http://www.suse.com/1.0/yast2ns" xmlns:config="http://www.suse.com/1.0/configns" xmlns="http://relaxng.org/ns/structure/1.0">
+  <include href="common.rng"/>
+  <define name="mail">
+    <element name="mail">
+      <ref name="MAP"/>
+      <interleave>
+        <optional>
+          <ref name="aliases"/>
+        </optional>
+        <ref name="connection_type"/>
+        <optional>
+          <ref name="fetchmail"/>
+        </optional>
+        <optional>
+          <ref name="from_header"/>
+        </optional>
+        <optional>
+          <ref name="listen_remote"/>
+        </optional>
+        <optional>
+          <ref name="local_domains"/>
+        </optional>
+        <optional>
+          <ref name="mail_smtp_auth"/>
+        </optional>
+        <optional>
+          <ref name="masquerade_other_domains"/>
+        </optional>
+        <optional>
+          <ref name="masquerade_users"/>
+        </optional>
+        <ref name="mta"/>
+        <optional>
+          <ref name="outgoing_mail_server"/>
+        </optional>
+        <optional>
+          <ref name="postfix_mda"/>
+        </optional>
+        <optional>
+          <ref name="smtp_use_TLS"/>
+        </optional>
+        <optional>
+          <ref name="system_mail_sender"/>
+        </optional>
+        <optional>
+          <ref name="use_amavis"/>
+        </optional>
+        <optional>
+          <ref name="use_dkim"/>
+        </optional>
+        <optional>
+          <ref name="virtual_users"/>
+        </optional>
+      </interleave>
+    </element>
+  </define>
+  <!-- we have code to accept it as symbol or string -->
+  <define name="mail_SYMBOL_OR_TEXT">
+    <choice>
+      <optional>
+        <attribute name="config:type">
+          <value>symbol</value>
+        </attribute>
+      </optional>
+      <optional>
+        <attribute name="t">
+          <value>symbol</value>
+        </attribute>
+      </optional>
+      <ref name="STRING_ATTR"/>
+    </choice>
+  </define>
+  <define name="aliases">
+    <element name="aliases">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="alias">
+          <ref name="MAP"/>
+          <interleave>
+            <element name="alias">
+              <ref name="STRING"/>
+            </element>
+            <element name="destinations">
+              <ref name="STRING"/>
+            </element>
+            <optional>
+              <element name="comment">
+                <ref name="STRING"/>
+              </element>
+            </optional>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="connection_type">
+    <element name="connection_type">
+      <ref name="mail_SYMBOL_OR_TEXT"/>
+      <choice>
+        <value>permanent</value>
+        <value>dialup</value>
+        <value>none</value>
+      </choice>
+    </element>
+  </define>
+  <define name="fetchmail">
+    <element name="fetchmail">
+      <ref name="LIST"/>
+      <oneOrMore>
+        <element name="fetchmail_entry">
+          <ref name="MAP"/>
+          <interleave>
+            <element name="server">
+              <ref name="STRING"/>
+            </element>
+            <element name="protocol">
+              <ref name="STRING"/>
+            </element>
+            <element name="remote_user">
+              <ref name="STRING"/>
+            </element>
+            <element name="local_user">
+              <ref name="STRING"/>
+            </element>
+            <element name="password">
+              <ref name="STRING"/>
+            </element>
+          </interleave>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="from_header">
+    <element name="from_header">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="listen_remote">
+    <element name="listen_remote">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="local_domains">
+    <element name="local_domains">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="domains">
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="masquerade_other_domains">
+    <element name="masquerade_other_domains">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="domain">
+          <ref name="STRING"/>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="masquerade_users">
+    <element name="masquerade_users">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="masquerade_user">
+          <ref name="MAP"/>
+          <interleave>
+            <element name="user">
+              <ref name="STRING"/>
+            </element>
+            <element name="address">
+              <ref name="STRING"/>
+            </element>
+            <optional>
+              <element name="comment">
+                <ref name="STRING"/>
+              </element>
+            </optional>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="mta">
+    <element name="mta">
+      <ref name="mail_SYMBOL_OR_TEXT"/>
+      <choice>
+        <value>sendmail</value>
+        <value>postfix</value>
+      </choice>
+    </element>
+  </define>
+  <define name="outgoing_mail_server">
+    <element name="outgoing_mail_server">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="postfix_mda">
+    <element name="postfix_mda">
+      <ref name="mail_SYMBOL_OR_TEXT"/>
+      <choice>
+        <value>local</value>
+        <value>procmail</value>
+        <value>imap</value>
+      </choice>
+    </element>
+  </define>
+  <define name="smtp_use_TLS">
+    <element name="smtp_use_TLS">
+      <ref name="STRING_ATTR"/>
+      <choice>
+        <value>yes</value>
+        <value>must</value>
+        <value>no</value>
+      </choice>
+    </element>
+  </define>
+  <define name="system_mail_sender">
+    <element name="system_mail_sender">
+      <ref name="STRING"/>
+    </element>
+  </define>
+  <define name="use_amavis">
+    <element name="use_amavis">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="use_dkim">
+    <element name="use_dkim">
+      <ref name="BOOLEAN"/>
+    </element>
+  </define>
+  <define name="virtual_users">
+    <element name="virtual_users">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="virtual_user">
+          <interleave>
+            <element name="alias">
+              <ref name="STRING"/>
+            </element>
+            <element name="destinations">
+              <ref name="STRING"/>
+            </element>
+            <optional>
+              <element name="comment">
+                <ref name="STRING"/>
+              </element>
+            </optional>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="mail_smtp_auth">
+    <element name="smtp_auth">
+      <ref name="LIST"/>
+      <zeroOrMore>
+        <element name="smtp_auth_entry">
+          <interleave>
+            <element name="password">
+              <ref name="STRING"/>
+            </element>
+            <element name="server">
+              <ref name="STRING"/>
+            </element>
+            <element name="user">
+              <ref name="STRING"/>
+            </element>
+          </interleave>
+        </element>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>
