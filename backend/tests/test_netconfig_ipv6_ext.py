@@ -174,3 +174,45 @@ class Ipv6RoutesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class Ipv6DisabledTest(unittest.TestCase):
+    """★ 2026-10-18（内网审阅提出）：产品原来**无法表达"禁用 IPv6"**。
+
+    现象：`mode=dhcp`（纯 IPv4）只生成 `dhcp4: true`，链路上有 RA 时 networkd 仍会
+    SLAAC 出 v6 地址并可能装入 v6 默认路由 —— 与"这台机不要 IPv6"的意图冲突。
+    修法：新增 `ip6_mode="disabled"`，三后端分别用各自的官方开关；
+    netplan 的三个键（accept-ra:false / dhcp6:false / link-local:[]）已用真 netplan 0.107 验过。
+    """
+
+    def test_netplan_disabled(self):
+        p = gen(os="ubuntu", format="netplan",
+                interfaces=[{"name": "eth0", "mode": "dhcp", "ip6_mode": "disabled"}])
+        dev = netplan_dev(p)
+        self.assertTrue(dev["dhcp4"])
+        self.assertFalse(dev["accept-ra"])
+        self.assertFalse(dev["dhcp6"])
+        self.assertEqual(dev["link-local"], [])
+
+    def test_nmcli_disabled(self):
+        p = gen(os="rhel", format="nmcli",
+                interfaces=[{"name": "eth0", "mode": "dhcp", "ip6_mode": "disabled"}])
+        self.assertIn("ipv6.method disabled", p)
+
+    def test_ifcfg_disabled(self):
+        p = gen(os="rhel", format="ifcfg",
+                interfaces=[{"name": "eth0", "mode": "dhcp", "ip6_mode": "disabled"}])
+        self.assertIn("IPV6INIT=no", p)
+
+    def test_disabled_conflicts_with_static_v6(self):
+        for extra in ({"ip6": A6}, {"ip6_addrs": [A6]}, {"gateway6": G6}):
+            with self.subTest(extra=extra):
+                with self.assertRaises(ValueError):
+                    gen(os="ubuntu", format="netplan",
+                        interfaces=[dict(name="eth0", mode="dhcp", ip6_mode="disabled", **extra)])
+
+    def test_static_mode_does_not_touch_accept_ra(self):
+        """对照：static 模式不该写 accept-ra（别把"禁用"的行为混进普通静态配置）。"""
+        p = gen(os="ubuntu", format="netplan", interfaces=iface(ip6=A6))
+        dev = netplan_dev(p)
+        self.assertNotIn("accept-ra", dev)
+        self.assertNotIn("link-local", dev)

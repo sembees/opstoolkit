@@ -145,6 +145,14 @@ CASES = [
                                   gateway="10.10.10.1", ip6_mode="dhcp6")]),
     ),
     dict(
+        id="netplan-ipv6-disabled",
+        desc="ubuntu+netplan：显式禁用 IPv6（accept-ra:false + dhcp6:false + link-local:[]）",
+        expect_file="99-opstk.yaml",
+        smoke=("accept-ra: false", "dhcp6: false", "link-local: []", "dhcp4: true"),
+        req=dict(os="ubuntu", format="netplan",
+                 interfaces=[dict(name="eth0", mode="dhcp", ip6_mode="disabled")]),
+    ),
+    dict(
         id="netplan-slaac",
         desc="ubuntu+netplan：SLAAC（accept-ra: true + dhcp6: false）",
         expect_file="99-opstk.yaml",

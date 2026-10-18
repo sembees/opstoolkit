@@ -12,12 +12,12 @@ fi
 hostnamectl set-hostname app01
 
 # 接口 eth0
-nmcli connection add type ethernet ifname eth0 con-name eth0
+nmcli connection show eth0 >/dev/null 2>&1 || nmcli connection add type ethernet ifname eth0 con-name eth0
 nmcli connection modify eth0 ipv4.addresses 10.0.0.5/24 ipv4.method manual ipv4.gateway 10.0.0.1 ipv4.route-metric 100 ipv4.dns '10.0.0.53 114.114.114.114' +ipv4.routes '172.16.0.0/16 10.0.0.254'
 nmcli connection up eth0
 
 # 接口 eth1
-nmcli connection add type ethernet ifname eth1 con-name eth1
+nmcli connection show eth1 >/dev/null 2>&1 || nmcli connection add type ethernet ifname eth1 con-name eth1
 nmcli connection modify eth1 ipv4.addresses 10.0.1.5/24 ipv4.method manual ipv4.gateway 10.0.1.1 ipv4.route-metric 200
 nmcli connection up eth1
 

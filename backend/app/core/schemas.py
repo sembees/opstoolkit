@@ -206,9 +206,9 @@ def _check_l3(
     """
     # ★ 2026-10-18：IPv6 三种方式互斥 + 多地址格式校验（fail-closed）
     _mode6 = (ip6_mode or "static").strip().lower()
-    if _mode6 not in ("static", "dhcp6", "slaac"):
+    if _mode6 not in ("static", "dhcp6", "slaac", "disabled"):
         raise ValueError(
-            f"{path}.ip6_mode 只允许 static / dhcp6 / slaac，收到 {ip6_mode!r}"
+            f"{path}.ip6_mode 只允许 static / dhcp6 / slaac / disabled，收到 {ip6_mode!r}"
         )
     _addrs6 = [str(a).strip() for a in (ip6_addrs or []) if str(a).strip()]
     if _mode6 != "static":

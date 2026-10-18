@@ -245,7 +245,7 @@ def _v6_addrs(obj) -> list:
 def _v6_mode(obj) -> str:
     m = str((obj.get("ip6_mode") if isinstance(obj, dict) else getattr(obj, "ip6_mode", "static"))
             or "static").strip().lower()
-    return m if m in ("static", "dhcp6", "slaac") else "static"
+    return m if m in ("static", "dhcp6", "slaac", "disabled") else "static"
 
 
 def _ipv6_lines(obj) -> list:
@@ -263,6 +263,9 @@ def _ipv6_lines(obj) -> list:
     if mode6 == "slaac":
         # SLAAC（stateless）：靠 RA 自动配置；nmcli 的 auto 就是这个语义
         return ["ipv6.method auto"]
+    if mode6 == "disabled":
+        # 显式禁用 IPv6（审阅提出、真 netplan 验过对应的 netplan 写法）
+        return ["ipv6.method disabled"]
     addrs = _v6_addrs(obj)
     if not addrs:
         return lines
@@ -334,6 +337,17 @@ def _nmcli_route_lines(obj) -> list:
     return lines
 
 
+def _idem_add(cmd: str, con_name: str) -> str:
+    """把 `nmcli connection add ...` 变成**可重入**的一条命令。
+
+    2026-10-18 内网审阅指出：脚本第二次执行时 `add` 会因连接名已存在而失败，而脚本是
+    `set -e` ⇒ 每次都停在"改到一半"的状态（运维最怕这个）。
+    这里在 add 前先探测：连接已存在就跳过 add，后面的 `modify` 会把设置覆盖上去。
+    刻意不用 `connection delete`：那会先把现网连接拆掉，远程执行可能直接断线。
+    """
+    return ("nmcli connection show " + _sh(con_name) + " >/dev/null 2>&1 || " + cmd)
+
+
 def _mod(cmds, name, obj, metric=None):
     lines = _ipv4_lines(obj, metric)
     if lines:
@@ -343,7 +357,8 @@ def _mod(cmds, name, obj, metric=None):
 def _iface(cmds, obj, metric=None):
     name = obj["name"]
     cmds.append("# 接口 " + _safe_line(name, "interfaces[].name"))
-    cmds.append(f"nmcli connection add type ethernet ifname {_sh(name)} con-name {_sh(name)}")
+    cmds.append(_idem_add(f"nmcli connection add type ethernet ifname {_sh(name)} "
+                                f"con-name {_sh(name)}", name))
     _mod(cmds, name, obj, metric)
     cmds.append(f"nmcli connection up {_sh(name)}")
     cmds.append("")
@@ -364,11 +379,15 @@ def _bond(cmds, obj, metric=None):
     if obj.get("xmit_hash_policy"):
         opts += (f",xmit_hash_policy="
                  + _bond_opt_value(obj['xmit_hash_policy'], 'bonds[].xmit_hash_policy', 'enum'))
-    cmds.append(f"nmcli connection add type bond ifname {_sh(name)} con-name {_sh(name)} bond.options {_sh(opts)}")
+    cmds.append(_idem_add(
+        f"nmcli connection add type bond ifname {_sh(name)} con-name {_sh(name)} "
+        f"bond.options {_sh(opts)}", name))
     _mod(cmds, name, obj, metric)
     for i in obj.get("interfaces", []):
         sub = f"{name}-slave-{i}"
-        cmds.append(f"nmcli connection add type ethernet ifname {_sh(i)} con-name {_sh(sub)} master {_sh(name)}")
+        cmds.append(_idem_add(
+            f"nmcli connection add type ethernet ifname {_sh(i)} "
+            f"con-name {_sh(sub)} master {_sh(name)}", sub))
         cmds.append(f"nmcli connection up {_sh(sub)}")
     cmds.append(f"nmcli connection up {_sh(name)}")
     cmds.append("")
@@ -377,8 +396,9 @@ def _bond(cmds, obj, metric=None):
 def _vlan(cmds, obj, metric=None):
     name = f"{obj['parent']}.{obj['vlan_id']}"
     cmds.append(f"# VLAN {_safe_line(name, 'vlans[].name')}")
-    cmds.append(f"nmcli connection add type vlan ifname {_sh(name)} con-name {_sh(name)} "
-                f"dev {_sh(obj['parent'])} id {int(obj['vlan_id'])}")
+    cmds.append(_idem_add(
+        f"nmcli connection add type vlan ifname {_sh(name)} con-name {_sh(name)} "
+        f"dev {_sh(obj['parent'])} id {int(obj['vlan_id'])}", name))
     _mod(cmds, name, obj, metric)
     cmds.append(f"nmcli connection up {_sh(name)}")
     cmds.append("")
@@ -387,11 +407,14 @@ def _vlan(cmds, obj, metric=None):
 def _bridge(cmds, obj, metric=None):
     name = obj["name"]
     cmds.append(f"# 网桥 {_safe_line(name, 'bridges[].name')}")
-    cmds.append(f"nmcli connection add type bridge ifname {_sh(name)} con-name {_sh(name)}")
+    cmds.append(_idem_add(
+        f"nmcli connection add type bridge ifname {_sh(name)} con-name {_sh(name)}", name))
     _mod(cmds, name, obj, metric)
     for i in obj.get("interfaces", []):
         sub = f"{name}-port-{i}"
-        cmds.append(f"nmcli connection add type ethernet ifname {_sh(i)} con-name {_sh(sub)} master {_sh(name)}")
+        cmds.append(_idem_add(
+            f"nmcli connection add type ethernet ifname {_sh(i)} "
+            f"con-name {_sh(sub)} master {_sh(name)}", sub))
         cmds.append(f"nmcli connection up {_sh(sub)}")
     cmds.append(f"nmcli connection up {_sh(name)}")
     cmds.append("")
@@ -543,6 +566,13 @@ def _netplan_v6_mode(out, indent, obj) -> None:
     elif mode6 == "slaac":
         out.append(f"{indent}accept-ra: true")
         out.append(f"{indent}dhcp6: false")
+    elif mode6 == "disabled":
+        # ★ 2026-10-18（内网审阅提出、真 netplan 0.107.1 验过这三个键都合法）：
+        #   accept-ra:false 关 RA/SLAAC；link-local:[] 连 fe80 都不生成；dhcp6:false 显式关 DHCPv6。
+        #   只写 dhcp4:true 的话，链路上有 RA 时 networkd 仍会 SLAAC 出 v6 地址。
+        out.append(f"{indent}accept-ra: false")
+        out.append(f"{indent}dhcp6: false")
+        out.append(f"{indent}link-local: []")
 
 
 def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
@@ -725,7 +755,10 @@ def _build_ifcfg(req):
         #   slaac  → IPV6INIT + IPV6_AUTOCONF=yes
         mode6 = _v6_mode(obj)
         _addrs6 = _v6_addrs(obj)
-        if mode6 == "dhcp6":
+        if mode6 == "disabled":
+            # initscripts：IPV6INIT=no 是"这块网卡不启用 IPv6"的官方开关
+            lines += ["IPV6INIT=no"]
+        elif mode6 == "dhcp6":
             lines += ["IPV6INIT=yes", "DHCPV6C=yes", "IPV6_AUTOCONF=no"]
         elif mode6 == "slaac":
             lines += ["IPV6INIT=yes", "IPV6_AUTOCONF=yes", "DHCPV6C=no"]

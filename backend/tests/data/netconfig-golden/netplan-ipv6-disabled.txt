@@ -1,0 +1,10 @@
+# /etc/netplan/99-opstk.yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      dhcp4: true
+      accept-ra: false
+      dhcp6: false
+      link-local: []

@@ -117,6 +117,7 @@
                 <el-option label="静态" value="static" />
                 <el-option label="DHCPv6" value="dhcp6" />
                 <el-option label="SLAAC" value="slaac" />
+                <el-option label="禁用" value="disabled" />
               </el-select>
             </template>
           </el-table-column>
