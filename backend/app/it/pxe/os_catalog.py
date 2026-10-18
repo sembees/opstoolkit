@@ -53,13 +53,15 @@ verified 的口径（诚实声明，报告里同样适用）：
       - **debian**（preseed，`_debian_preseed`；2026-10-14 起多轮真机，含 UEFI 与多盘选盘）
       - **opensuse**（AutoYaST，`_opensuse_autoyast`；2026-10-18 真机装通：主机名/静态 IP/
         公钥登录/sudo 免密/btrfs+grub2 五项逐条取证，见 `mimo/a2_accept.py`）
+      - **openeuler**（kickstart；2026-10-18 真机装通（UEFI）：主机名/静态 IP/公钥登录/
+        sudo 免密/ext4+EFI 五项逐条取证，见 `mimo/a3_accept.py`）
   · verified=False —— **未经本环境实测**（kylin/uos/anolis/fedora/oraclelinux
-    的引导路径与卷标），或**曾有成功记录但未能稳定复现**：
-      - **openeuler**：2026-10-09 曾用代码路径装通（RUNBOOK §5.83.50，含 1MiB biosboot
-        修复的真机验证）；但 2026-10-15 用当前代码**复现失败** —— 产物侧全部正确
+    的引导路径与卷标）：
+      - **2026-10-15 曾经的 openeuler "复现失败"已定界并纠正**：产物侧全部正确
         （biosboot 在、无 auth 行、per-MAC ks 可取、内核命令行带 `inst.ks=`），
-        anaconda 36 却停在主界面未取用 kickstart。**按"不可稳定复现就不算 verified"处理**，
-        待读到安装器侧日志（TTY2 的 /tmp/anaconda.log）定界后再翻。
+        真正原因是那台机器的 MAC 还挂在**另一个模板**的装机记录上，
+        per-MAC 菜单指向了别的模板 ⇒ openEuler 模板根本没被引导到。
+        2026-10-18 修正登记后真机一次装通（UEFI），已翻 verified=True。
 """
 from __future__ import annotations
 
@@ -172,13 +174,19 @@ _OS = (
         key="openeuler", display="openEuler", installer=KICKSTART, auto_install=True,
         filename_keywords=("openeuler",), label_keywords=("openeuler",),
         kernel_dirs=("images/pxeboot",), kernel_names=("vmlinuz",), initrd_names=("initrd.img",),
-        version_hints=("20.03", "22.03", "24.03", "25.03"), verified=False,
-        note=("未验证（有过成功记录，但 2026-10-15 用当前代码未能复现）：openEuler 为 RHEL 系"
-              "（anaconda + kickstart），引导文件在 images/pxeboot/。2026-10-09 曾用本平台代码"
-              "路径装通（含 BIOS+GPT 必需的 1MiB biosboot 分区修复，见 RUNBOOK §5.83.50）；"
-              "2026-10-15 复现时产物侧全部正确（ks 有 part biosboot、无 auth 行、"
-              "per-MAC ks HTTP 200、内核命令行带 inst.ks=），但 anaconda 36 停在主界面"
-              "未取用 kickstart。按「不可稳定复现就不算已验证」保留 False。"),
+        version_hints=("20.03", "22.03", "24.03", "25.03"), verified=True,
+        note=("openEuler 为 RHEL 系（anaconda + kickstart），引导文件在 images/pxeboot/。"
+              "**2026-10-18 真机验收通过**（openEuler 24.03 LTS SP4，PVE 虚机 **UEFI** 网络启动、"
+              "无人值守装完并切盘首启）：主机名 pxe141-euler、ens18 静态 192.168.199.141/24 + "
+              "默认路由 default via 192.168.199.1、ops 公钥登录、sudo 免密、"
+              "sshd active/enabled、ext4 根 + vfat /boot/efi（EFI/openEuler/shimx64.efi）、"
+              "防火墙放行 ssh、按策略关闭 root 直登。"
+              "★ 2026-10-15 那次「anaconda 停在主界面不取用 ks」的原因**不是 ks 本身**："
+              "同一个 MAC 还挂在另一个模板的装机记录上（debian），按 MAC 生成的菜单指向了"
+              "那个模板的 preseed，openEuler 模板根本没被引导到 —— 生成器对同一 MAC 只认"
+              "「先出现者」，而 per-MAC 菜单/应答文件都按 MAC 展开。"
+              "教训：**换模板装同一台机器前，先把这台 MAC 的旧装机记录删掉**，"
+              "否则它拿到的是别的模板的菜单。"),
     ),
     OsCatalogEntry(
         key="kylin", display="银河麒麟 Kylin", installer=KICKSTART, auto_install=True,

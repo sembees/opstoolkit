@@ -83,11 +83,13 @@ class CatalogCoverageTest(unittest.TestCase):
         """已验证的族必须标 verified=True；其余一律 verified=False（不编造）。
 
         debian 于 2026-10-14 在 VM140(BIOS) 真机六项验收全过后移入已验证组；
-        opensuse 于 2026-10-18 真机装通（AutoYaST）后移入已验证组。
+        opensuse 于 2026-10-18 真机装通（AutoYaST）后移入已验证组；
+        openeuler 于 2026-10-18 真机装通（kickstart, UEFI）后移入已验证组。
         """
-        for t in ("ubuntu", "rhel", "centos", "rocky", "almalinux", "debian", "opensuse"):
+        for t in ("ubuntu", "rhel", "centos", "rocky", "almalinux", "debian",
+                  "opensuse", "openeuler"):
             self.assertTrue(os_catalog.entry(t).verified, t)
-        for t in ("openeuler", "kylin", "uos", "anolis", "fedora", "oraclelinux"):
+        for t in ("kylin", "uos", "anolis", "fedora", "oraclelinux"):
             self.assertFalse(os_catalog.entry(t).verified, t + " 未验证，必须如实标注")
             self.assertIn("未验证", os_catalog.entry(t).note, t)
 
@@ -363,7 +365,8 @@ class FamilyHelpersTest(unittest.TestCase):
         self.assertEqual(oe["name"], "openEuler")
         self.assertEqual(oe["family"], "kickstart")
         self.assertTrue(oe["auto_install"])
-        self.assertFalse(oe["verified"])
+        # 2026-10-18 真机（UEFI）装通后翻 True；这里锁的是"载荷里带得出这个事实"
+        self.assertTrue(oe["verified"])
         self.assertIn("24.03", oe["version_hints"])
 
 
