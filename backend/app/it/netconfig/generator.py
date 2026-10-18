@@ -21,6 +21,36 @@ _LACP_RATES = ("slow", "fast")
 _XMIT_POLICIES = ("layer2", "layer2+3", "layer3+4", "encap2+3", "encap3+4", "vlan+srcmac")
 
 
+
+def _v6(v):
+    """IPv6 取值（2026-10-18）：空/None ⇒ None，供各后端 `if _v6(...)` 判断。"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _v6_check(v, field):
+    """校验 IPv6（fail-closed）：ip6 允许 addr 或 addr/prefix；gateway6 只允许裸地址。
+
+    放在生成期而不是 schema 里，是因为这里同时覆盖 interface/bond/vlan/bridge 四条路径；
+    非法值直接抛 ValueError，不写半截配置。
+    """
+    s = _v6(v)
+    if s is None:
+        return None
+    import ipaddress as _ip
+    try:
+        if field.endswith("gateway6"):
+            if "/" in s:
+                raise ValueError("不能带前缀长度")
+            _ip.IPv6Address(s)
+        else:
+            _ip.IPv6Interface(s) if "/" in s else _ip.IPv6Address(s)
+    except ValueError as e:
+        raise ValueError(field + " 不是合法 IPv6（" + s + "）: " + str(e))
+    return s
+
 def _bond_opt_value(value, field, kind="enum"):
     """bond 选项值白名单（外部审查 U4-F5）。
 
@@ -209,6 +239,14 @@ def _ipv4_lines(obj, metric=None) -> list:
     lines.append("ipv4.method manual")
     if obj.get("gateway"):
         lines.append(f"ipv4.gateway {_sh(obj['gateway'])}")
+    # IPv6 静态（2026-10-18）
+    _a6 = _v6_check(obj.get("ip6"), "ip6")
+    if _a6:
+        lines.append("ipv6.method manual")
+        lines.append("ipv6.addresses " + _sh(_a6))
+        _g6 = _v6_check(obj.get("gateway6"), "gateway6")
+        if _g6:
+            lines.append("ipv6.gateway " + _sh(_g6))
         if metric is not None:
             # 有多个默认网关时写死 metric，避免"谁生效取决于接口 up 顺序"
             lines.append(f"ipv4.route-metric {int(metric)}")
@@ -436,6 +474,13 @@ def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
     p = _prefix(obj)
     out.append(f"{indent}dhcp4: false")
     out.append(f"{indent}addresses: [{_yaml(str(obj['ip']) + '/' + str(p))}]")
+    # IPv6 静态（2026-10-18）：netplan 用 addresses6 + gateway6（字符串拼接，兼容 3.10）
+    _a6 = _v6_check(obj.get("ip6"), "ip6")
+    if _a6:
+        out.append(indent + "addresses6: [" + _yaml(_a6) + "]")
+        _g6 = _v6_check(obj.get("gateway6"), "gateway6")
+        if _g6:
+            out.append(indent + "gateway6: " + _yaml(_g6))
     _netplan_routes(out, indent, obj, metric)
     _netplan_dns(out, indent, dns)
 
@@ -565,6 +610,14 @@ def _build_ifcfg(req):
             gw = obj.get("gateway")
             if gw:
                 lines.append("GATEWAY=" + _sh(gw))
+        # IPv6 静态（2026-10-18）：RHEL 系 ifcfg 用 IPV6INIT/IPV6ADDR/IPV6_DEFAULTGW
+        _a6 = _v6_check(obj.get("ip6"), "ip6")
+        if _a6:
+            lines.append("IPV6INIT=yes")
+            lines.append("IPV6ADDR=" + _sh(_a6))
+            _g6 = _v6_check(obj.get("gateway6"), "gateway6")
+            if _g6:
+                lines.append("IPV6_DEFAULTGW=" + _sh(_g6))
                 if metric is not None:
                     # 多个默认网关时写死 METRIC（initscripts 与 NM 的 ifcfg-rh 都认）
                     lines.append("METRIC=" + str(int(metric)))
@@ -641,7 +694,7 @@ def _build_ifcfg(req):
                      + _bond_opt_value(o.xmit_hash_policy, "bonds[].xmit_hash_policy", "enum"))
         lines = ["DEVICE=" + _sh(name), "TYPE=Bond", "BONDING_MASTER=yes", "BONDING_OPTS=\"" + opts + "\""]
         lines += _ip_lines(
-            {"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "dns": o.dns, "netmask": o.netmask},
+            {"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "ip6": getattr(o, "ip6", None), "gateway6": getattr(o, "gateway6", None), "dns": o.dns, "netmask": o.netmask},
             metrics.get(("bond", i)),
         )
         _route_file(o, name)
@@ -653,7 +706,7 @@ def _build_ifcfg(req):
         lines = ["DEVICE=" + _sh(name), "TYPE=Vlan", "VLAN=yes", "PHYSDEV=" + _sh(o.parent)]
         # mode/dns 要一起传：改前手工拼的 dict 漏了 dns，前端填的 VLAN DNS 会静默消失
         lines += _ip_lines(
-            {"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "netmask": o.netmask,
+            {"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "ip6": getattr(o, "ip6", None), "gateway6": getattr(o, "gateway6", None), "netmask": o.netmask,
              "mode": o.mode, "dns": o.dns},
             metrics.get(("vlan", i)),
         )
@@ -665,7 +718,7 @@ def _build_ifcfg(req):
         name = o.name
         lines = ["DEVICE=" + _sh(name), "TYPE=Bridge"]
         lines += _ip_lines(
-            {"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "netmask": o.netmask,
+            {"ip": o.ip, "cidr": o.cidr, "gateway": o.gateway, "ip6": getattr(o, "ip6", None), "gateway6": getattr(o, "gateway6", None), "netmask": o.netmask,
              "mode": o.mode, "dns": o.dns},
             metrics.get(("bridge", i)),
         )

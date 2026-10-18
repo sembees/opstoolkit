@@ -1637,6 +1637,9 @@ class NetInterfaceIn(BaseModel):
     netmask: Optional[str] = None   # 或 cidr
     cidr: Optional[int] = None
     gateway: Optional[str] = None
+    # IPv6 静态（2026-10-18）：2001:db8::5 或 2001:db8::5/64；只做静态，不含 DHCPv6/SLAAC
+    ip6: Optional[str] = None
+    gateway6: Optional[str] = None
     dns: list[str] = []
     # ★ 额外路由（2026-10-15）：按 netplan 的语义**挂在设备上**（netplan 的 routes 就是
     #   设备级属性）。gateway 仍是"默认路由"的便捷写法，routes 里也可以再写一条 to: default。
@@ -1683,6 +1686,9 @@ class NetBondIn(BaseModel):
     netmask: Optional[str] = None
     cidr: Optional[int] = None
     gateway: Optional[str] = None
+    # IPv6 静态（2026-10-18）：2001:db8::5 或 2001:db8::5/64；只做静态，不含 DHCPv6/SLAAC
+    ip6: Optional[str] = None
+    gateway6: Optional[str] = None
     dns: list[str] = []
     miimon: int = 100
     primary: Optional[str] = None   # active-backup 主接口
@@ -1771,6 +1777,9 @@ class NetVlanIn(BaseModel):
     netmask: Optional[str] = None
     cidr: Optional[int] = None
     gateway: Optional[str] = None
+    # IPv6 静态（2026-10-18）：2001:db8::5 或 2001:db8::5/64；只做静态，不含 DHCPv6/SLAAC
+    ip6: Optional[str] = None
+    gateway6: Optional[str] = None
     # dns：前端 VLAN 行一直有这个输入框，但模型没有该字段 → pydantic 默认忽略未知键，
     # 运维填的 DNS 静默消失。这里补上，三条生成路径都已支持（netplan nameservers /
     # nmcli ipv4.dns / ifcfg DNS1..N）。
@@ -1828,6 +1837,9 @@ class NetBridgeIn(BaseModel):
     netmask: Optional[str] = None
     cidr: Optional[int] = None
     gateway: Optional[str] = None
+    # IPv6 静态（2026-10-18）：2001:db8::5 或 2001:db8::5/64；只做静态，不含 DHCPv6/SLAAC
+    ip6: Optional[str] = None
+    gateway6: Optional[str] = None
     dns: list[str] = []             # 同上：前端网桥行也有 DNS 输入框
     routes: list[NetRouteIn] = []   # 额外路由（四类设备一致支持）
 
