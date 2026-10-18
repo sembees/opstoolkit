@@ -150,6 +150,34 @@ class AutoYaastProfileTest(unittest.TestCase):
         self.assertEqual(files[0].get(
             "{http://www.suse.com/1.0/configns}type"), "list")
 
+    def test_installs_sshd_and_sudo(self):
+        """最小安装里**既没有 sshd 也没有 sudo**（真机读 zypp history：509 个包里
+        只有 `openssh-clients`/`openssh-common`，没有 `openssh-server`，也没有 `sudo`）。
+
+        后果很具体：装完了、能 ping 通（DHCP 拿了地址），但 22 端口 Connection refused、
+        `sudo` 命令不存在 —— 一台"装好了却进不去、免密落不了地"的机器。
+        AutoYaST 的 `<software><packages>` 是"在默认选择上追加"，所以不带 patterns 也安全。
+        """
+        pkgs = self.root.find(NS + "software/" + NS + "packages")
+        self.assertIsNotNone(pkgs, "缺少 <software><packages>，sshd/sudo 不会被安装")
+        self.assertEqual(pkgs.get("{http://www.suse.com/1.0/configns}type"), "list")
+        names = [p.text for p in pkgs.findall(NS + "package")]
+        self.assertIn("openssh-server", names)
+        self.assertIn("sudo", names)
+
+    def test_enables_sshd(self):
+        """装了 ≠ 开了。真机第二轮证据：`openssh-server` 已安装、`/usr/sbin/sshd` 在，
+        但首启后 22 端口 **Connection refused**（RST 而非超时 ⇒ 防火墙没拦，只是没进程）。
+        `systemctl preset` 在 install-chroot 里没把 sshd 接进 multi-user.target.wants，
+        所以必须用 `<services-manager><services><enable>` 显式开机启用。
+        """
+        en = self.root.find(NS + "services-manager/" + NS + "services/" + NS + "enable")
+        self.assertIsNotNone(en, "缺少 services-manager/enable：sshd 开机不会起")
+        self.assertEqual(en.get("{http://www.suse.com/1.0/configns}type"), "list")
+        names = ([s.text for s in en.findall(NS + "service")]
+                 + [s.text for s in en.findall(NS + "listentry")])
+        self.assertIn("sshd", names)
+
     def test_bool_fields_carry_config_type(self):
         """AutoYaST 的布尔/列表字段必须带 config:type，否则被当字符串解析。"""
         self.assertIn('config:type="boolean"', self.xml)

@@ -2109,6 +2109,33 @@ def _opensuse_autoyast(c) -> str:
           "    </dns>",
           "  </networking>"]
 
+    # ── 软件：sshd 与 sudo —— 最小安装里**这两个都没有**（真机实测）──
+    #   证据（装好的系统里读 zypp history）：默认只装了 `patterns-base-minimal_base`
+    #   + `patterns-base-base`，共 509 个包；其中 `openssh-common`/`openssh-clients` 在，
+    #   **`openssh-server` 不在**，`sudo` 也不在（连 /etc/sudoers 都没有）。
+    #   结果就是：装完了、能 ping 通（DHCP），但 22 端口 Connection refused、sudo 不存在
+    #   —— 一台"装好了却进不去"的机器，不能算支持。
+    #   AutoYaST 的 `<software><packages>` 是"在默认选择上追加"，所以不带 patterns 也安全。
+    L += ["  <software>",
+          "    <packages config:type=\"list\">",
+          "      <package>openssh-server</package>",
+          "      <package>sudo</package>",
+          "    </packages>",
+          "  </software>"]
+
+    # ── 服务：**显式**把 sshd 设为开机启动 ──
+    #   真机实测（第二轮）：openssh-server 装上了，但 `systemctl preset sshd` 在 chroot 里
+    #   并没有把单元连进 multi-user.target.wants ⇒ 首启后 22 端口 **Connection refused**
+    #   （注意是 RST 不是超时，说明防火墙没拦，就是没进程在听）。装了不等于开了。
+    #   schema 依 services-manager.rng：<enable> 是 LIST，子元素 service 或 listentry。
+    L += ["  <services-manager>",
+          "    <services>",
+          "      <enable config:type=\"list\">",
+          "        <service>sshd</service>",
+          "      </enable>",
+          "    </services>",
+          "  </services-manager>"]
+
     # ── 分区：只写"用整盘、LVM"这类确定语义；具体分区表交给 AutoYaST 默认方案 ──
     L += ['  <partitioning config:type="list">', "    <drive>",
           "      <device>/dev/sda</device>",

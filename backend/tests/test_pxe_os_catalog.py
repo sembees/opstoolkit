@@ -82,12 +82,12 @@ class CatalogCoverageTest(unittest.TestCase):
     def test_unverified_flags_are_honest(self):
         """已验证的族必须标 verified=True；其余一律 verified=False（不编造）。
 
-        debian 于 2026-10-14 在 VM140(BIOS) 真机六项验收全过后移入已验证组。
+        debian 于 2026-10-14 在 VM140(BIOS) 真机六项验收全过后移入已验证组；
+        opensuse 于 2026-10-18 真机装通（AutoYaST）后移入已验证组。
         """
-        for t in ("ubuntu", "rhel", "centos", "rocky", "almalinux", "debian"):
+        for t in ("ubuntu", "rhel", "centos", "rocky", "almalinux", "debian", "opensuse"):
             self.assertTrue(os_catalog.entry(t).verified, t)
-        for t in ("openeuler", "kylin", "uos", "anolis", "fedora",
-                  "oraclelinux", "opensuse"):
+        for t in ("openeuler", "kylin", "uos", "anolis", "fedora", "oraclelinux"):
             self.assertFalse(os_catalog.entry(t).verified, t + " 未验证，必须如实标注")
             self.assertIn("未验证", os_catalog.entry(t).note, t)
 

@@ -51,7 +51,9 @@ verified 的口径（诚实声明，报告里同样适用）：
       - ubuntu（casper/，preseed→subiquity autoinstall）
       - rhel / centos / rocky / almalinux（images/pxeboot/，kickstart）
       - **debian**（preseed，`_debian_preseed`；2026-10-14 起多轮真机，含 UEFI 与多盘选盘）
-  · verified=False —— **未经本环境实测**（kylin/uos/anolis/fedora/oraclelinux/opensuse
+      - **opensuse**（AutoYaST，`_opensuse_autoyast`；2026-10-18 真机装通：主机名/静态 IP/
+        公钥登录/sudo 免密/btrfs+grub2 五项逐条取证，见 `mimo/a2_accept.py`）
+  · verified=False —— **未经本环境实测**（kylin/uos/anolis/fedora/oraclelinux
     的引导路径与卷标），或**曾有成功记录但未能稳定复现**：
       - **openeuler**：2026-10-09 曾用代码路径装通（RUNBOOK §5.83.50，含 1MiB biosboot
         修复的真机验证）；但 2026-10-15 用当前代码**复现失败** —— 产物侧全部正确
@@ -241,12 +243,19 @@ _OS = (
         #   同一次实测还确认：ISO 顶层有 repodata/ ⇒ 解出来的树可直接当 install= 源；
         #   UEFI 引导在 /EFI/BOOT/bootx64.efi。
         kernel_names=("linux", "vmlinuz"), initrd_names=("initrd",),
-        version_hints=("15.5", "15.6"), verified=False,
+        version_hints=("15.5", "15.6"), verified=True,
         note=("AutoYaST：应答文件由 _opensuse_autoyast() 生成（autoinst.xml），"
-              "iPXE 内核行用 autoyast=<应答文件> install=<仓库>。**产物级已验证**"
-              "（12 条用例：结构/命名空间/转义/口令哈希/静态网络/分区/公钥/sudo）；"
-              "但**真机未验证**（本环境无 openSUSE 介质）。引导介质按候选路径 "
-              "boot/x86_64/loader/ 提取，同样未经真机实测。"),
+              "iPXE 内核行用 autoyast=<应答文件> install=<仓库>。"
+              "**2026-10-18 真机验收通过**（openSUSE-Leap-15.6-DVD，PVE 虚机，BIOS 网络启动、"
+              "无人值守装完并切盘首启）：主机名 pxe140-suse、eth0 静态 192.168.199.140/24 + "
+              "默认路由 default via 192.168.199.1、root 与 ops 公钥登录、ops sudo 免密、"
+              "btrfs 子卷 + grub2(i386-pc) + 8M bios_grub/28G root/2G swap。"
+              "★ 两个真机坑（写在这里免得再踩）：①装机期**绝不能让 YaST 碰网卡**"
+              "（安装器里叫 eth0，配置里的名字是装好后才有），静态网络由 <files> 落 "
+              "ifcfg/routes；②最小安装**没有 openssh-server 也没有 sudo**，且 sshd 要靠 "
+              "<services-manager> 显式 enable（装了不等于开了）。"
+              "另：openSUSE 15.x 用 70-persistent-net.rules 把网卡固定成 eth0，"
+              "档案里的 interface 要按实际名字填。"),
     ),
 )
 
