@@ -218,9 +218,16 @@ def assert_same(expected: str, actual: str, *, case_id: str = "-") -> None:
 
 
 def _read_golden(path: Path) -> str:
-    # newline=""：不做任何换行翻译 —— golden 若被编辑器改成 CRLF，比对必须红（钉死语义）。
+    """读基线：utf-8，并把 CRLF 归一成 LF。
+
+    ★ 2026-10-18 实测：Windows 上 `core.autocrlf=true` 会把 checkout 出来的基线转成 CRLF，
+    于是 9 条快照 + 1 条防呆全红（`首个差异在第 1 行：'# /etc/netplan/99-opstk.yaml\\r'`）。
+    治本用 `.gitattributes` 把基线目录标成 `-text`（不转换）；这里再加一道归一化，
+    让"换了台机器/换了编辑器"不会把 CLI 换行差异误报成生成器漂移。
+    注意：**只归一 CRLF**，其它差异（空格、行序、值）仍然逐字节比对。
+    """
     with open(path, "r", encoding="utf-8", newline="") as f:
-        return f.read()
+        return f.read().replace("\r\n", "\n")
 
 
 def _write_golden(path: Path, text: str) -> None:

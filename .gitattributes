@@ -1,0 +1,14 @@
+# 行尾策略（2026-10-18）
+#
+# 背景：本仓库是在 Windows 上开发的，`core.autocrlf=true` 会把 checkout 出来的文本文件
+# 转成 CRLF。这对源码无害，但**快照基线**（netconfig 生成物的逐字节对拍）会被破坏：
+# 基线变成 CRLF 后，`_diff` 报 "首个差异在第 1 行：'# /etc/netplan/99-opstk.yaml\r'"，
+# 9 条快照用例 + 1 条防呆用例全红（已被 CI 预演抓到过一次）。
+#
+# 所以：基线目录标记为 -text（git 不做任何换行转换），保证仓库里和检出后都是 LF。
+* text=auto
+
+# netconfig 快照基线：逐字节比对用，禁止任何换行转换
+backend/tests/data/netconfig-golden/** -text
+
+# 其余测试数据（YaST RNG schema 等）保持不动，交给 git 默认策略
