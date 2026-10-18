@@ -267,6 +267,8 @@ import { ref, reactive, computed, onMounted } from "vue"
 import http, { flattenDetail } from "../api"
 import PageHeader from "../components/PageHeader.vue"
 import CardSection from "../components/CardSection.vue"
+// IP 校验抽成了可单测模块（语义与原内联实现一字不改，见 src/utils/ip.js 与 tests/ip.test.mjs）
+import { isIpv4, parseIpCidr, sameSubnet, isIpv6, isIpv6Cidr } from "../utils/ip.js"
 
 const meta = reactive({ os_options: [], formats: [], bond_modes: [], netplan_renderers: [] })
 const config = reactive({ os: "rhel", format: "nmcli", hostname: "", netplan_renderer: "networkd" })
@@ -383,57 +385,7 @@ function _safeStr(v) { return (v && v.trim()) ? v.trim() : null }
 // ---------- 前置校验（中4 + 自由文本）：只是体验层，真正的边界在后端 ----------
 const IFNAME_RE = /^[A-Za-z0-9._:-]{1,32}$/
 const HOSTNAME_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/
-const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 const TYPE_LABEL = { iface: "物理接口", bond: "Bond", vlan: "VLAN", bridge: "网桥" }
-
-function _isIpv4(s) {
-  const m = IPV4_RE.exec((s || "").trim())
-  if (!m) return false
-  return m.slice(1).every(p => Number(p) <= 255)
-}
-
-// IPv6（2026-10-18）：只做**地址字面量**校验，规则与后端生成期的 _v6_check 对齐 ——
-// ip6 允许 `addr` 或 `addr/prefix`（前缀 0..128）；gateway6 只允许裸地址（不能带前缀）。
-// 不做 IPv4-mapped / zone-id（`%eth0`）这类边角，后端同样不收。
-function _isIpv6(s) {
-  const t = (s || "").trim()
-  if (!t || t.includes("%")) return false
-  const halves = t.split("::")
-  if (halves.length > 2) return false
-  const head = halves[0] ? halves[0].split(":") : []
-  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : []
-  const groups = head.concat(tail)
-  if (!groups.every(g => /^[0-9A-Fa-f]{1,4}$/.test(g))) return false
-  // "::" 至少压缩掉一组；没有 "::" 就必须正好 8 组
-  return halves.length === 2 ? groups.length <= 7 : groups.length === 8
-}
-function _isIpv6Cidr(s) {
-  const t = (s || "").trim()
-  const i = t.indexOf("/")
-  if (i < 0) return _isIpv6(t)
-  const p = t.slice(i + 1)
-  return /^\d{1,3}$/.test(p) && Number(p) <= 128 && _isIpv6(t.slice(0, i))
-}
-
-// 中4：前缀必须 0..32、IP 每段必须 0..255；非法输入当场报错，绝不透传成 payload 里的坏值
-function parseIpCidr(val) {  const s = (val || "").trim()
-  if (!s) return null
-  const parts = s.split("/")
-  if (parts.length > 2) return { error: `IP「${s}」非法：只能有一个 "/"` }
-  const ip = parts[0].trim()
-  if (!_isIpv4(ip)) return { error: `IP「${s}」非法：应为 IPv4，如 10.0.0.1 或 10.0.0.1/24` }
-  if (parts.length === 1) return { ip }
-  const p = parts[1].trim()
-  if (!/^\d{1,2}$/.test(p) || Number(p) > 32) return { error: `掩码「${s}」非法：/ 后面的前缀必须是 0..32 的整数` }
-  return { ip, cidr: Number(p) }
-}
-
-function _ipToInt(ip) {  return IPV4_RE.exec(ip).slice(1).reduce((a, o) => ((a << 8) + Number(o)) >>> 0, 0) >>> 0
-}
-function _sameSubnet(ip, gw, prefix) {
-  const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0
-  return ((_ipToInt(ip) & mask) >>> 0) === ((_ipToInt(gw) & mask) >>> 0)
-}
 // 被 bond/bridge 引用的从接口不配地址（生成器整段跳过它）
 const slaveNames = computed(() => {
   const s = new Set()
@@ -486,10 +438,10 @@ const validation = computed(() => {
     const gw = (row.gateway || "").trim()
     if (gw) {
       if (row.mode === "dhcp") push(idx, `${label}：mode=dhcp 时网关会被丢弃，请清空网关或改为 static`)
-      else if (!_isIpv4(gw)) push(idx, `${label}：网关「${gw}」不是合法 IPv4`)
+      else if (!isIpv4(gw)) push(idx, `${label}：网关「${gw}」不是合法 IPv4`)
       else if (parsed?.ip) {
         const prefix = parsed.cidr ?? 24      // 与后端一致：未写前缀按 /24 校验
-        if (!_sameSubnet(parsed.ip, gw, prefix)) {
+        if (!sameSubnet(parsed.ip, gw, prefix)) {
           push(idx, `${label}：网关 ${gw} 不在 ${parsed.ip}/${prefix} 子网内（生成的默认路由不可达，后端也会 422）`)
         }
       }
@@ -505,17 +457,17 @@ const validation = computed(() => {
     if (ip6 || gw6) {
       // ★ 2026-10-18：dhcp 行**允许**填 IPv6 —— 三种后端的 IPv6 段已与 IPv4 分支解耦，
       //   "DHCP 取 IPv4 + 静态 IPv6" 是双栈的常见配法（netplan dhcp4:true + addresses6 合法）。
-      if (ip6 && !_isIpv6Cidr(ip6)) {
+      if (ip6 && !isIpv6Cidr(ip6)) {
         push(idx, `${label}：IPv6 地址「${ip6}」非法（应为 2001:db8::5 或 2001:db8::5/64）`)
       }
       if (gw6) {
         if (!ip6) push(idx, `${label}：填了 IPv6 网关就必须同时填 IPv6 地址（否则这条默认路由没有落点）`)
-        else if (!_isIpv6(gw6)) push(idx, `${label}：IPv6 网关「${gw6}」非法（只写裸地址，不带前缀）`)
+        else if (!isIpv6(gw6)) push(idx, `${label}：IPv6 网关「${gw6}」非法（只写裸地址，不带前缀）`)
       }
     }
     // DHCP 行的 IP 输入框已禁用，残值会在 buildPayload 里被剔除；这里不再报错，只提示残值丢弃
     if (!dnsDisabled(row)) {
-      for (const d of (row.dns || [])) if (!_isIpv4(d)) push(idx, `${label}：DNS「${d}」不是合法 IPv4`)
+      for (const d of (row.dns || [])) if (!isIpv4(d)) push(idx, `${label}：DNS「${d}」不是合法 IPv4`)
     }
   })
   return errs
