@@ -14,6 +14,7 @@
 `xmlns="http://www.suse.com/1.0/yast2ns"`，**默认命名空间会继承到所有子元素**，
 所以 ElementTree 的路径里**每一段**都要带 `{ns}`；只给第一段会一个都查不到。
 """
+import os
 import sys
 import unittest
 import xml.etree.ElementTree as ET
@@ -50,6 +51,14 @@ class AutoYaastProfileTest(unittest.TestCase):
         self.xml = _opensuse_autoyast(cfg())
         self.root = ET.fromstring(self.xml)          # 语法必须过
 
+    @staticmethod
+    def _files(root):
+        """`<files>` → {file_path: file_contents}（缺哪个文件取哪个键会直接 KeyError）。"""
+        out = {}
+        for f in root.findall(NS + "files/" + NS + "file"):
+            out[f.find(NS + "file_path").text] = f.find(NS + "file_contents").text
+        return out
+
     def test_root_and_namespace(self):
         self.assertEqual(self.root.tag, NS + "profile")
         # AutoYaST 要求两个命名空间都声明（config:type 靠它）
@@ -62,22 +71,41 @@ class AutoYaastProfileTest(unittest.TestCase):
         self.assertEqual(q(self.root, "timezone/timezone").text, "Asia/Shanghai")
         self.assertEqual(q(self.root, "networking/dns/hostname").text, "suse140")
 
-    def test_static_network_gateway_and_dns(self):
-        self.assertEqual(q(self.root, "networking/interfaces/interface/name").text, "ens18")
-        self.assertEqual(q(self.root, "networking/interfaces/interface/bootproto").text, "static")
-        self.assertEqual(q(self.root, "networking/interfaces/interface/ipaddr").text,
-                         "192.168.199.140")
-        self.assertEqual(q(self.root, "networking/interfaces/interface/prefixlen").text, "24")
-        self.assertEqual(q(self.root, "networking/routing/routes/route/gateway").text,
-                         "192.168.199.1")
-        self.assertEqual(q(self.root, "networking/dns/nameservers/nameserver").text,
-                         "192.168.199.1")
+    def test_static_network_goes_through_files_not_networking(self):
+        """★ 2026-10-18 真机定的契约：装机期**不许 YaST 碰网卡**。
+
+        安装器里的网卡叫 `eth0`（linuxrc 打印 `eth0: network config created`），
+        而配置里给的是**装好的系统**里的名字（`ens18`）——装机期并不存在。
+        YaST 一旦在装包途中 apply `<interfaces>`，安装源 `192.168.199.1:8000` 就断，
+        真机表现是盘写入停在 6.66%、控制台回到 linuxrc 的
+        "Please make sure your installation medium is available. Choose the URL to retry."
+
+        所以静态网络的**唯一**落点是 `<files>`：`ifcfg-<iface>` + `routes`，
+        首启由 wicked 按 sysconfig 生效。
+        """
+        self.assertIsNone(q(self.root, "networking/interfaces"),
+                          "装机期不得让 YaST 配网卡（网卡名在安装器里叫 eth0）")
+        self.assertIsNone(q(self.root, "networking/routing"),
+                          "<routing> 同样会在装机期被 apply，必须为空")
+        files = self._files(self.root)
+        ifcfg = files["/etc/sysconfig/network/ifcfg-ens18"]
+        self.assertIn("BOOTPROTO='static'", ifcfg)
+        self.assertIn("IPADDR='192.168.199.140/24'", ifcfg)
+        self.assertIn("STARTMODE='auto'", ifcfg)
+        self.assertIn("NETCONFIG_DNS_STATIC_SERVERS='192.168.199.1'", ifcfg)
+        self.assertEqual(files["/etc/sysconfig/network/routes"],
+                         "default 192.168.199.1 - -\n")
 
     def test_dhcp_mode_has_no_static_address(self):
         r = ET.fromstring(_opensuse_autoyast(cfg(net_mode="dhcp", net_config={})))
-        self.assertEqual(q(r, "networking/interfaces/interface/bootproto").text, "dhcp")
-        self.assertIsNone(q(r, "networking/interfaces/interface/ipaddr"))
+        self.assertIsNone(q(r, "networking/interfaces"))
         self.assertIsNone(q(r, "networking/routing"))
+        files = self._files(r)
+        self.assertEqual([p for p in files if "ifcfg-" in p], [],
+                         "dhcp 模式不得写静态 ifcfg")
+        self.assertNotIn("/etc/sysconfig/network/routes", files)
+        # 主机名仍要写：<networking> 只负责"不动网卡"，落盘照旧
+        self.assertEqual(files["/etc/hostname"], "suse140\n")
 
     def test_partitioning_uses_whole_disk(self):
         self.assertEqual(q(self.root, "partitioning/drive/device").text, "/dev/sda")
@@ -97,13 +125,30 @@ class AutoYaastProfileTest(unittest.TestCase):
         admin = self.root.findall(NS + "users/" + NS + "user")[0]
         self.assertEqual(admin.find(NS + "authorized_keys/" + NS + "listentry").text,
                          "ssh-ed25519 AAAAC3Nza ops@k")
-        self.assertEqual(q(self.root, "files/file/file_path").text,
-                         "/etc/sudoers.d/90-opstk-ops")
-        self.assertIn("NOPASSWD", q(self.root, "files/file/file_contents").text)
+        files = self._files(self.root)
+        self.assertIn("NOPASSWD", files["/etc/sudoers.d/90-opstk-ops"])
+        # root 也要能免密登进来（真机取证靠 root ssh；只在 <users> 里给管理员写不够）
+        self.assertEqual(files["/root/.ssh/authorized_keys"],
+                         "ssh-ed25519 AAAAC3Nza ops@k\n")
 
     def test_no_sudoers_file_when_disabled(self):
         r = ET.fromstring(_opensuse_autoyast(cfg(sudo_nopasswd=False)))
-        self.assertIsNone(q(r, "files"))
+        files = self._files(r)
+        self.assertEqual([p for p in files if "sudoers" in p], [],
+                         "关掉 sudo 免密就不该写 sudoers 文件")
+        # <files> 本身仍然需要（主机名/静态网络都靠它），不能因为关了 sudo 就整段消失
+        self.assertIn("/etc/hostname", files)
+
+    def test_single_files_element(self):
+        """`<files>` 是 `config:type="list"` 的**一整个列表**：profile 里只能有一个。
+
+        写第二个 `<files>` 会被 YaST 当重复元素（RelaxNG interleave 直接报 extra），
+        所以生成器必须先把要写的东西收集起来，最后一次性发射。
+        """
+        files = self.root.findall(NS + "files")
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].get(
+            "{http://www.suse.com/1.0/configns}type"), "list")
 
     def test_bool_fields_carry_config_type(self):
         """AutoYaST 的布尔/列表字段必须带 config:type，否则被当字符串解析。"""
@@ -144,6 +189,128 @@ class AutoYaastEscapingTest(unittest.TestCase):
         xml = _opensuse_autoyast(cfg(ssh_keys=['k<weird>&"']))
         ET.fromstring(xml)                       # 能解析即说明没漏转义
         self.assertNotIn('k<weird>', xml)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 离线回归：用 **YaST 自己的** RNG schema 校验产物
+# ══════════════════════════════════════════════════════════════════════════════
+# 为什么单列一个类：A2 在真机上烧掉十几个小时，根因就是"profile 结构不被 YaST 接受"，
+# 而 YaST 报的错还指向**别的**元素（RelaxNG interleave 的经典误导：真错在 <keymap>，
+# 它报的是后面那个元素 "extra"）。有了这份官方 schema，一轮校验 10 秒，
+# 不必再拿真机 10 分钟一轮去猜。
+#
+# schema 来源：DVD 里 `yast2-schema-default` 的 RPM → `rpm2cpio | cpio` 解出 .rng，
+# 已 vendored 到 tests/data/yast-rng/（56 个 .rng）。校验器 = YaST 自己用的那份。
+#
+# ★ 依赖 lxml（RelaxNG 支持）。项目 venv 默认没装，CI 里装一下即可；
+#   本机可用内置解释器跑同一个文件：见 mimo/a2_validate.py。
+RNG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "yast-rng")
+try:
+    from lxml import etree as _lxml
+except ModuleNotFoundError:                  # pragma: no cover - 取决于环境
+    _lxml = None
+
+# 子进程校验器：给"有 lxml 但没装本项目依赖"的解释器用（本机就是这么跑的）。
+_RNG_HELPER = r"""import sys
+from lxml import etree
+schema = etree.RelaxNG(etree.parse(sys.argv[1] + "/profile.rng"))
+doc = etree.parse(sys.argv[2])
+if schema.validate(doc):
+    print("OK")
+    sys.exit(0)
+for e in schema.error_log:
+    print("行 %s: %s" % (e.line, e.message), file=sys.stderr)
+sys.exit(1)
+"""
+
+
+class YastSchemaTest(unittest.TestCase):
+    """产物必须能过 YaST 官方 schema —— 这是"能不能装"的必要条件。
+
+    两条路都算数：进程内有 lxml 就本地校验；没有就用 `OPSTK_RNG_PY` 指定的
+    解释器子进程校验（本机：venv 有 passlib 无 lxml，内置 python 有 lxml 无 passlib，
+    所以只能在两个解释器之间递产物）。
+    """
+
+    def setUp(self):
+        self._helper_py = None
+        if _lxml is not None:
+            self.schema = _lxml.RelaxNG(_lxml.parse(os.path.join(RNG_DIR, "profile.rng")))
+            return
+        self._helper_py = os.environ.get("OPSTK_RNG_PY")
+        if not self._helper_py:
+            if os.environ.get("OPSTK_RNG_STRICT") == "1":
+                # 严格模式：没校验器就等于没校验，不许静默跳过
+                self.fail("缺 lxml：`pip install lxml` 或设 OPSTK_RNG_PY=<有 lxml 的解释器>")
+            self.skipTest("缺 lxml（pip install lxml 或设 OPSTK_RNG_PY 后可跑）")
+        self.assertTrue(os.path.exists(self._helper_py),
+                        "OPSTK_RNG_PY 指向的解释器不存在: %s" % self._helper_py)
+
+    def validate_rng(self, xml):
+        """返回 (是否通过, 错误文本)。"""
+        if _lxml is not None:
+            doc = _lxml.fromstring(xml.encode("utf-8"))
+            ok = self.schema.validate(doc)
+            return ok, "\n".join("行 %s: %s" % (e.line, e.message)
+                                 for e in self.schema.error_log)
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            doc_path = os.path.join(td, "profile.xml")
+            script = os.path.join(td, "rng_check.py")
+            with open(doc_path, "w", encoding="utf-8") as fh:
+                fh.write(xml)
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write(_RNG_HELPER)
+            r = subprocess.run([self._helper_py, script, RNG_DIR, doc_path],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace",
+                               env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+            return r.returncode == 0, ((r.stdout or "") + (r.stderr or "")).strip()
+
+    def test_vendored_schema_is_the_real_one(self):
+        """别拿一份残缺的 .rng 自欺欺人：profile.rng 必须真的引用到各模块。"""
+        self.assertTrue(os.path.exists(os.path.join(RNG_DIR, "profile.rng")))
+        self.assertGreaterEqual(len([n for n in os.listdir(RNG_DIR)
+                                     if n.endswith(".rng")]), 40)
+
+    def test_generated_profiles_validate(self):
+        """生成器各路分支的产物都必须过 schema（一份过、另一份不过=漏了分支）。"""
+        cases = {
+            "static（真机用的那份）": cfg(),
+            "dhcp": cfg(net_mode="dhcp", net_config={}),
+            "无 sudo 免密": cfg(sudo_nopasswd=False),
+            "无 ssh key / 无 dns / 无网关": cfg(
+                ssh_keys=[], net_config={"ip": "192.168.199.140", "cidr": 24,
+                                         "interface": "ens18"}),
+            "带元字符": cfg(ssh_keys=['ssh-rsa AAA&<>"x ops@k']),
+        }
+        for name, c in cases.items():
+            with self.subTest(name=name):
+                ok, err = self.validate_rng(_opensuse_autoyast(c))
+                self.assertTrue(ok, "schema 不认这份产物（%s）：\n%s" % (name, err))
+
+    def test_schema_rejects_keymap_inside_language(self):
+        """负向对照（真实踩过的坑）：<keymap> 放 <language> 里必须被判非法。
+
+        没有负向对照，"校验通过"可能只是校验器根本没在验。
+        """
+        bad = _opensuse_autoyast(cfg()).replace(
+            "    <languages>en_US</languages>\n",
+            "    <languages>en_US</languages>\n    <keymap>us</keymap>\n", 1)
+        self.assertIn("<keymap>us</keymap>", bad)          # 确认替换真的生效
+        ok, err = self.validate_rng(bad)
+        self.assertFalse(ok, "schema 放过了 <keymap> 在 <language> 里的非法产物")
+        self.assertTrue(err, "判非法了但没给错误信息")
+
+    def test_schema_rejects_hostname_directly_under_networking(self):
+        """负向对照：<hostname> 不能直接挂在 <networking> 下（历史真 bug）。"""
+        bad = _opensuse_autoyast(cfg()).replace(
+            "  <networking>\n",
+            "  <networking>\n    <hostname>suse140</hostname>\n", 1)
+        self.assertIn("<hostname>suse140</hostname>", bad)
+        ok, _err = self.validate_rng(bad)
+        self.assertFalse(ok, "schema 放过了 <networking><hostname> 的非法产物")
 
 
 if __name__ == "__main__":

@@ -2094,40 +2094,20 @@ def _opensuse_autoyast(c) -> str:
     nc = c.net_config or {}
     iface = _safe_ident(nc.get("interface") or "eth0", "net_config.interface")
     L += ["  <networking>",
-          # ★ 2026-10-15 真机实测（A2）：装到一半 YaST 报 "profile could not be found or retrieved"，
-          #   而应用访问日志显示同一份 profile **7 次全部 200** —— 取得到、之后又"取不到"。
-          #   机制：linuxrc 在 ip=dhcp 下取到 profile；YaST 安装开始时会应用下面的 <networking>
-          #   （静态 IP + 固定网卡名），一旦把安装器的链路弄断，后续再取就失败。
-          #   `keep_install_network` 让 YaST **保留安装器当前网络**，装完再由系统自身 ifcfg 生效
-          #   —— 这是 AutoYaST 对这一类问题的标准开关。
+          # ★ 2026-10-18 真机（A2 最后一块拼图）：装机期**不要让 YaST 去配网卡**。
+          #   证据链：安装器里的网卡叫 eth0（linuxrc 打印 `eth0: network config created`），
+          #   而这里原本写 <name>ens18</name> —— 那是**装好的系统**里的名字，装机期并不存在。
+          #   于是 YaST 在装包途中去重配一张不存在的网卡 ⇒ 安装源 192.168.199.1:8000 断链
+          #   ⇒ 盘写入停在 6.66%，控制台回到 linuxrc 的
+          #     "Please make sure your installation medium is available. Choose the URL to retry."
+          #   所以 <networking> 里**只留主机名**；静态地址/网关/DNS 全部交给下面的 <files>
+          #   直接落成 sysconfig 文件（ifcfg-<iface> + routes），首启由 wicked 生效。
+          #   网关也不再写 <routing>：它同样会在装机期被 apply。
           "    <keep_install_network config:type=\"boolean\">true</keep_install_network>",
-          "    <interfaces config:type=\"list\">", "      <interface>",
-          "        <name>" + _xml(iface) + "</name>",
-          "        <startmode>auto</startmode>"]
-    if c.net_mode == "static" and nc.get("ip"):
-        cidr = int(nc.get("cidr") or 24)
-        L += ["        <bootproto>static</bootproto>",
-              "        <ipaddr>" + _xml(nc.get("ip")) + "</ipaddr>",
-              "        <prefixlen>" + str(cidr) + "</prefixlen>"]
-        # AutoYaST 的默认路由写在 <route> 里（不是接口的 gateway 字段）
-    else:
-        L += ["        <bootproto>dhcp</bootproto>"]
-    L += ["      </interface>", "    </interfaces>"]
-    if c.net_mode == "static" and nc.get("ip"):
-        if nc.get("gateway"):
-            L += ["    <routing>", "      <routes config:type=\"list\">", "        <route>",
-                  "          <destination>default</destination>",
-                  "          <gateway>" + _xml(nc.get("gateway")) + "</gateway>",
-                  "          <netmask>-</netmask>",
-                  "          <device>" + _xml(iface) + "</device>",
-                  "        </route>", "      </routes>", "    </routing>"]
-        if nc.get("dns"):
-            L += ["    <dns>", "      <hostname>" + _xml(hn) + "</hostname>",
-                  "      <nameservers config:type=\"list\">"]
-            for d in nc.get("dns") or []:
-                L += ["        <nameserver>" + _xml(d) + "</nameserver>"]
-            L += ["      </nameservers>", "    </dns>"]
-    L += ["  </networking>"]
+          "    <dns>",
+          "      <hostname>" + _xml(hn) + "</hostname>",
+          "    </dns>",
+          "  </networking>"]
 
     # ── 分区：只写"用整盘、LVM"这类确定语义；具体分区表交给 AutoYaST 默认方案 ──
     L += ['  <partitioning config:type="list">', "    <drive>",
@@ -2151,13 +2131,38 @@ def _opensuse_autoyast(c) -> str:
     L += ["    </user>", "    <user>", "      <username>root</username>",
           "      <user_password>" + _xml(root_hash) + "</user_password>", "    </user>",
           "  </users>"]
+    # ── 文件：sudo 免密 + 主机名 + 静态网络（装机期不碰网卡，见上面 <networking> 注释）──
+    #   ★ <files> 在 profile 里只能出现**一次**（它是 config:type="list" 的一整个列表），
+    #     所以先把要写的文件收集进 _files，最后统一发射。
+    _files = []
     if c.sudo_nopasswd:
-        # sudo 免密：AutoYaST 写文件的规范落点（与其它家族"运维要 sudo 免密"同一诉求）
-        L += ["  <files config:type=\"list\">", "    <file>",
-              "      <file_path>/etc/sudoers.d/90-opstk-" + _xml(admin) + "</file_path>",
-              "      <file_contents>" + _xml(admin + " ALL=(ALL) NOPASSWD: ALL")
-              + "</file_contents>",
-              "    </file>", "  </files>"]
+        # sudo 免密：AutoYaST 写文件的标准落点（与其它家族"运维要 sudo 免密"同一诉求）
+        _files.append(("/etc/sudoers.d/90-opstk-" + admin,
+                       admin + " ALL=(ALL) NOPASSWD: ALL\n"))
+    _files.append(("/etc/hostname", hn + "\n"))
+    if c.net_mode == "static" and nc.get("ip"):
+        _cidr = int(nc.get("cidr") or 24)
+        _ifcfg = ["BOOTPROTO='static'",
+                  "IPADDR='" + str(nc.get("ip")) + "/" + str(_cidr) + "'",
+                  "STARTMODE='auto'"]
+        _dns = [str(d) for d in (nc.get("dns") or []) if str(d).strip()]
+        if _dns:
+            _ifcfg.append("NETCONFIG_DNS_STATIC_SERVERS='" + " ".join(_dns) + "'")
+        _files.append(("/etc/sysconfig/network/ifcfg-" + iface, "\n".join(_ifcfg) + "\n"))
+        if nc.get("gateway"):
+            _files.append(("/etc/sysconfig/network/routes",
+                           "default " + str(nc.get("gateway")) + " - -\n"))
+    if c.ssh_keys:
+        _files.append(("/root/.ssh/authorized_keys", "\n".join(c.ssh_keys) + "\n"))
+    _files = [(p, t) for p, t in _files if (t or "").strip()]
+    if _files:
+        L += ['  <files config:type="list">']
+        for _p, _t in _files:
+            L += ["    <file>",
+                  "      <file_path>" + _xml(_p) + "</file_path>",
+                  "      <file_contents>" + _xml(_t) + "</file_contents>",
+                  "    </file>"]
+        L += ["  </files>"]
     L += ["</profile>", ""]
     return "\n".join(L)
 
