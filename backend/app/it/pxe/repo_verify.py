@@ -38,6 +38,26 @@ KEYRING_CANDIDATES = (
 _INDEX_NAMES = ("Packages", "Packages.gz", "Packages.xz", "Release",
                 "Translation-en", "Translation-en.gz", "Translation-en.xz")
 
+# ★ 2026-10-18（B1 口径闭环）：同一个逻辑索引有**多种压缩变体**，Release 会为每个变体各写一条
+#   哈希（`main/binary-amd64/Packages`、`...Packages.gz`、`...Packages.xz` 各一行）。
+#   本工具同步的是**子集**：线上 debian-13.7.0 只有 `.gz`，于是"Release 声明了未压缩的
+#   `Packages`、磁盘上没有"被报成 missing ⇒ 4 条**误报**，整仓永远 warn，等于没有校验。
+#   正确语义：按"逻辑索引"聚合变体，**任一变体在且哈希对**就算该索引齐；都没有才 missing。
+_COMPRESS_SUFFIXES = ("", ".gz", ".xz", ".bz2")
+
+
+def _logical_index(relpath):
+    """把 `main/binary-amd64/Packages.gz` 归一成 `main/binary-amd64/Packages`。
+
+    非 Packages/Translation 类的（比如 `Release`）原样返回，不做聚合。
+    """
+    for base in ("Packages", "Translation-en"):
+        for suf in _COMPRESS_SUFFIXES:
+            if relpath.endswith(base + suf) and (
+                    relpath == base + suf or relpath.endswith("/" + base + suf)):
+                return relpath[: len(relpath) - len(suf)]
+    return relpath
+
 
 def _sha256(path, chunk=1024 * 1024):
     h = hashlib.sha256()
@@ -175,33 +195,53 @@ def verify_suite(repo_path, suite, keyring=None, limit_bad=10):
         #   没有 Release** 的 suite 把 /repo/status 直接打成 500 —— 是我漏写了这个键，
         #   不是数据问题（用例只覆盖了"有 Release"的分支，所以没抓住，本轮补了用例）。
         res["index_check"] = {"checked": 0, "ok": 0, "bad": [], "bad_count": 0,
-                             "missing": [], "missing_count": 0}
+                             "missing": [], "missing_count": 0,
+                             "compressed_used": [], "compressed_count": 0}
         return res
     with open(os.path.join(sd, "Release"), encoding="utf-8", errors="replace") as f:
         declared = parse_release_sha256(f.read())
     # 只核对"我们关心的、且在 Release 里声明了"的索引文件
     checked = ok = 0
     bad, missing = [], []
+    # 先按**逻辑索引**聚合变体：{逻辑路径: [(变体路径, want_sha, want_size), ...]}
+    groups = {}
     for relpath, (want_sha, want_size) in sorted(declared.items()):
-        base = os.path.basename(relpath)
-        if base not in _INDEX_NAMES:
+        if os.path.basename(relpath) not in _INDEX_NAMES:
             continue
-        # Release 里的路径是 `main/binary-amd64/Packages` 这种相对 dists/<suite>/ 的路径
-        fp = os.path.join(sd, relpath)
-        if not os.path.exists(fp):
-            missing.append(relpath)
+        groups.setdefault(_logical_index(relpath), []).append((relpath, want_sha, want_size))
+
+    compressed_used = []
+    for logical, variants in sorted(groups.items()):
+        present = [(rp, ws, wz) for rp, ws, wz in variants
+                   if os.path.exists(os.path.join(sd, rp))]
+        if not present:
+            # 一个变体都没有才算"没同步"。把试过的变体写进 reason，运维知道要补什么。
+            tried = ",".join(os.path.basename(rp) for rp, _s, _z in variants)
+            missing.append(logical + "（试过变体：" + tried + "）")
             continue
-        checked += 1
-        got_sha = _sha256(fp)
-        got_size = os.path.getsize(fp)
-        if got_sha == want_sha and got_size == want_size:
+        # 有变体在：逐个校验哈希/大小（同族多个变体都在时，任一对就算过）
+        fam_ok = False
+        for relpath, want_sha, want_size in present:
+            checked += 1
+            fp = os.path.join(sd, relpath)
+            got_sha = _sha256(fp)
+            got_size = os.path.getsize(fp)
+            if got_sha == want_sha and got_size == want_size:
+                fam_ok = True
+                if relpath != logical:
+                    compressed_used.append(relpath)
+            else:
+                bad.append({"path": relpath, "want_sha256": want_sha[:16],
+                            "got_sha256": got_sha[:16],
+                            "want_size": want_size, "got_size": got_size})
+        if fam_ok:
             ok += 1
-        else:
-            bad.append({"path": relpath, "want_sha256": want_sha[:16], "got_sha256": got_sha[:16],
-                        "want_size": want_size, "got_size": got_size})
     res["index_check"] = {"checked": checked, "ok": ok,
                           "bad": bad[:limit_bad], "bad_count": len(bad),
-                          "missing": missing[:limit_bad], "missing_count": len(missing)}
+                          "missing": missing[:limit_bad], "missing_count": len(missing),
+                          # 用压缩变体是**正常**的（apt 优先 .xz/.gz）；列出来只为可读
+                          "compressed_used": compressed_used[:limit_bad],
+                          "compressed_count": len(compressed_used)}
     res["signature"] = verify_signature(sd, keyring)
     # ★ 语义修正（2026-10-15，线上真数据逼出来的）：
     #   `bad`（文件在、但内容与 Release 声明不符）= **fail**，这是真正的损坏；
@@ -215,12 +255,17 @@ def verify_suite(repo_path, suite, keyring=None, limit_bad=10):
                          "装机取包会失败" % len(bad))
     elif missing:
         res["verdict"] = "warn"
-        res["reason"] = ("索引自洽，但有 %d 个 Release 声明的索引**未同步**（子集同步属预期）；"
+        res["reason"] = ("索引自洽，但有 %d 个 Release 声明的索引**未同步**（同一索引的"
+                         "Packages/Packages.gz/Packages.xz 一个都没有；子集同步属预期）；"
                          "装机若需要其中某个会失败，需要时补同步" % len(missing))
+        if not (res["files"]["InRelease"]
+                or (res["files"]["Release.gpg"] and res["files"]["Release"])):
+            res["reason"] += "；另外**未签名**（缺 InRelease/Release.gpg），无法校验索引完整性"
     elif not (res["files"]["InRelease"] or
               (res["files"]["Release.gpg"] and res["files"]["Release"])):
         res["verdict"] = "warn"
-        res["reason"] = "索引自洽，但**没有签名文件**（InRelease / Release.gpg 都没有）"
+        res["reason"] = ("索引齐全且自洽，但**未签名**（InRelease / Release.gpg 都没有）—— "
+                         "能装机，但无法证明索引没被改过；需要完整性保证请同步签名文件")
     elif res["signature"].get("checked") and not res["signature"].get("ok"):
         res["verdict"] = "fail"
         res["reason"] = "签名校验失败：" + str(res["signature"].get("output"))
@@ -255,4 +300,29 @@ def verify_repo(repo_path, keyring=None):
     r["verdict"] = ("fail" if "fail" in verdicts else
                     "warn" if "warn" in verdicts else
                     "ok" if "ok" in verdicts else "n/a")
+    # ★ 2026-10-18：仓库级 `reason` 以前是空的 —— 前端把 verdict 显示成黄色却一句话不说，
+    #   运维不知道要做什么。这里按最差套系汇总一句可执行的话（套系级仍是完整细节）。
+    if r["verdict"] == "fail":
+        bad = [s["suite"] for s in r["suites"] if s["verdict"] == "fail"]
+        r["reason"] = ("%d 个套系有**索引损坏**（与 Release 声明不符）：%s —— "
+                       "装机取包会失败，先修/重同步这些套系"
+                       % (len(bad), "、".join(bad[:5]) + ("…" if len(bad) > 5 else "")))
+    elif r["verdict"] == "warn":
+        warns = [s for s in r["suites"] if s["verdict"] == "warn"]
+        unsigned = [s["suite"] for s in warns
+                    if "未签名" in (s.get("reason") or "")]
+        missing = [s["suite"] for s in warns
+                   if (s.get("index_check") or {}).get("missing_count")]
+        bits = []
+        if unsigned:
+            bits.append("未签名（%d 个套系：%s）—— 能装机但无法证明索引没被改过"
+                        % (len(unsigned), "、".join(unsigned[:4])))
+        if missing:
+            bits.append("%d 个套系有未同步的索引（子集同步属预期，缺到时会装不上：%s）"
+                        % (len(missing), "、".join(missing[:4])))
+        r["reason"] = "；".join(bits) if bits else "有 %d 个套系被判 warn（详见套系明细）" % len(warns)
+    elif r["verdict"] == "ok":
+        r["reason"] = "全部 %d 个套系索引与签名都通过" % len(r["suites"])
+    else:
+        r["reason"] = "没有可核查的套系"
     return r

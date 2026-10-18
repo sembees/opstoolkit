@@ -54,6 +54,90 @@ def _mk_repo(root, good=True):
     return suite, sd
 
 
+class CompressedVariantTest(unittest.TestCase):
+    """★ 2026-10-18（B1 口径闭环）：索引的**压缩变体**不能被当成"缺失"。
+
+    线上事实：`debian-13.7.0/dists/trixie/` 只有 `main/binary-amd64/Packages.gz`，
+    而 Release 同时声明了 `Packages` 与 `Packages.gz`。旧逻辑逐个按声明的路径找文件，
+    于是"未压缩的那份没同步"被记进 missing（4 条全误报），整仓永远 warn。
+    apt 的取法是"哪个变体在就用哪个"，所以**任一变体在 + 哈希对** ⇒ 该索引齐。
+    """
+
+    def _mk(self, root, variants, signed=False):
+        """variants: 要落盘的变体名列表，如 ["Packages.gz"]。Release 里三种都声明。"""
+        suite = "trixie"
+        sd = os.path.join(root, "dists", suite)
+        pkgdir = os.path.join(sd, "main", "binary-amd64")
+        os.makedirs(pkgdir, exist_ok=True)
+        pkg = b"Package: vim\nVersion: 1\n\n"
+        payload = {"Packages": pkg,
+                   "Packages.gz": gzip.compress(pkg),
+                   "Packages.xz": b"\xfd7zXZ\x00fake-xz"}
+        lines = ["Origin: Debian", "Suite: " + suite, "SHA256:"]
+        for name in ("Packages", "Packages.gz", "Packages.xz"):
+            data = payload[name]
+            path = os.path.join(pkgdir, name)
+            if name in variants:
+                with open(path, "wb") as f:
+                    f.write(data)
+            lines.append(" %s %d %s" % (hashlib.sha256(data).hexdigest(), len(data),
+                                        "main/binary-amd64/" + name))
+        with open(os.path.join(sd, "Release"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        if signed:
+            with open(os.path.join(sd, "InRelease"), "w") as f:
+                f.write("(fake inrelease)\n")
+        return suite, sd
+
+    def test_gz_only_is_fully_present(self):
+        with tempfile.TemporaryDirectory() as root:
+            suite, _sd = self._mk(root, ["Packages.gz"])
+            res = rv.verify_suite(root, suite)
+            self.assertEqual(res["index_check"]["missing_count"], 0,
+                             "只有 .gz 不该报缺失：%s" % res["index_check"]["missing"])
+            self.assertEqual(res["index_check"]["ok"], 1)
+            self.assertIn("main/binary-amd64/Packages.gz",
+                          res["index_check"]["compressed_used"])
+
+    def test_xz_only_is_fully_present(self):
+        with tempfile.TemporaryDirectory() as root:
+            suite, _sd = self._mk(root, ["Packages.xz"])
+            res = rv.verify_suite(root, suite)
+            self.assertEqual(res["index_check"]["missing_count"], 0)
+
+    def test_no_variant_at_all_is_missing_and_lists_tried(self):
+        with tempfile.TemporaryDirectory() as root:
+            suite, _sd = self._mk(root, [])
+            res = rv.verify_suite(root, suite)
+            self.assertGreaterEqual(res["index_check"]["missing_count"], 1)
+            joined = " ".join(res["index_check"]["missing"])
+            self.assertIn("main/binary-amd64/Packages", joined)
+            self.assertIn("试过变体", joined)
+
+    def test_variant_with_wrong_hash_is_still_bad(self):
+        with tempfile.TemporaryDirectory() as root:
+            suite, sd = self._mk(root, ["Packages.gz"])
+            with open(os.path.join(sd, "main", "binary-amd64", "Packages.gz"), "ab") as f:
+                f.write(b"tampered")
+            res = rv.verify_suite(root, suite)
+            self.assertGreaterEqual(res["index_check"]["bad_count"], 1)
+            self.assertEqual(res["verdict"], "fail")
+
+    def test_unsigned_is_warn_with_explicit_reason(self):
+        with tempfile.TemporaryDirectory() as root:
+            suite, _sd = self._mk(root, ["Packages.gz"], signed=False)
+            res = rv.verify_suite(root, suite)
+            self.assertEqual(res["verdict"], "warn")
+            self.assertIn("签名", res["reason"])
+            self.assertIn("未签名", res["reason"])
+
+    def test_inrelease_present_no_unsigned_warning(self):
+        with tempfile.TemporaryDirectory() as root:
+            suite, _sd = self._mk(root, ["Packages.gz"], signed=True)
+            res = rv.verify_suite(root, suite)
+            self.assertNotIn("未签名", res["reason"] or "")
+
+
 class ReleaseParserTest(unittest.TestCase):
     def test_parses_sha256_section_and_stops_at_next_section(self):
         text = ("Origin: Debian\nSHA256:\n"
@@ -76,9 +160,12 @@ class VerifySuiteTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             suite, _sd = _mk_repo(tmp, good=True)
             res = rv.verify_suite(tmp, suite)
+        # ★ 2026-10-18：ok 现在按**逻辑索引**计数（Packages 与 Packages.gz 属同一个索引），
+        #   所以 checked=2（两个变体都校验了哈希）但 ok=1（算"一个索引齐了"）。
         self.assertEqual(res["index_check"]["checked"], 2)
-        self.assertEqual(res["index_check"]["ok"], 2)
+        self.assertEqual(res["index_check"]["ok"], 1)
         self.assertEqual(res["index_check"]["bad_count"], 0)
+        self.assertEqual(res["index_check"]["missing_count"], 0)
         self.assertTrue(res["files"]["Release"])
         # 没有密钥环 ⇒ 签名**未校验**，只能是 warn（不能自称 ok）
         self.assertIn(res["verdict"], ("ok", "warn"))
@@ -99,13 +186,23 @@ class VerifySuiteTest(unittest.TestCase):
     def test_missing_declared_file_is_reported_as_warn_not_fail(self):
         """★ 线上真数据逼出来的语义修正：本工具同步的是**子集**（只搬 amd64 若干组件），
         所以"Release 声明了、本地没搬"是**预期**，只能 warn —— 判 fail 会让部分同步的仓库
-        永远红灯，等于没有校验（"狼来了"）。但**必须报出来**（装机若需要它会失败）。"""
+        永远红灯，等于没有校验（"狼来了"）。但**必须报出来**（装机若需要它会失败）。
+
+        ★ 2026-10-18 改口径：**删掉一个变体不算缺失**（Packages 还在，apt 用得到）。
+        要触发"缺失"，必须把一个逻辑索引的**全部变体**都删掉。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             suite, sd = _mk_repo(tmp, good=True)
+            # 只删 .gz：Packages 还在 ⇒ 不算缺失（这正是线上 debian-13.7.0 的反向情形）
             os.remove(os.path.join(sd, "main", "binary-amd64", "Packages.gz"))
+            res_gz_gone = rv.verify_suite(tmp, suite)
+            self.assertEqual(res_gz_gone["index_check"]["missing_count"], 0)
+            # 再把未压缩的也删掉 ⇒ 该索引彻底缺失
+            os.remove(os.path.join(sd, "main", "binary-amd64", "Packages"))
             res = rv.verify_suite(tmp, suite)
         self.assertEqual(res["verdict"], "warn")
-        self.assertEqual(res["index_check"]["missing"], ["main/binary-amd64/Packages.gz"])
+        self.assertGreaterEqual(res["index_check"]["missing_count"], 1)
+        self.assertIn("main/binary-amd64/Packages", " ".join(res["index_check"]["missing"]))
         self.assertIn("未同步", res["reason"])
 
     def test_missing_release_is_fail(self):
@@ -117,13 +214,18 @@ class VerifySuiteTest(unittest.TestCase):
             self.assertIn("缺少 Release", res["reason"])
 
     def test_unsigned_but_self_consistent_is_warn_not_ok(self):
-        """★ 不能把"没有签名文件"说成通过 —— 那正是"带官方签名"这条要求的核心。"""
+        """★ 不能把"没有签名文件"说成通过 —— 那正是"带官方签名"这条要求的核心。
+
+        ★ 2026-10-18：文案改成明确的"未签名"（旧文案是"没有签名文件"），
+        并说清后果"能装机但无法证明索引没被改过"——测试跟着锁新文案。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             suite, sd = _mk_repo(tmp, good=True)
             os.remove(os.path.join(sd, "Release.gpg"))
             res = rv.verify_suite(tmp, suite)
         self.assertEqual(res["verdict"], "warn")
-        self.assertIn("没有签名文件", res["reason"])
+        self.assertIn("未签名", res["reason"])
+        self.assertIn("无法证明索引没被改过", res["reason"])
 
 
 class VerifyRepoAndListTest(unittest.TestCase):
@@ -182,7 +284,12 @@ class VerifyRepoAndListTest(unittest.TestCase):
         self.assertEqual(res["verdict"], "warn")
         self.assertEqual(res["index_check"],
                          {"checked": 0, "ok": 0, "bad": [], "bad_count": 0,
-                          "missing": [], "missing_count": 0})
+                          "missing": [], "missing_count": 0,
+                          "compressed_used": [], "compressed_count": 0})
+        # 形状必须与"有 Release"分支一致：调用方按固定键读，少一个就是 500
+        self.assertEqual(set(res["index_check"]),
+                         {"checked", "ok", "bad", "bad_count", "missing", "missing_count",
+                          "compressed_used", "compressed_count"})
 
     def test_suite_with_content_but_no_release_is_fail(self):
         """★ 反过来才是真危险：**有索引内容却没有 Release** ⇒ d-i 无法校验镜像 ⇒ fail。"""
