@@ -7,7 +7,7 @@
 本次范围（明确边界）：
   · **只做静态 IPv6**（地址 + 默认网关）：`ip6` / `gateway6` 两个字段；
   · DHCPv6 / SLAAC / 多个 IPv6 地址 **不在本次**（宁可没有，也不做半吊子）；
-  · 三种后端都要写：netplan(`addresses6` + `gateway6`)、nmcli(`ipv6.*`)、ifcfg(`IPV6INIT/IPV6ADDR/IPV6_DEFAULTGW`)；
+  · 三种后端都要写：netplan(`addresses` 里带 v6 + `routes: to: ::/0`)、nmcli(`ipv6.*`)、ifcfg(`IPV6INIT/IPV6ADDR/IPV6_DEFAULTGW`)；
   · 非法值 **fail-closed**（生成期 ValueError），绝不写出半截配置。
 """
 import sys
@@ -22,6 +22,24 @@ from app.it.netconfig.generator import generate_netconfig   # noqa: E402
 
 A6 = "2001:db8::5/64"
 G6 = "2001:db8::1"
+
+
+# ── netplan 的 IPv6 语义（2026-10-18 真 netplan 0.107.1 验过）──────────────────
+#   ★ netplan **没有** `addresses6` 键：真跑 `netplan generate` 会报
+#     `unknown key 'addresses6'`，那份配置根本加载不了。
+#   IPv6 地址与 IPv4 一样放进 `addresses:` 列表；IPv6 默认路由写成
+#   `routes: - to: "::/0" via: <gw6>`（gateway4/gateway6 在 netplan 1.x 已删除）。
+def np_v6_addrs(dev):
+    """从 netplan 设备块里取 IPv6 地址（addresses 中带冒号的那些）。"""
+    return [a for a in (dev.get("addresses") or []) if ":" in str(a)]
+
+
+def np_v6_gw(dev):
+    """从 netplan 设备块的 routes 里取 IPv6 默认网关（to == "::/0" 的 via）。"""
+    for r in (dev.get("routes") or []):
+        if str(r.get("to")) in ("::/0", "::0/0"):
+            return r.get("via")
+    return None
 
 
 def gen(**kw):
@@ -40,8 +58,8 @@ class NetplanIpv6Test(unittest.TestCase):
         p = gen(os="ubuntu", format="netplan", interfaces=iface(ip6=A6, gateway6=G6))
         doc = yaml.safe_load(p)
         eth0 = doc["network"]["ethernets"]["eth0"]
-        self.assertEqual(eth0["addresses6"], [A6])
-        self.assertEqual(eth0["gateway6"], G6)
+        self.assertEqual(np_v6_addrs(eth0), [A6])
+        self.assertEqual(np_v6_gw(eth0), G6)
         # IPv4 部分必须原样保留（不能因为加了 IPv6 把 IPv4 丢掉）
         self.assertIn("10.10.10.1/24", eth0["addresses"])
 
@@ -136,7 +154,7 @@ class Ipv6OnlyTest(unittest.TestCase):
     """★ 纯 IPv6（没有 IPv4 地址）也必须能生成。
 
     修前：IPv6 那几行写在"有 IPv4"的分支里 ⇒ 只填 IPv6 的接口会被**静默丢弃**
-    （nmcli 只出 `ipv4.method auto`、netplan 连 addresses6 都不写）。
+    （nmcli 只出 `ipv4.method auto`、netplan 连 addresses 都不写）。
     纯 IPv6 主机/内网是常见形态，静默丢弃比报错更糟。
     """
 
@@ -155,9 +173,10 @@ class Ipv6OnlyTest(unittest.TestCase):
         p = gen(os="ubuntu", format="netplan", interfaces=self.ONLY6)
         doc = yaml.safe_load(p)
         eth0 = doc["network"]["ethernets"]["eth0"]
-        self.assertEqual(eth0["addresses6"], [A6])
-        self.assertEqual(eth0["gateway6"], G6)
-        self.assertNotIn("addresses", eth0)
+        self.assertEqual(np_v6_addrs(eth0), [A6])
+        self.assertEqual(np_v6_gw(eth0), G6)
+        self.assertEqual([a for a in eth0["addresses"] if ":" not in str(a)], [],
+                         "纯 IPv6 时 addresses 里不该有 IPv4")
 
     def test_ifcfg_ipv6_only(self):
         p = gen(os="rhel", format="ifcfg", interfaces=self.ONLY6)
@@ -166,13 +185,13 @@ class Ipv6OnlyTest(unittest.TestCase):
         self.assertIn("IPV6_DEFAULTGW=" + G6, p)
 
     def test_netplan_dhcp4_with_static_ipv6(self):
-        """DHCP 拿 IPv4 + 手工 IPv6 是合法组合（`dhcp4: true` 与 `addresses6` 可共存）。"""
+        """DHCP 拿 IPv4 + 手工 IPv6 是合法组合（`dhcp4: true` 与 `addresses: [v6]` 可共存）。"""
         p = gen(os="ubuntu", format="netplan",
                 interfaces=[{"name": "eth0", "mode": "dhcp", "ip6": A6}])
         doc = yaml.safe_load(p)
         eth0 = doc["network"]["ethernets"]["eth0"]
         self.assertTrue(eth0["dhcp4"])
-        self.assertEqual(eth0["addresses6"], [A6])
+        self.assertEqual(np_v6_addrs(eth0), [A6])
 
     def test_nmcli_dhcp_with_static_ipv6(self):
         p = gen(os="rhel", format="nmcli",
@@ -296,11 +315,12 @@ class Ipv6OnVirtualDevicesTest(unittest.TestCase):
         # IPv4 部分没被破坏：聚合结构、模式、静态地址、默认路由
         self.assertEqual(b["interfaces"], ["eth1", "eth2"])
         self.assertEqual(b["parameters"]["mode"], "active-backup")
-        self.assertEqual(b["addresses"], ["10.200.0.2/24"])
+        # 双栈：IPv6 与 IPv4 同在一个 addresses 列表（netplan 没有 addresses6 键）
+        self.assertEqual(b["addresses"], ["10.200.0.2/24", A6])
         self.assertEqual(b["routes"][0]["via"], "10.200.0.254")
         # IPv6 键落在 bonds 段（不是 ethernets）
-        self.assertEqual(b["addresses6"], [A6])
-        self.assertEqual(b["gateway6"], G6)
+        self.assertEqual(np_v6_addrs(b), [A6])
+        self.assertEqual(np_v6_gw(b), G6)
 
     def test_nmcli_bond_dual_stack(self):
         """nmcli：bond0 的 modify 命令——ipv4.* 原有键还在，ipv6.method/addresses/gateway 透传。"""
@@ -340,10 +360,10 @@ class Ipv6OnVirtualDevicesTest(unittest.TestCase):
         v = yaml.safe_load(p)["network"]["vlans"]["ens19.100"]
         self.assertEqual(v["id"], 100)
         self.assertEqual(v["link"], "ens19")
-        self.assertEqual(v["addresses"], ["10.201.0.2/24"])
+        self.assertEqual(v["addresses"], ["10.201.0.2/24", A6])
         self.assertEqual(v["routes"][0]["via"], "10.201.0.254")
-        self.assertEqual(v["addresses6"], [A6])
-        self.assertEqual(v["gateway6"], G6)
+        self.assertEqual(np_v6_addrs(v), [A6])
+        self.assertEqual(np_v6_gw(v), G6)
 
     def test_nmcli_vlan_dual_stack(self):
         """nmcli：ens19.100 的 add 行（type vlan/dev/id 原样）+ modify 里 ipv4.* 与 ipv6.*。"""
@@ -381,10 +401,10 @@ class Ipv6OnVirtualDevicesTest(unittest.TestCase):
         p = gen(os="ubuntu", format="netplan", bridges=self.BRIDGE6)
         br = yaml.safe_load(p)["network"]["bridges"]["br0"]
         self.assertEqual(br["interfaces"], ["eth1", "eth2"])
-        self.assertEqual(br["addresses"], ["10.202.0.2/24"])
+        self.assertEqual(br["addresses"], ["10.202.0.2/24", A6])
         self.assertEqual(br["routes"][0]["via"], "10.202.0.254")
-        self.assertEqual(br["addresses6"], [A6])
-        self.assertEqual(br["gateway6"], G6)
+        self.assertEqual(np_v6_addrs(br), [A6])
+        self.assertEqual(np_v6_gw(br), G6)
 
     def test_nmcli_bridge_dual_stack(self):
         """nmcli：br0 的 modify——ipv4.* 原有键还在，ipv6.method/addresses/gateway 透传。"""
@@ -421,9 +441,9 @@ class Ipv6OnVirtualDevicesTest(unittest.TestCase):
         # netplan：bonds 段有 IPv6 键、没有 addresses（dict 按**键名**精确判，addresses6 不算命中）
         p = gen(os="ubuntu", format="netplan", bonds=self.BOND_ONLY6)
         b = yaml.safe_load(p)["network"]["bonds"]["bond0"]
-        self.assertEqual(b["addresses6"], [A6])
-        self.assertEqual(b["gateway6"], G6)
-        self.assertNotIn("addresses", b)
+        self.assertEqual(np_v6_addrs(b), [A6])
+        self.assertEqual(np_v6_gw(b), G6)
+        self.assertEqual([a for a in b["addresses"] if ":" not in str(a)], [])
         self.assertEqual(b["interfaces"], ["eth1", "eth2"])   # bond 结构本身不受影响
         # nmcli：bond0 的 modify 行退化成 ipv4.method auto，IPv6 键齐全
         p = gen(os="rhel", format="nmcli", bonds=self.BOND_ONLY6)
@@ -447,9 +467,9 @@ class Ipv6OnVirtualDevicesTest(unittest.TestCase):
         # netplan：vlans.ens19.100 有 addresses6/gateway6、没有 addresses
         p = gen(os="ubuntu", format="netplan", vlans=self.VLAN_ONLY6)
         v = yaml.safe_load(p)["network"]["vlans"]["ens19.100"]
-        self.assertEqual(v["addresses6"], [A6])
-        self.assertEqual(v["gateway6"], G6)
-        self.assertNotIn("addresses", v)
+        self.assertEqual(np_v6_addrs(v), [A6])
+        self.assertEqual(np_v6_gw(v), G6)
+        self.assertEqual([a for a in v["addresses"] if ":" not in str(a)], [])
         self.assertEqual(v["id"], 100)          # vlan 结构本身不受影响
         self.assertEqual(v["link"], "ens19")
         # nmcli：ens19.100 的 modify 退化 ipv4.method auto，IPv6 键齐全
@@ -473,9 +493,9 @@ class Ipv6OnVirtualDevicesTest(unittest.TestCase):
         # netplan：bridges.br0 有 addresses6/gateway6、没有 addresses
         p = gen(os="ubuntu", format="netplan", bridges=self.BRIDGE_ONLY6)
         br = yaml.safe_load(p)["network"]["bridges"]["br0"]
-        self.assertEqual(br["addresses6"], [A6])
-        self.assertEqual(br["gateway6"], G6)
-        self.assertNotIn("addresses", br)
+        self.assertEqual(np_v6_addrs(br), [A6])
+        self.assertEqual(np_v6_gw(br), G6)
+        self.assertEqual([a for a in br["addresses"] if ":" not in str(a)], [])
         self.assertEqual(br["interfaces"], ["eth1", "eth2"])   # bridge 结构本身不受影响
         # nmcli：br0 的 modify 退化 ipv4.method auto，IPv6 键齐全
         p = gen(os="rhel", format="nmcli", bridges=self.BRIDGE_ONLY6)

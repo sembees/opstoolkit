@@ -447,6 +447,10 @@ def _netplan_routes(out, indent, obj, metric=None):
     为什么必须合成一个键（2026-10-15）：netplan 里 `routes` 是**列表**，
     同一次出现两次 `routes:` 会让后一个覆盖前一个（YAML 重复键）—— 那正是
     "加了静态路由，默认路由却没了"的失败形状。所以这里先收齐再输出。
+
+    ★ 2026-10-18：IPv6 默认路由也在这里出（`to: "::/0"` + `via: <gw6>`），
+    而不是用 `gateway6` 键 —— netplan 1.x（Ubuntu 24.04 起）已经删掉 gateway4/gateway6，
+    `::/0` 这条路在 0.107 与 1.x 上都成立（两边都用真 netplan 验过 0.107 这一侧）。
     """
     entries = []
     gw = (obj.get("gateway") or "").strip() if isinstance(obj, dict) else getattr(obj, "gateway", None)
@@ -454,6 +458,9 @@ def _netplan_routes(out, indent, obj, metric=None):
         e = {"to": "default", "via": gw, "metric": metric, "on_link": None}
         entries.append(e)
     entries.extend(_routes_of(obj))
+    _g6 = _v6_check(obj.get("gateway6"), "gateway6")
+    if _g6:
+        entries.append({"to": "::/0", "via": _g6, "metric": None, "on_link": None})
     if not entries:
         return
     out.append(f"{indent}routes:")
@@ -467,19 +474,27 @@ def _netplan_routes(out, indent, obj, metric=None):
             out.append(f"{indent}    on-link: true")
 
 
-def _netplan_v6(out, indent, obj) -> None:
-    """IPv6 静态：netplan 用 `addresses6` + `gateway6`（字符串拼接，兼容 3.10）。
+def _netplan_addresses(obj) -> list:
+    """netplan 的 `addresses:` 列表：**IPv4 与 IPv6 合并在同一个键里**。
 
-    与 IPv4 分支解耦：纯 IPv6 设备（`dhcp4: true` 或 L2 设备）也要能带 IPv6 地址 ——
-    netplan 允许 `dhcp4: true` 与 `addresses6` 并存。
+    ★ 2026-10-18 真工具纠错（重要）：我原先写的是 `addresses6:` —— netplan **没有这个键**。
+    用 Ubuntu 22.04 自带 netplan 0.107.1 跑 `netplan generate` 直接报
+    `unknown key 'addresses6'`，也就是说那份配置**根本加载不了**（装完机就是裸网）。
+    正确写法是把 IPv6 地址放进同一个 `addresses:` 列表（`["10.0.0.5/24", "2001:db8::5/64"]`），
+    已在容器里用真 netplan 验过 A/B/C/D 四种组合（纯 v6、双栈、dhcp4+v6 全过）。
     """
+    addrs = []
+    ip = (obj.get("ip") or "").strip() if isinstance(obj, dict) else None
+    if ip:
+        addrs.append(ip + "/" + str(_prefix(obj)))
     _a6 = _v6_check(obj.get("ip6"), "ip6")
-    if not _a6:
-        return
-    out.append(indent + "addresses6: [" + _yaml(_a6) + "]")
-    _g6 = _v6_check(obj.get("gateway6"), "gateway6")
-    if _g6:
-        out.append(indent + "gateway6: " + _yaml(_g6))
+    if _a6:
+        addrs.append(_a6)
+    return addrs
+
+
+def _netplan_emit_addresses(out, indent, addrs) -> None:
+    out.append(indent + "addresses: [" + ", ".join(_yaml(a) for a in addrs) + "]")
 
 
 def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
@@ -489,29 +504,33 @@ def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
         out.append(f"{indent}dhcp4: true")
         # 改前 dhcp 分支直接 return，静默丢掉 DNS（netplan 里 dhcp4+nameservers 是合法的）
         # ★ 2026-10-15：同样不能丢 routes —— DHCP 拿地址 + 手工补静态路由是常见需求。
-        # ★ 2026-10-18：IPv6 静态也不能丢（`dhcp4: true` + `addresses6` 是合法组合）。
-        _netplan_v6(out, indent, obj)
+        # ★ 2026-10-18：IPv6 静态也不能丢（`dhcp4: true` + `addresses: [v6]` 已被真 netplan 验过）。
+        addrs = _netplan_addresses(obj)
+        if addrs:
+            _netplan_emit_addresses(out, indent, addrs)
         _netplan_routes(out, indent, obj, metric)
         _netplan_dns(out, indent, dns)
         return
     if not obj.get("ip"):
         if dhcp_default:
             out.append(f"{indent}dhcp4: true")
-            _netplan_v6(out, indent, obj)
+            addrs = _netplan_addresses(obj)
+            if addrs:
+                _netplan_emit_addresses(out, indent, addrs)
             _netplan_routes(out, indent, obj, metric)
             _netplan_dns(out, indent, dns)
         # 无地址、也不走 DHCP（bond/bridge/vlan 的 L2 场景）时不写任何地址块：
         # 这里不写 nameservers —— 单独的 nameservers 没有地址承载，语义不清。
         # 但**显式给的路由仍然输出**：L2 桥上挂静态路由是合法配置，静默丢弃等于骗人。
-        # 同理：L2 设备上挂 IPv6 地址也是合法的，一并输出。
+        # 同理：L2 设备上挂 IPv6 地址也是合法的，一并输出（同一个 addresses 键）。
         else:
-            _netplan_v6(out, indent, obj)
+            addrs = _netplan_addresses(obj)
+            if addrs:
+                _netplan_emit_addresses(out, indent, addrs)
             _netplan_routes(out, indent, obj, metric)
         return
-    p = _prefix(obj)
     out.append(f"{indent}dhcp4: false")
-    out.append(f"{indent}addresses: [{_yaml(str(obj['ip']) + '/' + str(p))}]")
-    _netplan_v6(out, indent, obj)
+    _netplan_emit_addresses(out, indent, _netplan_addresses(obj))
     _netplan_routes(out, indent, obj, metric)
     _netplan_dns(out, indent, dns)
 

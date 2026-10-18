@@ -107,9 +107,11 @@ CASES = [
     ),
     dict(
         id="netplan-ipv6-only",
-        desc="ubuntu+netplan：纯 IPv6（无 IPv4 地址，addresses6/gateway6 独立成块）",
+        # ★ 2026-10-18 真 netplan 纠错：netplan 没有 addresses6 键（`netplan generate` 直接报
+        #   unknown key）。IPv6 地址进同一个 addresses 列表；IPv6 默认路由写 routes: to: "::/0"。
+        desc="ubuntu+netplan：纯 IPv6（addresses 里带 v6 + routes to ::/0）",
         expect_file="99-opstk.yaml",
-        smoke=('addresses6: ["2001:db8::5/64"]', 'gateway6: "2001:db8::1"',
+        smoke=('addresses: ["2001:db8::5/64"]', 'to: "::/0"', 'via: "2001:db8::1"',
                "dhcp4: true"),   # 现状：纯 IPv6 口的 IPv4 侧仍是 dhcp4: true（基线即如此）
         req=dict(os="ubuntu", format="netplan",
                  interfaces=[dict(name="eth0", mode="static",
@@ -119,8 +121,8 @@ CASES = [
         id="netplan-dual-stack",
         desc="ubuntu+netplan：双栈 IPv4+IPv6 + 静态路由（default 与额外路由合成一个 routes: 键）",
         expect_file="99-opstk.yaml",
-        smoke=("addresses: [10.10.10.5/24]", 'addresses6: ["2001:db8::5/64"]',
-               'gateway6: "2001:db8::1"', "to: default", "to: 10.20.0.0/16",
+        smoke=("addresses: [10.10.10.5/24, \"2001:db8::5/64\"]", 'to: "::/0"',
+               'via: "2001:db8::1"', "to: default", "to: 10.20.0.0/16",
                "via: 10.10.10.254", "metric: 50"),
         req=dict(os="ubuntu", format="netplan",
                  interfaces=[dict(name="eth0", mode="static", ip="10.10.10.5", cidr=24,

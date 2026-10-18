@@ -5,5 +5,7 @@ network:
   ethernets:
     eth0:
       dhcp4: true
-      addresses6: ["2001:db8::5/64"]
-      gateway6: "2001:db8::1"
+      addresses: ["2001:db8::5/64"]
+      routes:
+        - to: "::/0"
+          via: "2001:db8::1"
