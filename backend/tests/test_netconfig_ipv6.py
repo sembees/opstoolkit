@@ -132,6 +132,55 @@ class Ipv6DoesNotSwallowIpv4Test(unittest.TestCase):
         self.assertEqual(r1[0]["metric"], 100)
 
 
+class Ipv6OnlyTest(unittest.TestCase):
+    """★ 纯 IPv6（没有 IPv4 地址）也必须能生成。
+
+    修前：IPv6 那几行写在"有 IPv4"的分支里 ⇒ 只填 IPv6 的接口会被**静默丢弃**
+    （nmcli 只出 `ipv4.method auto`、netplan 连 addresses6 都不写）。
+    纯 IPv6 主机/内网是常见形态，静默丢弃比报错更糟。
+    """
+
+    ONLY6 = [{"name": "eth0", "mode": "static", "ip6": A6, "gateway6": G6}]
+
+    def test_nmcli_ipv6_only(self):
+        p = gen(os="rhel", format="nmcli", interfaces=self.ONLY6)
+        self.assertIn("ipv6.method manual", p)
+        self.assertIn("ipv6.addresses " + A6, p)
+        self.assertIn("ipv6.gateway " + G6, p)
+        # 没有 IPv4 地址时必须退化成 ipv4.method auto，而不是写一条空的 addresses
+        self.assertIn("ipv4.method auto", p)
+        self.assertNotIn("ipv4.addresses", p)
+
+    def test_netplan_ipv6_only(self):
+        p = gen(os="ubuntu", format="netplan", interfaces=self.ONLY6)
+        doc = yaml.safe_load(p)
+        eth0 = doc["network"]["ethernets"]["eth0"]
+        self.assertEqual(eth0["addresses6"], [A6])
+        self.assertEqual(eth0["gateway6"], G6)
+        self.assertNotIn("addresses", eth0)
+
+    def test_ifcfg_ipv6_only(self):
+        p = gen(os="rhel", format="ifcfg", interfaces=self.ONLY6)
+        self.assertIn("IPV6INIT=yes", p)
+        self.assertIn("IPV6ADDR=" + A6, p)
+        self.assertIn("IPV6_DEFAULTGW=" + G6, p)
+
+    def test_netplan_dhcp4_with_static_ipv6(self):
+        """DHCP 拿 IPv4 + 手工 IPv6 是合法组合（`dhcp4: true` 与 `addresses6` 可共存）。"""
+        p = gen(os="ubuntu", format="netplan",
+                interfaces=[{"name": "eth0", "mode": "dhcp", "ip6": A6}])
+        doc = yaml.safe_load(p)
+        eth0 = doc["network"]["ethernets"]["eth0"]
+        self.assertTrue(eth0["dhcp4"])
+        self.assertEqual(eth0["addresses6"], [A6])
+
+    def test_nmcli_dhcp_with_static_ipv6(self):
+        p = gen(os="rhel", format="nmcli",
+                interfaces=[{"name": "eth0", "mode": "dhcp", "ip6": A6}])
+        self.assertIn("ipv4.method auto", p)
+        self.assertIn("ipv6.addresses " + A6, p)
+
+
 class Ipv6ValidationTest(unittest.TestCase):
     """非法值必须 fail-closed —— 半截配置比没有更糟。"""
 
@@ -148,6 +197,14 @@ class Ipv6ValidationTest(unittest.TestCase):
     def test_gateway6_must_be_ipv6(self):
         with self.assertRaises(ValueError):
             gen(os="ubuntu", format="netplan", interfaces=iface(ip6=A6, gateway6="10.10.10.254"))
+
+    def test_gateway6_without_ip6_is_rejected(self):
+        """只给 IPv6 网关、不给地址 -> 生成器会写一条没有落点的 gateway6（netplan 直接报错）。"""
+        with self.assertRaises(ValueError) as cm:
+            gen(os="ubuntu", format="netplan",
+                interfaces=[{"name": "eth0", "ip": "10.10.10.1", "cidr": 24,
+                             "gateway6": G6}])
+        self.assertIn("gateway6", str(cm.exception))
 
     def test_bare_ip6_without_prefix_is_accepted(self):
         p = gen(os="ubuntu", format="netplan", interfaces=iface(ip6="2001:db8::5"))

@@ -182,6 +182,8 @@ def _check_l3(
     netmask: Optional[str] = None,
     cidr: Optional[int] = None,
     gateway: Optional[str] = None,
+    ip6: Optional[str] = None,
+    gateway6: Optional[str] = None,
     require_ip_when_static: bool = True,
 ) -> None:
     """一个逻辑接口（物理口/bond/VLAN/网桥）的 IPv4 跨字段校验（NC3）。
@@ -190,8 +192,9 @@ def _check_l3(
     path 由调用方给出（只有 NetConfigRequest 知道列表下标）。
 
     - mode=dhcp 与任何静态地址字段互斥：改前 ip/gateway/netmask/cidr 会被静默丢弃；
-    - mode=static 必须有 ip：改前实测退化成 DHCP（netplan `dhcp4: true` / nmcli
-      `ipv4.method auto` / ifcfg `BOOTPROTO=dhcp`），运维要的静态地址静默消失；
+    - mode=static 必须有 ip **或 ip6**：改前实测退化成 DHCP（netplan `dhcp4: true` /
+      nmcli `ipv4.method auto` / ifcfg `BOOTPROTO=dhcp`），运维要的静态地址静默消失；
+      ★ 2026-10-18：只配 IPv6 的静态接口是合法形态（纯 IPv6 内网），所以 ip6 也算"有地址"；
     - cidr 与 netmask 同时给出且不一致 → 报错：改前 cidr 静默覆盖 netmask；
     - gateway 必须落在 ip 所属子网内：改前会生成一条指向不可达网关的默认路由，
       一执行就把机器踢出网络。
@@ -218,10 +221,17 @@ def _check_l3(
             )
         prefix = nm_prefix
 
-    if mode == "static" and require_ip_when_static and not ip:
+    if mode == "static" and require_ip_when_static and not ip and not ip6:
         raise ValueError(
             f"{path}.ip 在 mode=static 时不能为空：空地址的静态接口既不是 DHCP 也没有地址，"
-            f"请填 ip，或把 mode 改成 dhcp"
+            f"请填 ip（或只配 IPv6 时填 ip6），或把 mode 改成 dhcp"
+        )
+    # ★ 2026-10-18：只有 IPv6 网关、没有 IPv6 地址 —— 生成器会写出一条没有落点的
+    #   `ipv6.gateway` / `gateway6`（netplan 直接报错，nmcli 默默忽略）。fail-closed。
+    if gateway6 and not ip6:
+        raise ValueError(
+            f"{path}.gateway6 给了 IPv6 网关，却没有 {path}.ip6：这条默认路由没有落点"
+            f"（请补 ip6，或删掉 gateway6）"
         )
     if not ip:
         # bond/bridge 没有 dhcp 开关，无 ip 时与 nmcli/ifcfg 一致按 DHCP 处理（不改这里的既有行为）。
@@ -1981,23 +1991,24 @@ class NetConfigRequest(BaseModel):
         for i, o in enumerate(self.interfaces):
             _check_l3(
                 f"interfaces[{i}]", mode=o.mode, ip=o.ip, netmask=o.netmask,
-                cidr=o.cidr, gateway=o.gateway,
+                cidr=o.cidr, gateway=o.gateway, ip6=o.ip6, gateway6=o.gateway6,
                 require_ip_when_static=o.name not in slave_names,
             )
         for i, o in enumerate(self.bonds):
             # bond 的 mode 是聚合模式（int），不是 dhcp 开关：无 ip 时保持既有语义（按 DHCP 处理）
             _check_l3(
-                f"bonds[{i}]", ip=o.ip, netmask=o.netmask, cidr=o.cidr, gateway=o.gateway
+                f"bonds[{i}]", ip=o.ip, netmask=o.netmask, cidr=o.cidr, gateway=o.gateway,
+                ip6=o.ip6, gateway6=o.gateway6,
             )
         for i, o in enumerate(self.vlans):
             _check_l3(
                 f"vlans[{i}]", mode=o.mode, ip=o.ip, netmask=o.netmask,
-                cidr=o.cidr, gateway=o.gateway,
+                cidr=o.cidr, gateway=o.gateway, ip6=o.ip6, gateway6=o.gateway6,
             )
         for i, o in enumerate(self.bridges):
             _check_l3(
                 f"bridges[{i}]", mode=o.mode, ip=o.ip, netmask=o.netmask,
-                cidr=o.cidr, gateway=o.gateway,
+                cidr=o.cidr, gateway=o.gateway, ip6=o.ip6, gateway6=o.gateway6,
             )
         return self
 

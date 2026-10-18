@@ -225,6 +225,25 @@ def _prefix(obj) -> int:
     return 24
 
 
+def _ipv6_lines(obj) -> list:
+    """IPv6 静态（2026-10-18）—— **与 IPv4 是否存在无关**。
+
+    为什么单拎出来：原来这段写在 `_ipv4_lines` 的"有 IPv4 地址"分支里，
+    于是"只配 IPv6"的接口会被**静默丢弃**（纯 IPv6 主机/内网很常见）。
+    netplan / nmcli / ifcfg 三种后端都不该有这条隐藏限制。
+    """
+    lines = []
+    _a6 = _v6_check(obj.get("ip6"), "ip6")
+    if not _a6:
+        return lines
+    lines.append("ipv6.method manual")
+    lines.append("ipv6.addresses " + _sh(_a6))
+    _g6 = _v6_check(obj.get("gateway6"), "gateway6")
+    if _g6:
+        lines.append("ipv6.gateway " + _sh(_g6))
+    return lines
+
+
 def _ipv4_lines(obj, metric=None) -> list:
     lines = []
     if not obj.get("ip"):
@@ -233,6 +252,8 @@ def _ipv4_lines(obj, metric=None) -> list:
             # DHCP 口 + 手填 DNS 是合法且常见的（覆盖 DHCP 下发的 DNS）。
             # 改前这里直接 return，DNS 静默丢失。
             lines.append("ipv4.dns " + _sh(" ".join(str(d) for d in obj["dns"])))
+        # ★ 纯 IPv6（无 IPv4 地址）也要写：只有 IPv4 段曾经把 IPv6 分支吞掉
+        lines += _ipv6_lines(obj)
         lines += _nmcli_route_lines(obj)
         return lines
     lines.append(f"ipv4.addresses {_sh(obj['ip'])}/{_prefix(obj)}")
@@ -245,14 +266,7 @@ def _ipv4_lines(obj, metric=None) -> list:
             #   双网关场景就再也写不出 route-metric（两条默认路由同 metric，谁生效看 up 顺序）。
             #   metric 只对**IPv4 默认路由**有意义，所以它属于 gateway 这个分支，与 IPv6 无关。
             lines.append(f"ipv4.route-metric {int(metric)}")
-    # IPv6 静态（2026-10-18）
-    _a6 = _v6_check(obj.get("ip6"), "ip6")
-    if _a6:
-        lines.append("ipv6.method manual")
-        lines.append("ipv6.addresses " + _sh(_a6))
-        _g6 = _v6_check(obj.get("gateway6"), "gateway6")
-        if _g6:
-            lines.append("ipv6.gateway " + _sh(_g6))
+    lines += _ipv6_lines(obj)
     if obj.get("dns"):
         # 修 D1：原来是 ";".join(...) —— 未加引号的 ; 会被 bash 当命令分隔符，
         # set -e 下脚本在此中止，后面的 nmcli connection up 永不执行。
@@ -453,6 +467,21 @@ def _netplan_routes(out, indent, obj, metric=None):
             out.append(f"{indent}    on-link: true")
 
 
+def _netplan_v6(out, indent, obj) -> None:
+    """IPv6 静态：netplan 用 `addresses6` + `gateway6`（字符串拼接，兼容 3.10）。
+
+    与 IPv4 分支解耦：纯 IPv6 设备（`dhcp4: true` 或 L2 设备）也要能带 IPv6 地址 ——
+    netplan 允许 `dhcp4: true` 与 `addresses6` 并存。
+    """
+    _a6 = _v6_check(obj.get("ip6"), "ip6")
+    if not _a6:
+        return
+    out.append(indent + "addresses6: [" + _yaml(_a6) + "]")
+    _g6 = _v6_check(obj.get("gateway6"), "gateway6")
+    if _g6:
+        out.append(indent + "gateway6: " + _yaml(_g6))
+
+
 def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
     """输出 netplan 地址/routes/nameservers 块。indent 为属性缩进 (6 空格)。"""
     dns = obj.get("dns") or []
@@ -460,30 +489,29 @@ def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
         out.append(f"{indent}dhcp4: true")
         # 改前 dhcp 分支直接 return，静默丢掉 DNS（netplan 里 dhcp4+nameservers 是合法的）
         # ★ 2026-10-15：同样不能丢 routes —— DHCP 拿地址 + 手工补静态路由是常见需求。
+        # ★ 2026-10-18：IPv6 静态也不能丢（`dhcp4: true` + `addresses6` 是合法组合）。
+        _netplan_v6(out, indent, obj)
         _netplan_routes(out, indent, obj, metric)
         _netplan_dns(out, indent, dns)
         return
     if not obj.get("ip"):
         if dhcp_default:
             out.append(f"{indent}dhcp4: true")
+            _netplan_v6(out, indent, obj)
             _netplan_routes(out, indent, obj, metric)
             _netplan_dns(out, indent, dns)
         # 无地址、也不走 DHCP（bond/bridge/vlan 的 L2 场景）时不写任何地址块：
         # 这里不写 nameservers —— 单独的 nameservers 没有地址承载，语义不清。
         # 但**显式给的路由仍然输出**：L2 桥上挂静态路由是合法配置，静默丢弃等于骗人。
+        # 同理：L2 设备上挂 IPv6 地址也是合法的，一并输出。
         else:
+            _netplan_v6(out, indent, obj)
             _netplan_routes(out, indent, obj, metric)
         return
     p = _prefix(obj)
     out.append(f"{indent}dhcp4: false")
     out.append(f"{indent}addresses: [{_yaml(str(obj['ip']) + '/' + str(p))}]")
-    # IPv6 静态（2026-10-18）：netplan 用 addresses6 + gateway6（字符串拼接，兼容 3.10）
-    _a6 = _v6_check(obj.get("ip6"), "ip6")
-    if _a6:
-        out.append(indent + "addresses6: [" + _yaml(_a6) + "]")
-        _g6 = _v6_check(obj.get("gateway6"), "gateway6")
-        if _g6:
-            out.append(indent + "gateway6: " + _yaml(_g6))
+    _netplan_v6(out, indent, obj)
     _netplan_routes(out, indent, obj, metric)
     _netplan_dns(out, indent, dns)
 

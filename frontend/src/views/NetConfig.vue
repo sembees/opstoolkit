@@ -106,6 +106,21 @@
               <el-input v-model="row.gateway" size="small" placeholder="网关" @input="preview" :disabled="row.mode==='dhcp'" />
             </template>
           </el-table-column>
+          <!-- IPv6 静态（2026-10-18）：后端三种格式（netplan/nmcli/ifcfg）都已支持，
+               这里补上唯一缺的入口 —— 没入口的功能等于没做。留空=不配 IPv6。
+               注意：**dhcp 行也允许填 IPv6**（DHCPv4 + 静态 IPv6 是双栈常见配法），所以不禁用。 -->
+          <el-table-column label="IPv6 地址" width="132">
+            <template #default="{ row }">
+              <el-input v-model="row.ip6" size="small" placeholder="可选 2001:db8::5/64"
+                        @input="preview" />
+            </template>
+          </el-table-column>
+          <el-table-column label="IPv6 网关" width="132">
+            <template #default="{ row }">
+              <el-input v-model="row.gateway6" size="small" placeholder="可选 2001:db8::1"
+                        @input="preview" />
+            </template>
+          </el-table-column>
           <el-table-column label="DNS" width="88">
             <template #default="{ row }">
               <el-input v-model="row.dnsStr" size="small"
@@ -348,7 +363,7 @@ function onVlanParentChange(row) {
 }
 
 function addItem(typ) {
-  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100, primary: "", lacpRate: "slow", xmitHash: "layer2+3", routes: [] }
+  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", ip6: "", gateway6: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100, primary: "", lacpRate: "slow", xmitHash: "layer2+3", routes: [] }
   if (typ === "iface") { base.name = "eth" + items.value.filter(i => i._type === "iface").length; base.mode = "dhcp" }
   // 网桥：默认"自动"（有 IP 即静态，无 IP 即纯二层）；bond 与 vlan 的模式不由该下拉控制
   else if (typ === "bridge") { base.name = "br" + items.value.filter(i => i._type === "bridge").length; base.mode = ""; base.slavesStr = "eth0"; onSlavesChange(base) }
@@ -377,9 +392,31 @@ function _isIpv4(s) {
   return m.slice(1).every(p => Number(p) <= 255)
 }
 
+// IPv6（2026-10-18）：只做**地址字面量**校验，规则与后端生成期的 _v6_check 对齐 ——
+// ip6 允许 `addr` 或 `addr/prefix`（前缀 0..128）；gateway6 只允许裸地址（不能带前缀）。
+// 不做 IPv4-mapped / zone-id（`%eth0`）这类边角，后端同样不收。
+function _isIpv6(s) {
+  const t = (s || "").trim()
+  if (!t || t.includes("%")) return false
+  const halves = t.split("::")
+  if (halves.length > 2) return false
+  const head = halves[0] ? halves[0].split(":") : []
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : []
+  const groups = head.concat(tail)
+  if (!groups.every(g => /^[0-9A-Fa-f]{1,4}$/.test(g))) return false
+  // "::" 至少压缩掉一组；没有 "::" 就必须正好 8 组
+  return halves.length === 2 ? groups.length <= 7 : groups.length === 8
+}
+function _isIpv6Cidr(s) {
+  const t = (s || "").trim()
+  const i = t.indexOf("/")
+  if (i < 0) return _isIpv6(t)
+  const p = t.slice(i + 1)
+  return /^\d{1,3}$/.test(p) && Number(p) <= 128 && _isIpv6(t.slice(0, i))
+}
+
 // 中4：前缀必须 0..32、IP 每段必须 0..255；非法输入当场报错，绝不透传成 payload 里的坏值
-function parseIpCidr(val) {
-  const s = (val || "").trim()
+function parseIpCidr(val) {  const s = (val || "").trim()
   if (!s) return null
   const parts = s.split("/")
   if (parts.length > 2) return { error: `IP「${s}」非法：只能有一个 "/"` }
@@ -391,8 +428,7 @@ function parseIpCidr(val) {
   return { ip, cidr: Number(p) }
 }
 
-function _ipToInt(ip) {
-  return IPV4_RE.exec(ip).slice(1).reduce((a, o) => ((a << 8) + Number(o)) >>> 0, 0) >>> 0
+function _ipToInt(ip) {  return IPV4_RE.exec(ip).slice(1).reduce((a, o) => ((a << 8) + Number(o)) >>> 0, 0) >>> 0
 }
 function _sameSubnet(ip, gw, prefix) {
   const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0
@@ -458,9 +494,24 @@ const validation = computed(() => {
         }
       }
     }
-    // 后端缺陷 8 的规则：mode=static 必须给 IP（bond 无 mode 开关，不在此列）
-    if (row.mode === "static" && !parsed?.ip && row._type !== "bond" && !slaves.has(row.name)) {
+    // IPv6 静态（2026-10-18）：与后端 fail-closed 口径一致，非法值当场拦住
+    const ip6 = (row.ip6 || "").trim()
+    const gw6 = (row.gateway6 || "").trim()
+    // 后端缺陷 8 的规则：mode=static 必须给地址。★ 只配 IPv6 也算给了地址
+    // （三种后端的 IPv6 段已与 IPv4 分支解耦，纯 IPv6 设备现在能正常生成）
+    if (row.mode === "static" && !parsed?.ip && !ip6 && row._type !== "bond" && !slaves.has(row.name)) {
       push(idx, `${label}：mode=static 时 IP 必填（留空会生成一个既非 DHCP 也无地址的接口）`)
+    }
+    if (ip6 || gw6) {
+      // ★ 2026-10-18：dhcp 行**允许**填 IPv6 —— 三种后端的 IPv6 段已与 IPv4 分支解耦，
+      //   "DHCP 取 IPv4 + 静态 IPv6" 是双栈的常见配法（netplan dhcp4:true + addresses6 合法）。
+      if (ip6 && !_isIpv6Cidr(ip6)) {
+        push(idx, `${label}：IPv6 地址「${ip6}」非法（应为 2001:db8::5 或 2001:db8::5/64）`)
+      }
+      if (gw6) {
+        if (!ip6) push(idx, `${label}：填了 IPv6 网关就必须同时填 IPv6 地址（否则这条默认路由没有落点）`)
+        else if (!_isIpv6(gw6)) push(idx, `${label}：IPv6 网关「${gw6}」非法（只写裸地址，不带前缀）`)
+      }
     }
     // DHCP 行的 IP 输入框已禁用，残值会在 buildPayload 里被剔除；这里不再报错，只提示残值丢弃
     if (!dnsDisabled(row)) {
@@ -485,18 +536,21 @@ function buildPayload() {
     const gw = dhcp ? null : _safeStr(row.gateway)
     // DNS 输入框被禁用时不提交残值
     const dns = dnsDisabled(row) ? [] : (row.dns || [])
+    // IPv6 静态（2026-10-18）：四类设备都带上；留空发 null（后端 Optional=None，不写任何 IPv6 行）
+    const ip6 = dhcp ? null : _safeStr(row.ip6)
+    const gw6 = dhcp ? null : _safeStr(row.gateway6)
     // ★ 额外路由（2026-10-15）：四类设备都带上；没配就不发这个键（老请求形状不变）
     const routes = (row.routes || []).length ? row.routes : undefined
     if (row._type === "iface") {
-      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ip, cidr: cidr, gateway: gw, dns: dns, routes: routes })
+      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ip, cidr: cidr, gateway: gw, ip6: ip6, gateway6: gw6, dns: dns, routes: routes })
     } else if (row._type === "bond") {
-      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, dns: dns, miimon: _safeInt(row.miimon, 100), primary: _safeStr(row.primary), lacp_rate: row.lacpRate || null, xmit_hash_policy: row.xmitHash || null, routes: routes })
+      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, ip6: ip6, gateway6: gw6, dns: dns, miimon: _safeInt(row.miimon, 100), primary: _safeStr(row.primary), lacp_rate: row.lacpRate || null, xmit_hash_policy: row.xmitHash || null, routes: routes })
     } else if (row._type === "vlan") {
       // dns 以前被这里丢掉，界面上的 DNS 输入框成了摆设；后端现已支持
-      payload.vlans.push({ parent: row.parent, vlan_id: _safeInt(row.vlanId, 100), ip: ip, cidr: cidr, gateway: gw, dns: dns, routes: routes })
+      payload.vlans.push({ parent: row.parent, vlan_id: _safeInt(row.vlanId, 100), ip: ip, cidr: cidr, gateway: gw, ip6: ip6, gateway6: gw6, dns: dns, routes: routes })
     } else if (row._type === "bridge") {
       // mode 以前完全没发出去（下拉被静默忽略）；"" 表示自动，后端按"有 IP 即静态"处理
-      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], mode: row.mode || null, ip: ip, cidr: cidr, gateway: gw, dns: dns, routes: routes })
+      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], mode: row.mode || null, ip: ip, cidr: cidr, gateway: gw, ip6: ip6, gateway6: gw6, dns: dns, routes: routes })
     }
   }
   return payload
