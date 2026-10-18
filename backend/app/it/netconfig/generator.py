@@ -239,6 +239,12 @@ def _ipv4_lines(obj, metric=None) -> list:
     lines.append("ipv4.method manual")
     if obj.get("gateway"):
         lines.append(f"ipv4.gateway {_sh(obj['gateway'])}")
+        if metric is not None:
+            # 有多个默认网关时写死 metric，避免"谁生效取决于接口 up 顺序"。
+            # ★ 2026-10-18 修：加 IPv6 时这段被误缩进进 `if _a6:` 里 —— 没有 IPv6 的
+            #   双网关场景就再也写不出 route-metric（两条默认路由同 metric，谁生效看 up 顺序）。
+            #   metric 只对**IPv4 默认路由**有意义，所以它属于 gateway 这个分支，与 IPv6 无关。
+            lines.append(f"ipv4.route-metric {int(metric)}")
     # IPv6 静态（2026-10-18）
     _a6 = _v6_check(obj.get("ip6"), "ip6")
     if _a6:
@@ -247,9 +253,6 @@ def _ipv4_lines(obj, metric=None) -> list:
         _g6 = _v6_check(obj.get("gateway6"), "gateway6")
         if _g6:
             lines.append("ipv6.gateway " + _sh(_g6))
-        if metric is not None:
-            # 有多个默认网关时写死 metric，避免"谁生效取决于接口 up 顺序"
-            lines.append(f"ipv4.route-metric {int(metric)}")
     if obj.get("dns"):
         # 修 D1：原来是 ";".join(...) —— 未加引号的 ; 会被 bash 当命令分隔符，
         # set -e 下脚本在此中止，后面的 nmcli connection up 永不执行。
@@ -610,6 +613,11 @@ def _build_ifcfg(req):
             gw = obj.get("gateway")
             if gw:
                 lines.append("GATEWAY=" + _sh(gw))
+                if metric is not None:
+                    # 多个默认网关时写死 METRIC（initscripts 与 NM 的 ifcfg-rh 都认）。
+                    # ★ 2026-10-18 修：同 nmcli 那处，Metric 被误缩进进 IPv6 分支，
+                    #   纯 IPv4 双网关时 METRIC 丢失 → 两条默认路由同 metric。
+                    lines.append("METRIC=" + str(int(metric)))
         # IPv6 静态（2026-10-18）：RHEL 系 ifcfg 用 IPV6INIT/IPV6ADDR/IPV6_DEFAULTGW
         _a6 = _v6_check(obj.get("ip6"), "ip6")
         if _a6:
@@ -618,9 +626,6 @@ def _build_ifcfg(req):
             _g6 = _v6_check(obj.get("gateway6"), "gateway6")
             if _g6:
                 lines.append("IPV6_DEFAULTGW=" + _sh(_g6))
-                if metric is not None:
-                    # 多个默认网关时写死 METRIC（initscripts 与 NM 的 ifcfg-rh 都认）
-                    lines.append("METRIC=" + str(int(metric)))
         # DHCP 分支也要写 DNS：改前整段只在 static 分支里，配了 DNS 的 DHCP 口会静默丢 DNS
         for i, d in enumerate(dns, 1):
             lines.append("DNS" + str(i) + "=" + _sh(d))

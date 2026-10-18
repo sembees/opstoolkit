@@ -82,6 +82,56 @@ class IfcfgIpv6Test(unittest.TestCase):
         self.assertNotIn("IPV6ADDR", p)
 
 
+class Ipv6DoesNotSwallowIpv4Test(unittest.TestCase):
+    """★ 回归：加 IPv6 时把 `route-metric` / `METRIC` 写进了 IPv6 分支里。
+
+    后果：**纯 IPv4** 的双默认网关场景再也写不出 metric（两条默认路由同 metric，
+    谁生效取决于接口 up 顺序）；而带 IPv6 的机器反而"碰巧"是对的 —— 典型的
+    "顺手加功能，把相邻分支的语句缩进错了"。
+    这里同时锁三件事：纯 IPv4 有 metric、带 IPv6 也有 metric、IPv6 行本身还在。
+    """
+
+    TWO_GW = [
+        {"name": "eth1", "mode": "static", "ip": "10.0.1.5", "cidr": 24,
+         "gateway": "10.0.1.1"},
+        {"name": "eth0", "mode": "static", "ip": "10.0.0.5", "cidr": 24,
+         "gateway": "10.0.0.1"},
+    ]
+
+    def test_nmcli_metric_present_without_ipv6(self):
+        p = gen(os="rhel", format="nmcli", interfaces=self.TWO_GW)
+        first = next(l for l in p.splitlines() if "ipv4.gateway 10.0.1.1" in l)
+        second = next(l for l in p.splitlines() if "ipv4.gateway 10.0.0.1" in l)
+        self.assertIn("ipv4.route-metric 100", first)
+        self.assertIn("ipv4.route-metric 200", second)
+
+    def test_nmcli_metric_present_with_ipv6_too(self):
+        two = [dict(i) for i in self.TWO_GW]
+        two[0].update(ip6=A6, gateway6=G6)
+        p = gen(os="rhel", format="nmcli", interfaces=two)
+        first = next(l for l in p.splitlines() if "ipv4.gateway 10.0.1.1" in l)
+        self.assertIn("ipv4.route-metric 100", first)
+        self.assertIn("ipv6.addresses " + A6, p)
+
+    def test_ifcfg_metric_present_without_ipv6(self):
+        p = gen(os="rhel", format="ifcfg", interfaces=self.TWO_GW)
+        self.assertIn("METRIC=100", p)
+        self.assertIn("METRIC=200", p)
+
+    def test_ifcfg_metric_present_with_ipv6_too(self):
+        two = [dict(i) for i in self.TWO_GW]
+        two[0].update(ip6=A6, gateway6=G6)
+        p = gen(os="rhel", format="ifcfg", interfaces=two)
+        self.assertIn("METRIC=100", p)
+        self.assertIn("IPV6_DEFAULTGW=" + G6, p)
+
+    def test_netplan_metric_unaffected(self):
+        p = gen(os="ubuntu", format="netplan", interfaces=self.TWO_GW)
+        doc = yaml.safe_load(p)
+        r1 = doc["network"]["ethernets"]["eth1"]["routes"]
+        self.assertEqual(r1[0]["metric"], 100)
+
+
 class Ipv6ValidationTest(unittest.TestCase):
     """非法值必须 fail-closed —— 半截配置比没有更糟。"""
 
