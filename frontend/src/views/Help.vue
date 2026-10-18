@@ -4,7 +4,7 @@
     <CardSection icon="Reading">
       <el-tabs v-model="activeTab" tab-position="left" class="help-tabs">
                 <!-- ===== 小白手册 ===== -->
-        <el-tab-pane label="小白手册" name="beginner">
+        <el-tab-pane :label="HELP_TOPICS.beginner" name="beginner">
           <h3>OpsToolkit 小白入门手册</h3>
           <p>本手册面向零基础用户，从“这个工具是什么”开始，一直讲到“能独立完成一次巡检和一次裸机装机”。</p>
 
@@ -40,7 +40,7 @@
 
             <el-collapse-item title="我要巡检设备，从头怎么操作？" name="b2">
               <el-steps direction="vertical" :active="5">
-                <el-step title="第 1 步：登录" description="浏览器打开 http://10.128.118.113:8000，用管理员账号 admin 登录（初始密码见服务日志）" />
+                <el-step title="第 1 步：登录" description="浏览器打开 http://<服务器IP>:8000，用管理员账号 admin 登录（初始密码见服务日志）" />
                 <el-step title="第 2 步：录入设备" description="点「资产管理」→ 新增资产，类型选 CT，填写 IP 地址、选择厂商（H3C/华为/思科）、角色（交换机/路由器/防火墙）" />
                 <el-step title="第 3 步：录入凭据" description="点「凭据管理」→ 新增凭据，填写 SSH 用户名和密码（自动加密存储，也可存 SSH 私钥和 enable 密码）。回到「资产管理」把这个凭据关联到设备上" />
                 <el-step title="第 4 步：开始巡检" description="点「CT 巡检」→ 多选设备 → 选「默认巡检」并挑一个模板（或选「自定义命令」每行填一条命令）→ 点「开始巡检」" />
@@ -63,8 +63,8 @@
 
             <el-collapse-item title="代码改了之后怎么更新到服务器？" name="b4">
               <pre class="code-block"># ===== 场景 1: 改了后端 Python 代码（容器部署）=====
-# 在本地 D:\07-cc\01-project 改好代码后，上传到 /opt/opstk/，然后:
-ssh yang@10.128.118.113
+# 在本地 <项目根目录> 改好代码后，上传到 /opt/opstk/，然后:
+ssh <运维账号>@<服务器IP>
 cd /opt/opstk
 docker compose restart
 
@@ -76,7 +76,7 @@ npm run build
 # 上传 dist 到 /opt/opstk/frontend/ 后刷新浏览器即可（后端直接挂载 dist，无需重启）
 
 # ===== 场景 3: Docker 重建（改了依赖/镜像内文件时）=====
-ssh yang@10.128.118.113
+ssh <运维账号>@<服务器IP>
 cd /opt/opstk
 docker compose up -d --build</pre>
               <p class="muted-sm mt-2">容器里挂载了 backend/app 与 frontend/dist 两个目录，所以“改代码 → 上传 → restart”就生效；只有改依赖（requirements.txt）或 Dockerfile 才需要 --build 重建。</p>
@@ -109,7 +109,7 @@ docker compose up -d --build</pre>
         </el-tab-pane>
 
 <!-- ===== 快速开始 ===== -->
-        <el-tab-pane label="工具使用手册" name="quick">
+        <el-tab-pane :label="HELP_TOPICS.quick" name="quick">
           <h3>OpsToolkit 工具使用手册</h3>
           <p>一体化运维工具平台。后端 Python/FastAPI，前端 Vue 3 + Element Plus，数据库 SQLite。支持 CT 设备巡检与告警、ZTP 开局、IT 服务器 PXE 装机、网络配置生成。</p>
 
@@ -259,7 +259,7 @@ cp /opt/opstk/backend/data/ops.db /backup/</pre>
         </el-tab-pane>
 
         <!-- ===== CT 巡检 ===== -->
-        <el-tab-pane label="CT 巡检" name="inspect">
+        <el-tab-pane :label="HELP_TOPICS.inspect" name="inspect">
           <h3>CT 设备巡检</h3>
           <p>支持 H3C、华为、思科三类网络/安全设备的批量巡检：多台设备并发执行、输出按设备分组实时滚动、命令结果自动解析为指标，任务落库后可下载报告、回放过程、做历史对比，还能联动告警规则。</p>
 
@@ -379,7 +379,7 @@ cp /opt/opstk/backend/data/ops.db /backup/</pre>
         </el-tab-pane>
 
         <!-- ===== 网络配置 ===== -->
-        <el-tab-pane label="网络配置生成" name="netconfig">
+        <el-tab-pane :label="HELP_TOPICS.netconfig" name="netconfig">
           <h3>服务器网络配置生成器</h3>
           <p>统一表格编辑器 + 实时预览面板，支持任意数量的物理口 / Bond / VLAN / 网桥自由组合。三种输出格式严格跟随所选系统，非法组合在保存/生成前就被拦下。</p>
 
@@ -468,7 +468,7 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
         </el-tab-pane>
 
         <!-- ===== PXE ===== -->
-        <el-tab-pane label="PXE 装机" name="pxe">
+        <el-tab-pane :label="HELP_TOPICS.pxe" name="pxe">
           <h3>PXE 装机手册</h3>
           <p>全自动网络安装 Ubuntu 与 RHEL 系系统（含 RHEL 克隆/近亲：openEuler、银河麒麟、统信 UOS、Anolis、Fedora、Oracle Linux 等，完整清单以「系统目录」为准）；Debian 走 debian-installer preseed 全自动装机。<b>Debian 离线装机前提（不做这步必卡死）</b>：模板「镜像源」指向的本地 HTTP 仓库必须带官方签名索引（<code>dists/&lt;suite&gt;/InRelease</code> 或 <code>Release</code> + <code>Release.gpg</code>）——直接从官方 DVD 拷出的 <code>dists/</code> + <code>pool/</code> 没有这些签名文件，装机在校验镜像签名时报 'The installer failed to download a file from the mirror' 并停在 <code>&lt;Change mirror&gt;</code>；请先从带官方签名的镜像站（如清华 TUNA https://mirrors.tuna.tsinghua.edu.cn/debian/）同步所需套件子集到本机 HTTP 目录，或改用内网已有带签名镜像。openSUSE 目前仅支持识别 ISO 与提取引导介质，生成配置时明确拒绝自动装机。裸机接上网线，开机即可自动安装操作系统，全程无人值守。OpsToolkit 本机可直接作为完整 PXE 服务器。</p>
 
@@ -560,7 +560,7 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
               <p>「添加镜像」→「本机上传」：选择本地 ISO 后，前端按后端下发的分块大小（默认 8 MB）用 File.slice 分块顺序上传，界面显示进度条、已传/总量与速度，可随时取消；分块失败自动重试 3 次，仍失败可点「重试当前块」续传。单文件受 max_upload 上限与 ISO 目录剩余空间约束，超限会在提交前禁用按钮并提示改用方式三。</p>
               <p class="section-title">方式三：零代码 —— scp / SFTP 直放宿主目录（大文件推荐）</p>
               <p>大文件也可以用 <b>scp / SFTP 直接放到宿主 /srv/opstk/iso</b>，回到本页点「刷新」即可看到，<b>无需走浏览器上传</b>：</p>
-              <pre class="code-block">scp Rocky-9.4-x86_64-dvd.iso root@10.128.118.113:/srv/opstk/iso/</pre>
+              <pre class="code-block">scp Rocky-9.4-x86_64-dvd.iso <运维账号>@<服务器IP>:/srv/opstk/iso/</pre>
               <el-alert type="warning" :closable="false" class="mv-2" title="空间提醒" description="根盘可用空间有限：放之前先看页面/弹窗顶部的可用量，传完记得删除不用的镜像。" />
             </el-collapse-item>
 
@@ -568,10 +568,10 @@ Bridge br-lan: 从接口 eth2,eth3, IP 留空</pre>
               <p class="section-title">第 1 步：获取并放置 ISO 镜像</p>
               <p>把 ISO 放到服务器 /srv/opstk/iso/ 目录（三种放法见上方「三种添加镜像的方式」：页面内 URL 拉取 / 本机分块上传 / scp·SFTP 直放；该目录同时通过 /pxe/iso 提供只读下载，且只放行 .iso 文件）：</p>
               <pre class="code-block"># Ubuntu 22.04 live-server（Ubuntu 必须是 live-server，mini.iso 不含 casper 无法用）
-scp ubuntu-22.04.5-live-server-amd64.iso yang@服务器IP:/srv/opstk/iso/
+scp ubuntu-22.04.5-live-server-amd64.iso <运维账号>@服务器IP:/srv/opstk/iso/
 
 # RHEL/Rocky（DVD 或 Boot 均可，装包走镜像源或本地 repo）
-scp Rocky-9.5-x86_64-dvd.iso yang@服务器IP:/srv/opstk/iso/</pre>
+scp Rocky-9.5-x86_64-dvd.iso <运维账号>@服务器IP:/srv/opstk/iso/</pre>
 
               <p class="section-title mt-3">第 2 步：提取引导文件</p>
               <p>进入「PXE 装机」页面的「ISO 镜像管理」面板：</p>
@@ -676,7 +676,7 @@ scp Rocky-9.5-x86_64-dvd.iso yang@服务器IP:/srv/opstk/iso/</pre>
         </el-tab-pane>
 
         <!-- ===== ZTP ===== -->
-        <el-tab-pane label="ZTP 开局" name="ztp">
+        <el-tab-pane :label="HELP_TOPICS.ztp" name="ztp">
           <h3>ZTP 配置开局手册</h3>
           <p>网络/安全设备（H3C、华为、思科）首次上电时空配置启动，会自动通过 DHCP 获取 TFTP 地址并下载配置文件。OpsToolkit 可生成全套开局文件并通过 dnsmasq 下发，支持“落位登记 + MAC 认领”。</p>
 
@@ -768,7 +768,7 @@ scp Rocky-9.5-x86_64-dvd.iso yang@服务器IP:/srv/opstk/iso/</pre>
         </el-tab-pane>
 
         <!-- ===== 部署指南 ===== -->
-        <el-tab-pane label="部署指南" name="deploy">
+        <el-tab-pane :label="HELP_TOPICS.deploy" name="deploy">
           <h3>部署指南</h3>
 
           <el-alert type="info" :closable="false" title="两种部署方式" description="方式一: 直接部署在 Linux 服务器上（性能最好）。方式二: 用 Docker 容器运行（方便迁移，当前生产采用）。两种方式的 PXE/ZTP 功能相同；Windows/macOS 只能跑 Web 界面与生成/下载，本机部署按钮会自动禁用。" class="mv-3" />
@@ -811,13 +811,13 @@ apt update && apt install -y dnsmasq ipxe util-linux python3 python3-pip</pre>
               <p class="section-title mt-3">第 4 步：配置 sudo 免密（必要）</p>
               <pre class="code-block"># 后端管控 dnsmasq、写配置、挂载 ISO 都要走 sudo -n（免密），
 # 涉及的命令以 backend/app/core/dhcp.py 与 it/pxe/server.py 里的调用为准：
-echo 'yang ALL=(root) NOPASSWD: /usr/bin/systemctl * dnsmasq, /usr/sbin/systemctl * dnsmasq, /usr/bin/tee /etc/dnsmasq.d/*, /usr/bin/chown, /bin/chown, /usr/bin/rm, /bin/rm, /usr/bin/mount, /bin/mount, /usr/bin/umount, /bin/umount, /usr/sbin/restorecon, /sbin/restorecon, /usr/sbin/semanage, /sbin/semanage, /usr/bin/true, /bin/true' > /etc/sudoers.d/opstk
+echo '<运维账号> ALL=(root) NOPASSWD: /usr/bin/systemctl * dnsmasq, /usr/sbin/systemctl * dnsmasq, /usr/bin/tee /etc/dnsmasq.d/*, /usr/bin/chown, /bin/chown, /usr/bin/rm, /bin/rm, /usr/bin/mount, /bin/mount, /usr/bin/umount, /bin/umount, /usr/sbin/restorecon, /sbin/restorecon, /usr/sbin/semanage, /sbin/semanage, /usr/bin/true, /bin/true' > /etc/sudoers.d/opstk
 chmod 440 /etc/sudoers.d/opstk
 visudo -cf /etc/sudoers.d/opstk  # 验证语法
 sudo -n true                     # 免密生效验证</pre>
               <p class="section-title mt-3">第 5 步：创建目录 + 修复 SELinux</p>
               <pre class="code-block">mkdir -p /srv/tftp/boot /srv/opstk/pxe-web /srv/opstk/ztp-web /srv/opstk/iso /srv/opstk/mnt /srv/opstk/state
-chown -R yang /srv/tftp /srv/opstk
+chown -R <运维账号> /srv/tftp /srv/opstk
 
 # RHEL/Rocky 需要修复 SELinux (Ubuntu 跳过此步)
 semanage fcontext -a -t tftpdir_t '/srv/tftp(/.*)?'
@@ -840,7 +840,7 @@ Description=OpsToolkit Ops Platform
 After=network.target
 [Service]
 Type=simple
-User=yang
+User=<运维账号>
 WorkingDirectory=/opt/opstk/backend
 Environment=PYTHONPATH=/opt/opstk/backend
 ExecStart=/opt/opstk/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -955,7 +955,7 @@ systemctl status dnsmasq -l   # 看报错详情</pre>
 
 
 <!-- ===== 网络配置生成器使用指南 ===== -->
-        <el-tab-pane label="网络配置生成" name="netconfig-usage">
+        <el-tab-pane :label="HELP_TOPICS['netconfig-usage']" name="netconfig-usage">
           <h3>网络配置生成器使用指南</h3>
           <p>生成 Ubuntu netplan、RHEL ifcfg 或通用 nmcli 配置脚本，支持物理口、Bond、VLAN、网桥；下载内容与预览内容永远是同一份。</p>
 
@@ -1007,7 +1007,7 @@ sudo systemctl restart NetworkManager   # 或 network 服务（按现场而定�
         </el-tab-pane>
 
 
-        <el-tab-pane label="常见概念" name="concept">
+        <el-tab-pane :label="HELP_TOPICS.concept" name="concept">
           <h3>常见概念解释</h3>
           <el-collapse v-model="conceptActive">
             <el-collapse-item title="ProxyDHCP（代理 DHCP）" name="c1">
@@ -1067,17 +1067,17 @@ const deployActive = ref("d1")
 
 const beginnerActive = ref("b1")
 const localPaths = [
-  { name: "项目根目录", path: "D:\\07-cc\\01-project" },
-  { name: "后端代码", path: "D:\\07-cc\\01-project\\backend\\app\\" },
-  { name: "前端代码", path: "D:\\07-cc\\01-project\\frontend\\src\\" },
-  { name: "前端构建物", path: "D:\\07-cc\\01-project\\frontend\\dist\\" },
-  { name: "数据库", path: "D:\\07-cc\\01-project\\backend\\data\\ops.db" },
-  { name: "加密密钥", path: "D:\\07-cc\\01-project\\backend\\.env" },
+  { name: "项目根目录", path: "<项目根目录>" },
+  { name: "后端代码", path: "<项目根目录>\\backend\\app\\" },
+  { name: "前端代码", path: "<项目根目录>\\frontend\\src\\" },
+  { name: "前端构建物", path: "<项目根目录>\\frontend\\dist\\" },
+  { name: "数据库", path: "<项目根目录>\\backend\\data\\ops.db" },
+  { name: "加密密钥", path: "<项目根目录>\\backend\\.env" },
   { name: "访问地址", path: "http://localhost:8000" },
 ]
 const remotePaths = [
-  { name: "IP 地址", path: "10.128.118.113" },
-  { name: "登录账号", path: "yang / <口令> (sudo 免密)" },
+  { name: "IP 地址", path: "<服务器IP>" },
+  { name: "登录账号", path: "<运维账号> / <口令> (sudo 免密)" },
   { name: "项目目录", path: "/opt/opstk/" },
   { name: "容器", path: "opstoolkit（docker compose 管理）" },
   { name: "数据库", path: "/opt/opstk/backend/data/ops.db" },
@@ -1086,7 +1086,7 @@ const remotePaths = [
   { name: "ZTP HTTP", path: "/srv/opstk/ztp-web/" },
   { name: "ISO 存储", path: "/srv/opstk/iso/" },
   { name: "镜像", path: "opstk-opstoolkit:latest" },
-  { name: "访问地址", path: "http://10.128.118.113:8000" },
+  { name: "访问地址", path: "http://<服务器IP>:8000" },
 ]
 
 const quickActive = ref("q4")
