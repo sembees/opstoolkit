@@ -176,18 +176,47 @@ class RouteValidationTest(unittest.TestCase):
                     #   路由目标被悄悄改写比直接报错难查得多
                     "10.20.0.1/16",
                     "10.20.0.0/16\n  - to: default",   # 换行 = YAML 注入面
-                    "2001:db8::/64"):                  # 本模块只做 IPv4，明确拒绝
+                    "2001:db8::1/64",                  # IPv6 同样不许主机位非零
+                    "2001:db8::/129"):                 # IPv6 前缀越界
             with self.assertRaises(Exception, msg=bad):
                 self._iface(to=bad)
+
+    def test_to_accepts_ipv6_targets(self):
+        """★ 2026-10-18：额外路由支持 IPv6（`::/0` 是 IPv6 默认路由，不归一成 default）。"""
+        r = NetConfigRequest(os="ubuntu", format="netplan",
+                             interfaces=[{"name": "eth0", "ip": "10.10.10.1", "cidr": 24,
+                                          "routes": [{"to": "2001:db8:1::/64", "via": "2001:db8::1"}]}])
+        self.assertEqual(str(r.interfaces[0].routes[0].to), "2001:db8:1::/64")
+        self.assertEqual(str(r.interfaces[0].routes[0].via), "2001:db8::1")
+        r2 = NetConfigRequest(os="ubuntu", format="netplan",
+                              interfaces=[{"name": "eth0", "ip": "10.10.10.1", "cidr": 24,
+                                           "routes": [{"to": "::/0", "via": "2001:db8::1"}]}])
+        self.assertEqual(str(r2.interfaces[0].routes[0].to), "::/0")   # 不归一成 default
+        # 裸 IPv6 地址按 /128
+        r3 = NetConfigRequest(os="ubuntu", format="netplan",
+                              interfaces=[{"name": "eth0", "ip": "10.10.10.1", "cidr": 24,
+                                           "routes": [{"to": "2001:db8::5"}]}])
+        self.assertEqual(str(r3.interfaces[0].routes[0].to), "2001:db8::5/128")
 
     def test_default_route_requires_via(self):
         with self.assertRaises(Exception):
             self._iface(to="default")
+        # IPv6 默认路由同样必须有下一跳
+        with self.assertRaises(Exception):
+            self._iface(to="::/0")
 
-    def test_via_must_be_ipv4(self):
-        for bad in ("10.0.0.999", "fe80::1", "10.0.0.1; rm -rf /", "$(id)"):
+    def test_via_must_match_family(self):
+        """下一跳可以是 IPv4 或 IPv6，但**必须与目标同族**（跨族 = 生成出来一定不可用）。"""
+        for bad in ("10.0.0.999", "10.0.0.1; rm -rf /", "$(id)", "fe80::zz"):
             with self.assertRaises(Exception, msg=bad):
                 self._iface(to="10.20.0.0/16", via=bad)
+        # 跨族：v4 目标 + v6 下一跳 / v6 目标 + v4 下一跳，都必须拒
+        for to, via in (("10.20.0.0/16", "fe80::1"), ("2001:db8:1::/64", "10.20.0.0")):
+            with self.subTest(to=to, via=via):
+                with self.assertRaises(Exception):
+                    self._iface(to=to, via=via)
+        # 同族 IPv6 必须通过
+        self._iface(to="2001:db8:1::/64", via="2001:db8::1")
 
     def test_metric_range_and_types(self):
         self._iface(to="10.20.0.0/16", metric=0)

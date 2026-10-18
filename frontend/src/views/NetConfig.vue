@@ -106,19 +106,31 @@
               <el-input v-model="row.gateway" size="small" placeholder="网关" @input="preview" :disabled="row.mode==='dhcp'" />
             </template>
           </el-table-column>
-          <!-- IPv6 静态（2026-10-18）：后端三种格式（netplan/nmcli/ifcfg）都已支持，
-               这里补上唯一缺的入口 —— 没入口的功能等于没做。留空=不配 IPv6。
-               注意：**dhcp 行也允许填 IPv6**（DHCPv4 + 静态 IPv6 是双栈常见配法），所以不禁用。 -->
-          <el-table-column label="IPv6 地址" width="132">
+          <!-- IPv6（2026-10-18，2026-10-18 扩展）：
+               · 方式：static（静态地址）/ dhcp6（DHCPv6）/ slaac（靠 RA 自动配置）
+               · 地址：**逗号分隔可写多个**（第一个进 ip6，其余进 ip6_addrs）
+               · 非 static 时地址/网关禁用（后端也会 422：三种方式互斥）
+               注意：**dhcp(v4) 行也允许填 IPv6**（DHCPv4 + 静态 IPv6 是双栈常见配法）。 -->
+          <el-table-column label="IPv6 方式" width="104">
             <template #default="{ row }">
-              <el-input v-model="row.ip6" size="small" placeholder="可选 2001:db8::5/64"
-                        @input="preview" />
+              <el-select v-model="row.ip6Mode" size="small" @change="preview">
+                <el-option label="静态" value="static" />
+                <el-option label="DHCPv6" value="dhcp6" />
+                <el-option label="SLAAC" value="slaac" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="IPv6 地址" width="176">
+            <template #default="{ row }">
+              <el-input v-model="row.ip6" size="small"
+                        placeholder="2001:db8::5/64（多个用逗号）"
+                        :disabled="row.ip6Mode !== 'static'" @input="preview" />
             </template>
           </el-table-column>
           <el-table-column label="IPv6 网关" width="132">
             <template #default="{ row }">
               <el-input v-model="row.gateway6" size="small" placeholder="可选 2001:db8::1"
-                        @input="preview" />
+                        :disabled="row.ip6Mode !== 'static'" @input="preview" />
             </template>
           </el-table-column>
           <el-table-column label="DNS" width="88">
@@ -220,7 +232,7 @@
          好几条），塞进表格只会把每行撑爆。按 netplan 的语义挂在设备上。 -->
     <el-dialog v-model="routesDialog" title="额外路由" width="720px" append-to-body>
       <div class="routes-hint">
-        目标填 <code>default</code>（默认路由）或网段（如 <code>10.20.0.0/16</code>，裸 IP 按 /32）；
+        目标填 <code>default</code>（IPv4 默认）、<code>::/0</code>（IPv6 默认）或网段（<code>10.20.0.0/16</code> / <code>2001:db8:1::/64</code>，裸 IP 按 /32 或 /128）；下一跳必须与目标**同族**（后端会 422）；
         <code>下一跳</code>可留空（on-link 直连路由）。<b>网关</b>字段仍是默认路由的便捷写法，
         这里再加一条 <code>default</code> 会与它并存、由 metric 决定谁优先。
       </div>
@@ -365,7 +377,7 @@ function onVlanParentChange(row) {
 }
 
 function addItem(typ) {
-  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", ip6: "", gateway6: "", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100, primary: "", lacpRate: "slow", xmitHash: "layer2+3", routes: [] }
+  const base = { _type: typ, name: "", mode: "static", ip: "", gateway: "", ip6: "", gateway6: "", ip6Mode: "static", dns: [], dnsStr: "", slaves: [], slavesStr: "", parent: "", bondMode: 1, miimon: 100, vlanId: 100, primary: "", lacpRate: "slow", xmitHash: "layer2+3", routes: [] }
   if (typ === "iface") { base.name = "eth" + items.value.filter(i => i._type === "iface").length; base.mode = "dhcp" }
   // 网桥：默认"自动"（有 IP 即静态，无 IP 即纯二层）；bond 与 vlan 的模式不由该下拉控制
   else if (typ === "bridge") { base.name = "br" + items.value.filter(i => i._type === "bridge").length; base.mode = ""; base.slavesStr = "eth0"; onSlavesChange(base) }
@@ -488,21 +500,24 @@ function buildPayload() {
     const gw = dhcp ? null : _safeStr(row.gateway)
     // DNS 输入框被禁用时不提交残值
     const dns = dnsDisabled(row) ? [] : (row.dns || [])
-    // IPv6 静态（2026-10-18）：四类设备都带上；留空发 null（后端 Optional=None，不写任何 IPv6 行）
-    const ip6 = dhcp ? null : _safeStr(row.ip6)
-    const gw6 = dhcp ? null : _safeStr(row.gateway6)
+    // IPv6（2026-10-18 扩展）：方式 + 多地址；留空发 null（后端 Optional=None，不写任何 IPv6 行）
+    const mode6 = row.ip6Mode || "static"
+    const list6 = (row.ip6 || "").split(",").map(x => x.trim()).filter(Boolean)
+    const ip6 = (dhcp || mode6 !== "static") ? null : (list6[0] || null)
+    const ip6Addrs = (dhcp || mode6 !== "static") ? [] : list6.slice(1)
+    const gw6 = (dhcp || mode6 !== "static") ? null : _safeStr(row.gateway6)
     // ★ 额外路由（2026-10-15）：四类设备都带上；没配就不发这个键（老请求形状不变）
     const routes = (row.routes || []).length ? row.routes : undefined
     if (row._type === "iface") {
-      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ip, cidr: cidr, gateway: gw, ip6: ip6, gateway6: gw6, dns: dns, routes: routes })
+      payload.interfaces.push({ name: row.name, mode: row.mode, ip: ip, cidr: cidr, gateway: gw, ip6: ip6, ip6_addrs: ip6Addrs, gateway6: gw6, ip6_mode: mode6, dns: dns, routes: routes })
     } else if (row._type === "bond") {
-      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, ip6: ip6, gateway6: gw6, dns: dns, miimon: _safeInt(row.miimon, 100), primary: _safeStr(row.primary), lacp_rate: row.lacpRate || null, xmit_hash_policy: row.xmitHash || null, routes: routes })
+      payload.bonds.push({ name: row.name, mode: _safeInt(row.bondMode, 1), interfaces: row.slaves || [], ip: ip || "", cidr: cidr, gateway: gw, ip6: ip6, ip6_addrs: ip6Addrs, gateway6: gw6, ip6_mode: mode6, dns: dns, miimon: _safeInt(row.miimon, 100), primary: _safeStr(row.primary), lacp_rate: row.lacpRate || null, xmit_hash_policy: row.xmitHash || null, routes: routes })
     } else if (row._type === "vlan") {
       // dns 以前被这里丢掉，界面上的 DNS 输入框成了摆设；后端现已支持
-      payload.vlans.push({ parent: row.parent, vlan_id: _safeInt(row.vlanId, 100), ip: ip, cidr: cidr, gateway: gw, ip6: ip6, gateway6: gw6, dns: dns, routes: routes })
+      payload.vlans.push({ parent: row.parent, vlan_id: _safeInt(row.vlanId, 100), ip: ip, cidr: cidr, gateway: gw, ip6: ip6, ip6_addrs: ip6Addrs, gateway6: gw6, ip6_mode: mode6, dns: dns, routes: routes })
     } else if (row._type === "bridge") {
       // mode 以前完全没发出去（下拉被静默忽略）；"" 表示自动，后端按"有 IP 即静态"处理
-      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], mode: row.mode || null, ip: ip, cidr: cidr, gateway: gw, ip6: ip6, gateway6: gw6, dns: dns, routes: routes })
+      payload.bridges.push({ name: row.name, interfaces: row.slaves || [], mode: row.mode || null, ip: ip, cidr: cidr, gateway: gw, ip6: ip6, ip6_addrs: ip6Addrs, gateway6: gw6, ip6_mode: mode6, dns: dns, routes: routes })
     }
   }
   return payload

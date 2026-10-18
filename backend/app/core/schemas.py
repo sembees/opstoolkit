@@ -184,6 +184,8 @@ def _check_l3(
     gateway: Optional[str] = None,
     ip6: Optional[str] = None,
     gateway6: Optional[str] = None,
+    ip6_mode: str = "static",
+    ip6_addrs: Optional[list] = None,
     require_ip_when_static: bool = True,
 ) -> None:
     """一个逻辑接口（物理口/bond/VLAN/网桥）的 IPv4 跨字段校验（NC3）。
@@ -202,6 +204,43 @@ def _check_l3(
     「一个请求里有多个默认网关」不在这里判死：generator._route_metrics 会按声明顺序
     给它们写出确定的 metric（100/200/300…），见那边的注释。
     """
+    # ★ 2026-10-18：IPv6 三种方式互斥 + 多地址格式校验（fail-closed）
+    _mode6 = (ip6_mode or "static").strip().lower()
+    if _mode6 not in ("static", "dhcp6", "slaac"):
+        raise ValueError(
+            f"{path}.ip6_mode 只允许 static / dhcp6 / slaac，收到 {ip6_mode!r}"
+        )
+    _addrs6 = [str(a).strip() for a in (ip6_addrs or []) if str(a).strip()]
+    if _mode6 != "static":
+        # dhcp6 / slaac 下再给静态地址或 IPv6 网关 = 自相矛盾（生成器会丢一半）
+        _conflict = []
+        if (ip6 or "").strip():
+            _conflict.append("ip6")
+        if _addrs6:
+            _conflict.append("ip6_addrs")
+        if (gateway6 or "").strip():
+            _conflict.append("gateway6")
+        if _conflict:
+            raise ValueError(
+                f"{path}.ip6_mode={_mode6} 与 " + "、".join(_conflict) +
+                " 冲突（会被静默丢弃）：DHCPv6/SLAAC 自己拿地址与路由，"
+                "要静态 IPv6 请把 ip6_mode 改成 static"
+            )
+    # 逐字段校验：报错必须指到具体字段（ip6 与 ip6_addrs[i] 的修法不一样）
+    if (ip6 or "").strip():
+        _a = ip6.strip()
+        try:
+            ipaddress.IPv6Interface(_a) if "/" in _a else ipaddress.IPv6Address(_a)
+        except ValueError as e:
+            raise ValueError(f"{path}.ip6 不是合法 IPv6（{ip6}）：{e}")
+    for _i, _a in enumerate(_addrs6):
+        try:
+            ipaddress.IPv6Interface(_a) if "/" in _a else ipaddress.IPv6Address(_a)
+        except ValueError as e:
+            raise ValueError(f"{path}.ip6_addrs[{_i}] 不是合法 IPv6（{_a}）：{e}")
+    _all6 = ([ip6.strip()] if (ip6 or "").strip() else []) + _addrs6
+    if len(set(_all6)) != len(_all6):
+        raise ValueError(f"{path} 的 IPv6 地址有重复（同一地址写了两遍）：{_all6}")
     # ★ 2026-10-18：只有 IPv6 网关、没有 IPv6 地址 —— 生成器会写出一条没有落点的
     #   `ipv6.gateway` / `gateway6`（netplan 直接报错，nmcli 默默忽略）。fail-closed。
     #   ★★ 这条检查必须在 `mode=dhcp` 的早返回**之前**：dhcp 分支原先直接 return，
@@ -1588,29 +1627,51 @@ class NetRouteIn(BaseModel):
     @field_validator("to")
     @classmethod
     def _check_to(cls, v: str) -> str:
-        """`default` 或 IPv4 目标。
+        """`default` / IPv4 目标 / **IPv6 目标**（2026-10-18 扩展）。
 
-        · `0.0.0.0/0` 归一成 `default`（两者在三个产物里是同一个意思）；
-        · **裸 IP** 当 /32 主机路由（netplan 与 nmcli 都是这个语义），归一成显式 `x/32`；
-        · 带前缀但**主机位非零**（如 `10.20.0.1/16`）**拒绝** —— 不静默改成 `10.20.0.0/16`：
-          路由目标被悄悄改写，比直接报错难查得多。
+        · `0.0.0.0/0` 归一成 `default`（IPv4 默认路由在三个产物里是同一个意思）；
+        · **裸 IP** 当 /32（IPv4）或 /128（IPv6）主机路由，归一成显式前缀；
+        · 带前缀但**主机位非零**（`10.20.0.1/16`、`2001:db8::1/64`）**拒绝** ——
+          不静默改写成网络地址：路由目标被悄悄改写，比直接报错难查得多；
+        · `::/0` 原样保留（IPv6 默认路由），**不**归一成 `default` ——
+          netplan/nmcli/ifcfg 三家都靠 `::/0` 区分 v4/v6 默认路由。
         """
         s = (v or "").strip()
         if s.lower() in ("default", "0.0.0.0/0"):
             return "default"
+        if ":" in s:
+            try:
+                net6 = ipaddress.IPv6Network(s if "/" in s else s + "/128", strict=True)
+            except ValueError:
+                raise ValueError(
+                    f"invalid to {v!r}: IPv6 目标必须是 `::/0` 或 IPv6 网段"
+                    "（2001:db8:1::/64；裸地址按 /128）；带前缀时主机位必须为 0")
+            return str(net6)
         try:
             net = ipaddress.IPv4Network(s if "/" in s else s + "/32", strict=True)
         except ValueError:
             raise ValueError(
-                f"invalid to {v!r}: 必须是 default 或 IPv4 目标"
-                "（10.20.0.0/16、10.20.0.5（按 /32）、10.20.0.5/32）"
+                f"invalid to {v!r}: 必须是 default、IPv4 目标或 IPv6 目标"
+                "（10.20.0.0/16、10.20.0.5（按 /32）、2001:db8:1::/64、::/0）"
                 "；带前缀时主机位必须为 0（不要写 10.20.0.1/16）")
         return str(net)
 
     @field_validator("via")
     @classmethod
     def _check_via(cls, v: Optional[str]) -> Optional[str]:
-        return _require_ipv4(v, kind="address") if v else None
+        """下一跳：IPv4 或 IPv6（IPv6 里带冒号，且不许带前缀）。"""
+        if not v:
+            return None
+        s = str(v).strip()
+        if ":" in s:
+            if "/" in s:
+                raise ValueError(f"invalid via {v!r}: 下一跳不能带前缀长度")
+            try:
+                ipaddress.IPv6Address(s)
+            except ValueError as e:
+                raise ValueError(f"invalid via {v!r}: 不是合法 IPv6 下一跳（{e}）")
+            return s
+        return _require_ipv4(v, kind="address")
 
     @field_validator("metric", mode="before")
     @classmethod
@@ -1638,9 +1699,22 @@ class NetRouteIn(BaseModel):
 
     @model_validator(mode="after")
     def _check_route(self):
-        """跨字段：default 路由**必须**有 via（否则写出来是一条不可用的默认路由）。"""
-        if self.to == "default" and not self.via:
-            raise ValueError("default 路由必须给 via（下一跳）；只填 to: default 的默认路由不可用")
+        """跨字段：默认路由必须有 via；下一跳必须与目标**同族**。
+
+        · `default`（IPv4 默认）与 `::/0`（IPv6 默认）都必须给下一跳；
+        · v4 目标 + v6 下一跳（或反过来）在三个后端里都是**生成即不可用**的配置，
+          这里 fail-closed（nmcli 会直接报错、netplan 加载失败、ifcfg 静默错）。
+        """
+        if self.to in ("default", "::/0") and not self.via:
+            raise ValueError(
+                f"{self.to} 路由必须给 via（下一跳）；只填 to 的默认路由不可用")
+        if self.via:
+            to_v6 = ":" in self.to
+            via_v6 = ":" in self.via
+            if to_v6 != via_v6:
+                raise ValueError(
+                    f"to={self.to!r} 与 via={self.via!r} 地址族不一致："
+                    "IPv6 目标必须配 IPv6 下一跳（反之亦然）")
         return self
 
 
@@ -1654,6 +1728,13 @@ class NetInterfaceIn(BaseModel):
     # IPv6 静态（2026-10-18）：2001:db8::5 或 2001:db8::5/64；只做静态，不含 DHCPv6/SLAAC
     ip6: Optional[str] = None
     gateway6: Optional[str] = None
+    # ★ 2026-10-18：IPv6 的三种获得方式（补 DHCPv6 / SLAAC）
+    #   static —— 用 ip6 / ip6_addrs 里的静态地址（默认，保持旧行为）
+    #   dhcp6  —— DHCPv6 取地址（stateful）
+    #   slaac  —— 靠 RA 自动配置（stateless）
+    ip6_mode: str = "static"
+    # ★ 2026-10-18：一个接口可以有**多个** IPv6 静态地址（ip6 是第一个，其余放这里）
+    ip6_addrs: list[str] = []
     dns: list[str] = []
     # ★ 额外路由（2026-10-15）：按 netplan 的语义**挂在设备上**（netplan 的 routes 就是
     #   设备级属性）。gateway 仍是"默认路由"的便捷写法，routes 里也可以再写一条 to: default。
@@ -1703,6 +1784,13 @@ class NetBondIn(BaseModel):
     # IPv6 静态（2026-10-18）：2001:db8::5 或 2001:db8::5/64；只做静态，不含 DHCPv6/SLAAC
     ip6: Optional[str] = None
     gateway6: Optional[str] = None
+    # ★ 2026-10-18：IPv6 的三种获得方式（补 DHCPv6 / SLAAC）
+    #   static —— 用 ip6 / ip6_addrs 里的静态地址（默认，保持旧行为）
+    #   dhcp6  —— DHCPv6 取地址（stateful）
+    #   slaac  —— 靠 RA 自动配置（stateless）
+    ip6_mode: str = "static"
+    # ★ 2026-10-18：一个接口可以有**多个** IPv6 静态地址（ip6 是第一个，其余放这里）
+    ip6_addrs: list[str] = []
     dns: list[str] = []
     miimon: int = 100
     primary: Optional[str] = None   # active-backup 主接口
@@ -1794,6 +1882,13 @@ class NetVlanIn(BaseModel):
     # IPv6 静态（2026-10-18）：2001:db8::5 或 2001:db8::5/64；只做静态，不含 DHCPv6/SLAAC
     ip6: Optional[str] = None
     gateway6: Optional[str] = None
+    # ★ 2026-10-18：IPv6 的三种获得方式（补 DHCPv6 / SLAAC）
+    #   static —— 用 ip6 / ip6_addrs 里的静态地址（默认，保持旧行为）
+    #   dhcp6  —— DHCPv6 取地址（stateful）
+    #   slaac  —— 靠 RA 自动配置（stateless）
+    ip6_mode: str = "static"
+    # ★ 2026-10-18：一个接口可以有**多个** IPv6 静态地址（ip6 是第一个，其余放这里）
+    ip6_addrs: list[str] = []
     # dns：前端 VLAN 行一直有这个输入框，但模型没有该字段 → pydantic 默认忽略未知键，
     # 运维填的 DNS 静默消失。这里补上，三条生成路径都已支持（netplan nameservers /
     # nmcli ipv4.dns / ifcfg DNS1..N）。
@@ -1854,6 +1949,13 @@ class NetBridgeIn(BaseModel):
     # IPv6 静态（2026-10-18）：2001:db8::5 或 2001:db8::5/64；只做静态，不含 DHCPv6/SLAAC
     ip6: Optional[str] = None
     gateway6: Optional[str] = None
+    # ★ 2026-10-18：IPv6 的三种获得方式（补 DHCPv6 / SLAAC）
+    #   static —— 用 ip6 / ip6_addrs 里的静态地址（默认，保持旧行为）
+    #   dhcp6  —— DHCPv6 取地址（stateful）
+    #   slaac  —— 靠 RA 自动配置（stateless）
+    ip6_mode: str = "static"
+    # ★ 2026-10-18：一个接口可以有**多个** IPv6 静态地址（ip6 是第一个，其余放这里）
+    ip6_addrs: list[str] = []
     dns: list[str] = []             # 同上：前端网桥行也有 DNS 输入框
     routes: list[NetRouteIn] = []   # 额外路由（四类设备一致支持）
 
@@ -1996,6 +2098,7 @@ class NetConfigRequest(BaseModel):
             _check_l3(
                 f"interfaces[{i}]", mode=o.mode, ip=o.ip, netmask=o.netmask,
                 cidr=o.cidr, gateway=o.gateway, ip6=o.ip6, gateway6=o.gateway6,
+                ip6_mode=o.ip6_mode, ip6_addrs=o.ip6_addrs,
                 require_ip_when_static=o.name not in slave_names,
             )
         for i, o in enumerate(self.bonds):
@@ -2003,16 +2106,19 @@ class NetConfigRequest(BaseModel):
             _check_l3(
                 f"bonds[{i}]", ip=o.ip, netmask=o.netmask, cidr=o.cidr, gateway=o.gateway,
                 ip6=o.ip6, gateway6=o.gateway6,
+                ip6_mode=o.ip6_mode, ip6_addrs=o.ip6_addrs,
             )
         for i, o in enumerate(self.vlans):
             _check_l3(
                 f"vlans[{i}]", mode=o.mode, ip=o.ip, netmask=o.netmask,
                 cidr=o.cidr, gateway=o.gateway, ip6=o.ip6, gateway6=o.gateway6,
+                ip6_mode=o.ip6_mode, ip6_addrs=o.ip6_addrs,
             )
         for i, o in enumerate(self.bridges):
             _check_l3(
                 f"bridges[{i}]", mode=o.mode, ip=o.ip, netmask=o.netmask,
                 cidr=o.cidr, gateway=o.gateway, ip6=o.ip6, gateway6=o.gateway6,
+                ip6_mode=o.ip6_mode, ip6_addrs=o.ip6_addrs,
             )
         return self
 

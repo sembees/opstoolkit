@@ -132,6 +132,50 @@ CASES = [
                                   routes=[dict(to="10.20.0.0/16", via="10.10.10.254",
                                                metric=50)])]),
     ),
+    # ---------- 2026-10-18 新增能力：DHCPv6 / SLAAC / 多地址 / IPv6 路由 ----------
+    # 放进 CASES 是一石二鸟：既被快照钉死，又会被 test_netconfig_netplan_real.py
+    # 自动拿去喂**真 netplan**（那个用例只挑 format=netplan 的 case）。
+    dict(
+        id="netplan-dhcp6",
+        desc="ubuntu+netplan：DHCPv6（dhcp6: true，不写静态 IPv6 地址）",
+        expect_file="99-opstk.yaml",
+        smoke=("dhcp6: true", "addresses: [10.10.10.5/24]"),
+        req=dict(os="ubuntu", format="netplan",
+                 interfaces=[dict(name="eth0", mode="static", ip="10.10.10.5", cidr=24,
+                                  gateway="10.10.10.1", ip6_mode="dhcp6")]),
+    ),
+    dict(
+        id="netplan-slaac",
+        desc="ubuntu+netplan：SLAAC（accept-ra: true + dhcp6: false）",
+        expect_file="99-opstk.yaml",
+        smoke=("accept-ra: true", "dhcp6: false"),
+        req=dict(os="ubuntu", format="netplan",
+                 interfaces=[dict(name="eth0", mode="static", ip="10.10.10.5", cidr=24,
+                                  ip6_mode="slaac")]),
+    ),
+    dict(
+        id="netplan-multi-ipv6",
+        desc="ubuntu+netplan：一个接口两个 IPv6 地址（都在 addresses 里）+ v6 默认路由",
+        expect_file="99-opstk.yaml",
+        smoke=('addresses: [10.10.10.5/24, "2001:db8::5/64", "2001:db8::6/64"]',
+               'to: "::/0"', 'via: "2001:db8::1"'),
+        req=dict(os="ubuntu", format="netplan",
+                 interfaces=[dict(name="eth0", mode="static", ip="10.10.10.5", cidr=24,
+                                  gateway="10.10.10.1",
+                                  ip6="2001:db8::5/64", ip6_addrs=["2001:db8::6/64"],
+                                  gateway6="2001:db8::1")]),
+    ),
+    dict(
+        id="netplan-ipv6-route",
+        desc="ubuntu+netplan：IPv6 的**额外路由**（2001:db8:1::/64 via v6）",
+        expect_file="99-opstk.yaml",
+        smoke=('to: "2001:db8:1::/64"', 'via: "2001:db8::1"', "metric: 20"),
+        req=dict(os="ubuntu", format="netplan",
+                 interfaces=[dict(name="eth0", mode="static", ip="10.10.10.5", cidr=24,
+                                  ip6="2001:db8::5/64",
+                                  routes=[dict(to="2001:db8:1::/64", via="2001:db8::1",
+                                               metric=20)])]),
+    ),
     # ---------- rhel + nmcli ----------
     dict(
         id="nmcli-static-dual-gateway",

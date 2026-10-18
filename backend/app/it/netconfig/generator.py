@@ -225,6 +225,29 @@ def _prefix(obj) -> int:
     return 24
 
 
+def _v6_addrs(obj) -> list:
+    """一个接口的**全部** IPv6 静态地址（ip6 + ip6_addrs，已校验、已去重）。
+
+    2026-10-18：原来只支持单个 ip6；运维经常要给一个口配多个 v6 地址
+    （例如服务地址 + 迁移期旧地址），所以加了 ip6_addrs。
+    """
+    out = []
+    first = _v6_check(obj.get("ip6"), "ip6")
+    if first:
+        out.append(first)
+    for i, a in enumerate(obj.get("ip6_addrs") or []):
+        v = _v6_check(a, "ip6_addrs[%d]" % i)
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _v6_mode(obj) -> str:
+    m = str((obj.get("ip6_mode") if isinstance(obj, dict) else getattr(obj, "ip6_mode", "static"))
+            or "static").strip().lower()
+    return m if m in ("static", "dhcp6", "slaac") else "static"
+
+
 def _ipv6_lines(obj) -> list:
     """IPv6 静态（2026-10-18）—— **与 IPv4 是否存在无关**。
 
@@ -233,11 +256,19 @@ def _ipv6_lines(obj) -> list:
     netplan / nmcli / ifcfg 三种后端都不该有这条隐藏限制。
     """
     lines = []
-    _a6 = _v6_check(obj.get("ip6"), "ip6")
-    if not _a6:
+    mode6 = _v6_mode(obj)
+    if mode6 == "dhcp6":
+        # DHCPv6（stateful）：地址与 DNS 都由 DHCPv6 服务器给
+        return ["ipv6.method dhcp"]
+    if mode6 == "slaac":
+        # SLAAC（stateless）：靠 RA 自动配置；nmcli 的 auto 就是这个语义
+        return ["ipv6.method auto"]
+    addrs = _v6_addrs(obj)
+    if not addrs:
         return lines
     lines.append("ipv6.method manual")
-    lines.append("ipv6.addresses " + _sh(_a6))
+    # 多个地址用空格分隔，整体引用成一个 shell 词（与 ipv4.dns 同款处理）
+    lines.append("ipv6.addresses " + _sh(" ".join(addrs)))
     _g6 = _v6_check(obj.get("gateway6"), "gateway6")
     if _g6:
         lines.append("ipv6.gateway " + _sh(_g6))
@@ -288,14 +319,18 @@ def _nmcli_route_lines(obj) -> list:
     """
     lines = []
     for e in _routes_of(obj):
-        # to=default 在 nmcli 里写 0.0.0.0/0
-        dest = "0.0.0.0/0" if e["to"] == "default" else e["to"]
+        # 按**地址族**选键：IPv6 目标必须写 +ipv6.routes，写进 ipv4.routes 会直接被拒
+        is_v6 = (":" in e["to"]) or (":" in (e["via"] or ""))
+        if e["to"] == "default":
+            dest = "0.0.0.0/0"
+        else:
+            dest = e["to"]
         item = dest
         if e["via"]:
             item += " " + e["via"]
         if e["metric"] is not None:
             item += "," + str(int(e["metric"]))
-        lines.append("+ipv4.routes " + _sh(item))
+        lines.append(("+ipv6.routes " if is_v6 else "+ipv4.routes ") + _sh(item))
     return lines
 
 
@@ -487,14 +522,27 @@ def _netplan_addresses(obj) -> list:
     ip = (obj.get("ip") or "").strip() if isinstance(obj, dict) else None
     if ip:
         addrs.append(ip + "/" + str(_prefix(obj)))
-    _a6 = _v6_check(obj.get("ip6"), "ip6")
-    if _a6:
-        addrs.append(_a6)
+    addrs.extend(_v6_addrs(obj))
     return addrs
 
 
 def _netplan_emit_addresses(out, indent, addrs) -> None:
     out.append(indent + "addresses: [" + ", ".join(_yaml(a) for a in addrs) + "]")
+
+
+def _netplan_v6_mode(out, indent, obj) -> None:
+    """netplan 的 DHCPv6 / SLAAC 开关（2026-10-18）。
+
+    · dhcp6 → `dhcp6: true`（stateful DHCPv6）
+    · slaac → `accept-ra: true` + `dhcp6: false`（只靠 RA 自动配置）
+    static 不写这两个键（默认即为 false，少写少错）。
+    """
+    mode6 = _v6_mode(obj)
+    if mode6 == "dhcp6":
+        out.append(f"{indent}dhcp6: true")
+    elif mode6 == "slaac":
+        out.append(f"{indent}accept-ra: true")
+        out.append(f"{indent}dhcp6: false")
 
 
 def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
@@ -508,6 +556,7 @@ def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
         addrs = _netplan_addresses(obj)
         if addrs:
             _netplan_emit_addresses(out, indent, addrs)
+        _netplan_v6_mode(out, indent, obj)
         _netplan_routes(out, indent, obj, metric)
         _netplan_dns(out, indent, dns)
         return
@@ -517,6 +566,7 @@ def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
             addrs = _netplan_addresses(obj)
             if addrs:
                 _netplan_emit_addresses(out, indent, addrs)
+            _netplan_v6_mode(out, indent, obj)
             _netplan_routes(out, indent, obj, metric)
             _netplan_dns(out, indent, dns)
         # 无地址、也不走 DHCP（bond/bridge/vlan 的 L2 场景）时不写任何地址块：
@@ -527,10 +577,14 @@ def _netplan_addr_block(out, indent, obj, dhcp_default=False, metric=None):
             addrs = _netplan_addresses(obj)
             if addrs:
                 _netplan_emit_addresses(out, indent, addrs)
+            _netplan_v6_mode(out, indent, obj)
             _netplan_routes(out, indent, obj, metric)
         return
     out.append(f"{indent}dhcp4: false")
-    _netplan_emit_addresses(out, indent, _netplan_addresses(obj))
+    addrs = _netplan_addresses(obj)
+    if addrs:
+        _netplan_emit_addresses(out, indent, addrs)
+    _netplan_v6_mode(out, indent, obj)
     _netplan_routes(out, indent, obj, metric)
     _netplan_dns(out, indent, dns)
 
@@ -665,11 +719,22 @@ def _build_ifcfg(req):
                     # ★ 2026-10-18 修：同 nmcli 那处，Metric 被误缩进进 IPv6 分支，
                     #   纯 IPv4 双网关时 METRIC 丢失 → 两条默认路由同 metric。
                     lines.append("METRIC=" + str(int(metric)))
-        # IPv6 静态（2026-10-18）：RHEL 系 ifcfg 用 IPV6INIT/IPV6ADDR/IPV6_DEFAULTGW
-        _a6 = _v6_check(obj.get("ip6"), "ip6")
-        if _a6:
+        # IPv6（2026-10-18 扩展）：RHEL 系 ifcfg 的三条路
+        #   static → IPV6INIT + IPV6ADDR(+IPV6ADDR_SECONDARIES) + IPV6_DEFAULTGW
+        #   dhcp6  → IPV6INIT + DHCPV6C=yes
+        #   slaac  → IPV6INIT + IPV6_AUTOCONF=yes
+        mode6 = _v6_mode(obj)
+        _addrs6 = _v6_addrs(obj)
+        if mode6 == "dhcp6":
+            lines += ["IPV6INIT=yes", "DHCPV6C=yes", "IPV6_AUTOCONF=no"]
+        elif mode6 == "slaac":
+            lines += ["IPV6INIT=yes", "IPV6_AUTOCONF=yes", "DHCPV6C=no"]
+        elif _addrs6:
             lines.append("IPV6INIT=yes")
-            lines.append("IPV6ADDR=" + _sh(_a6))
+            lines.append("IPV6ADDR=" + _sh(_addrs6[0]))
+            if len(_addrs6) > 1:
+                # initscripts 的多个 IPv6 地址写法（空格分隔，整体引用）
+                lines.append("IPV6ADDR_SECONDARIES=" + _sh(" ".join(_addrs6[1:])))
             _g6 = _v6_check(obj.get("gateway6"), "gateway6")
             if _g6:
                 lines.append("IPV6_DEFAULTGW=" + _sh(_g6))
@@ -691,16 +756,21 @@ def _build_ifcfg(req):
         rs = _routes_of(obj)
         if not rs:
             return
-        lines = []
+        v4, v6 = [], []
         for e in rs:
+            is_v6 = (":" in e["to"]) or (":" in (e["via"] or ""))
             dest = "0.0.0.0/0" if e["to"] == "default" else e["to"]
             line = dest
             if e["via"]:
                 line += " via " + _sh(e["via"])
             if e["metric"] is not None:
                 line += " metric " + str(int(e["metric"]))
-            lines.append(line)
-        files["route-" + _sh(ifname)] = "\n".join(lines) + "\n"
+            (v6 if is_v6 else v4).append(line)
+        # initscripts 的约定：v4 写 route-<ifname>，v6 写 **route6-<ifname>**
+        if v4:
+            files["route-" + _sh(ifname)] = "\n".join(v4) + "\n"
+        if v6:
+            files["route6-" + _sh(ifname)] = "\n".join(v6) + "\n"
 
     # Interfaces
     for i, o in enumerate(req.interfaces):
