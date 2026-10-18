@@ -1,0 +1,30 @@
+# ===== 网络配置文件 (ifcfg格式) =====
+# 存放位置: /etc/sysconfig/network-scripts/
+# 生成后执行: systemctl restart network
+
+# ===== ifcfg-eth0 =====
+DEVICE=eth0
+TYPE=Ethernet
+BOOTPROTO=static
+IPADDR=10.0.0.5
+PREFIX=24
+GATEWAY=10.0.0.1
+METRIC=100
+IPV6INIT=yes
+IPV6ADDR=2001:db8::5/64
+IPV6_DEFAULTGW=2001:db8::1
+DNS1=10.0.0.53
+ONBOOT=yes
+
+
+# ===== ifcfg-eth1 =====
+DEVICE=eth1
+TYPE=Ethernet
+BOOTPROTO=static
+IPADDR=10.0.1.5
+PREFIX=24
+GATEWAY=10.0.1.1
+METRIC=200
+DNS1=10.0.1.53
+ONBOOT=yes
+

@@ -1,0 +1,9 @@
+# /etc/netplan/99-opstk.yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens33:
+      dhcp4: true
+      nameservers:
+        addresses: [10.0.0.53]

@@ -211,5 +211,335 @@ class Ipv6ValidationTest(unittest.TestCase):
         self.assertIn("2001:db8::5", p)
 
 
+# ======================================================================
+# 2026-10-18（第二批）追加：**bond / vlan / bridge 三类虚拟设备**的 IPv6 覆盖。
+#
+# 此前本文件只覆盖了 interfaces —— 但 IPv6 支持是 interface/bond/vlan/bridge
+# 四条路径一起接的（generator._v6_check 的 docstring；schemas._check_l3 在
+# NetConfigRequest._check_cross_rules 里对四类设备逐个调用）。虚拟设备没有
+# 用例锁住，回归时最容易漏。
+#
+# 三种后端的透传入口（backend/app/it/netconfig/generator.py 当前行号）：
+#   · nmcli  ：_bond(:317) / _vlan(:342) / _bridge(:352) 都收敛到 _mod(:302)
+#              → _ipv4_lines(:247) → _ipv6_lines(:228)，ip6/gateway6 与 IPv4 同一条透传路径；
+#   · netplan：bonds(:601) / vlans(:610) / bridges(:617) 三个调用点都走
+#              _netplan_addr_block(:485) → _netplan_v6(:470)；
+#   · ifcfg  ：bond(:729) / vlan(:741) / bridge(:753) 三个调用点都走 _ip_lines(:632)，
+#              IPV6INIT/IPV6ADDR/IPV6_DEFAULTGW 写在 :649-656。
+# 非法值 fail-closed 的两道闸：
+#   · gateway6 有、ip6 无 —— schemas._check_l3(:231-235)，对 bonds/vlans/bridges
+#     生效（_check_cross_rules :1997/:2003/:2008）；
+#   · ip6 格式非法（如填 IPv4 值）—— generator._v6_check(:33-52)，生成期、
+#     写出任何配置之前抛 ValueError。
+# ======================================================================
+
+
+def nmcli_modify(p, name):
+    """取 nmcli 产物里针对连接 name 的那条 `nmcli connection modify <name> ...` 整行。
+
+    按「哪条连接」收窄断言：一台设备一条 modify，A 设备的 ipv6 键不能替 B 设备的
+    断言作证（全串 assertIn 会掩盖串到别的设备段落里这种错）。
+    """
+    for line in p.splitlines():
+        parts = line.split()
+        if (len(parts) > 4 and parts[:3] == ["nmcli", "connection", "modify"]
+                and parts[3] == name):
+            return line
+    raise AssertionError("nmcli 产物里没有针对 " + name + " 的 modify 行")
+
+
+def ifcfg_section(p, fname):
+    """取 ifcfg 产物里 `# ===== <fname> =====` 段的配置行（按文件收窄断言）。"""
+    cur, out = None, []
+    for line in p.splitlines():
+        if line.startswith("# ===== ") and line.endswith(" ====="):
+            cur = line[len("# ===== "):-len(" =====")]
+            continue
+        if cur == fname:
+            out.append(line)
+    if not out:
+        raise AssertionError("ifcfg 产物里没有 " + fname + " 段")
+    return "\n".join(out)
+
+
+class Ipv6OnVirtualDevicesTest(unittest.TestCase):
+    """bond / vlan / bridge 的 IPv6：双栈 → 纯 IPv6 → 非法值 fail-closed。
+
+    双栈用例**先锁 IPv4 键**（test_netconfig.py 早已覆盖的既有行为），再锁 IPv6 键；
+    纯 IPv6 用例锁「没有 IPv4 时 IPv6 仍要写出、且不出现空 addresses / IPADDR」。
+    """
+
+    # 双栈模板：IPv4 部分是既有行为，这里在它之上追加 ip6/gateway6
+    BOND6 = [{"name": "bond0", "mode": 1, "interfaces": ["eth1", "eth2"],
+              "ip": "10.200.0.2", "cidr": 24, "gateway": "10.200.0.254",
+              "ip6": A6, "gateway6": G6}]
+    VLAN6 = [{"parent": "ens19", "vlan_id": 100,
+              "ip": "10.201.0.2", "cidr": 24, "gateway": "10.201.0.254",
+              "ip6": A6, "gateway6": G6}]
+    BRIDGE6 = [{"name": "br0", "interfaces": ["eth1", "eth2"],
+                "ip": "10.202.0.2", "cidr": 24, "gateway": "10.202.0.254",
+                "ip6": A6, "gateway6": G6}]
+
+    # 纯 IPv6：不填 ip/gateway（schemas._check_l3 :224 起 ip6 也算「有地址」）
+    BOND_ONLY6 = [{"name": "bond0", "mode": 1, "interfaces": ["eth1", "eth2"],
+                   "ip6": A6, "gateway6": G6}]
+    VLAN_ONLY6 = [{"parent": "ens19", "vlan_id": 100, "ip6": A6, "gateway6": G6}]
+    BRIDGE_ONLY6 = [{"name": "br0", "interfaces": ["eth1", "eth2"],
+                     "ip6": A6, "gateway6": G6}]
+
+    # ---------------- bond ----------------
+
+    def test_netplan_bond_dual_stack(self):
+        """netplan：bonds.bond0 段——IPv4 键还在，addresses6/gateway6 与它并存。"""
+        p = gen(os="ubuntu", format="netplan", bonds=self.BOND6)
+        b = yaml.safe_load(p)["network"]["bonds"]["bond0"]
+        # IPv4 部分没被破坏：聚合结构、模式、静态地址、默认路由
+        self.assertEqual(b["interfaces"], ["eth1", "eth2"])
+        self.assertEqual(b["parameters"]["mode"], "active-backup")
+        self.assertEqual(b["addresses"], ["10.200.0.2/24"])
+        self.assertEqual(b["routes"][0]["via"], "10.200.0.254")
+        # IPv6 键落在 bonds 段（不是 ethernets）
+        self.assertEqual(b["addresses6"], [A6])
+        self.assertEqual(b["gateway6"], G6)
+
+    def test_nmcli_bond_dual_stack(self):
+        """nmcli：bond0 的 modify 命令——ipv4.* 原有键还在，ipv6.method/addresses/gateway 透传。"""
+        p = gen(os="rhel", format="nmcli", bonds=self.BOND6)
+        mod = nmcli_modify(p, "bond0")
+        self.assertIn("ipv4.addresses 10.200.0.2/24", mod)
+        self.assertIn("ipv4.method manual", mod)
+        self.assertIn("ipv4.gateway 10.200.0.254", mod)
+        self.assertIn("ipv6.method manual", mod)
+        self.assertIn("ipv6.addresses " + A6, mod)
+        self.assertIn("ipv6.gateway " + G6, mod)
+        # bond 建立行与 bond.options 不受影响
+        self.assertIn("nmcli connection add type bond ifname bond0 con-name bond0", p)
+        self.assertIn("bond.options mode=active-backup,miimon=100", p)
+
+    def test_ifcfg_bond_dual_stack(self):
+        """ifcfg：ifcfg-bond0——BONDING_OPTS/IPADDR 等原有键还在，IPV6INIT/IPV6ADDR/IPV6_DEFAULTGW 出现。"""
+        p = gen(os="rhel", format="ifcfg", bonds=self.BOND6)
+        sec = ifcfg_section(p, "ifcfg-bond0")
+        self.assertIn("DEVICE=bond0", sec)
+        self.assertIn("TYPE=Bond", sec)
+        self.assertIn("BONDING_MASTER=yes", sec)
+        self.assertIn('BONDING_OPTS="mode=active-backup miimon=100"', sec)
+        self.assertIn("BOOTPROTO=static", sec)
+        self.assertIn("IPADDR=10.200.0.2", sec)
+        self.assertIn("PREFIX=24", sec)
+        self.assertIn("GATEWAY=10.200.0.254", sec)
+        self.assertIn("IPV6INIT=yes", sec)
+        self.assertIn("IPV6ADDR=" + A6, sec)
+        self.assertIn("IPV6_DEFAULTGW=" + G6, sec)
+
+    # ---------------- vlan ----------------
+
+    def test_netplan_vlan_dual_stack(self):
+        """netplan：vlans.ens19.100 段——id/link/addresses 还在，addresses6/gateway6 并存。"""
+        p = gen(os="ubuntu", format="netplan", vlans=self.VLAN6)
+        v = yaml.safe_load(p)["network"]["vlans"]["ens19.100"]
+        self.assertEqual(v["id"], 100)
+        self.assertEqual(v["link"], "ens19")
+        self.assertEqual(v["addresses"], ["10.201.0.2/24"])
+        self.assertEqual(v["routes"][0]["via"], "10.201.0.254")
+        self.assertEqual(v["addresses6"], [A6])
+        self.assertEqual(v["gateway6"], G6)
+
+    def test_nmcli_vlan_dual_stack(self):
+        """nmcli：ens19.100 的 add 行（type vlan/dev/id 原样）+ modify 里 ipv4.* 与 ipv6.*。"""
+        p = gen(os="rhel", format="nmcli", vlans=self.VLAN6)
+        self.assertIn(
+            "nmcli connection add type vlan ifname ens19.100 con-name ens19.100 dev ens19 id 100", p)
+        mod = nmcli_modify(p, "ens19.100")
+        self.assertIn("ipv4.addresses 10.201.0.2/24", mod)
+        self.assertIn("ipv4.method manual", mod)
+        self.assertIn("ipv4.gateway 10.201.0.254", mod)
+        self.assertIn("ipv6.method manual", mod)
+        self.assertIn("ipv6.addresses " + A6, mod)
+        self.assertIn("ipv6.gateway " + G6, mod)
+
+    def test_ifcfg_vlan_dual_stack(self):
+        """ifcfg：ifcfg-ens19.100——VLAN 骨架键（TYPE/VLAN/PHYSDEV）还在，IPV6 三键出现。"""
+        p = gen(os="rhel", format="ifcfg", vlans=self.VLAN6)
+        sec = ifcfg_section(p, "ifcfg-ens19.100")
+        self.assertIn("DEVICE=ens19.100", sec)
+        self.assertIn("TYPE=Vlan", sec)
+        self.assertIn("VLAN=yes", sec)
+        self.assertIn("PHYSDEV=ens19", sec)
+        self.assertIn("BOOTPROTO=static", sec)
+        self.assertIn("IPADDR=10.201.0.2", sec)
+        self.assertIn("PREFIX=24", sec)
+        self.assertIn("GATEWAY=10.201.0.254", sec)
+        self.assertIn("IPV6INIT=yes", sec)
+        self.assertIn("IPV6ADDR=" + A6, sec)
+        self.assertIn("IPV6_DEFAULTGW=" + G6, sec)
+
+    # ---------------- bridge ----------------
+
+    def test_netplan_bridge_dual_stack(self):
+        """netplan：bridges.br0 段——interfaces/addresses 还在，addresses6/gateway6 并存。"""
+        p = gen(os="ubuntu", format="netplan", bridges=self.BRIDGE6)
+        br = yaml.safe_load(p)["network"]["bridges"]["br0"]
+        self.assertEqual(br["interfaces"], ["eth1", "eth2"])
+        self.assertEqual(br["addresses"], ["10.202.0.2/24"])
+        self.assertEqual(br["routes"][0]["via"], "10.202.0.254")
+        self.assertEqual(br["addresses6"], [A6])
+        self.assertEqual(br["gateway6"], G6)
+
+    def test_nmcli_bridge_dual_stack(self):
+        """nmcli：br0 的 modify——ipv4.* 原有键还在，ipv6.method/addresses/gateway 透传。"""
+        p = gen(os="rhel", format="nmcli", bridges=self.BRIDGE6)
+        self.assertIn("nmcli connection add type bridge ifname br0 con-name br0", p)
+        mod = nmcli_modify(p, "br0")
+        self.assertIn("ipv4.addresses 10.202.0.2/24", mod)
+        self.assertIn("ipv4.method manual", mod)
+        self.assertIn("ipv4.gateway 10.202.0.254", mod)
+        self.assertIn("ipv6.method manual", mod)
+        self.assertIn("ipv6.addresses " + A6, mod)
+        self.assertIn("ipv6.gateway " + G6, mod)
+
+    def test_ifcfg_bridge_dual_stack(self):
+        """ifcfg：ifcfg-br0——TYPE=Bridge/IPADDR 等原有键还在，IPV6 三键出现。"""
+        p = gen(os="rhel", format="ifcfg", bridges=self.BRIDGE6)
+        sec = ifcfg_section(p, "ifcfg-br0")
+        self.assertIn("DEVICE=br0", sec)
+        self.assertIn("TYPE=Bridge", sec)
+        self.assertIn("BOOTPROTO=static", sec)
+        self.assertIn("IPADDR=10.202.0.2", sec)
+        self.assertIn("PREFIX=24", sec)
+        self.assertIn("GATEWAY=10.202.0.254", sec)
+        self.assertIn("IPV6INIT=yes", sec)
+        self.assertIn("IPV6ADDR=" + A6, sec)
+        self.assertIn("IPV6_DEFAULTGW=" + G6, sec)
+
+    # ---------------- 纯 IPv6（没有 IPv4）----------------
+    # 要求：IPv6 键必须写出；且不出现空的 addresses / IPADDR
+    # （无 IPv4 时 nmcli 退化 ipv4.method auto、ifcfg 退化 BOOTPROTO=dhcp —— 既有语义）。
+
+    def test_ipv6_only_bond_all_formats(self):
+        """纯 IPv6 bond：netplan 只有 addresses6/gateway6；nmcli 退化 ipv4.method auto；ifcfg 无 IPADDR。"""
+        # netplan：bonds 段有 IPv6 键、没有 addresses（dict 按**键名**精确判，addresses6 不算命中）
+        p = gen(os="ubuntu", format="netplan", bonds=self.BOND_ONLY6)
+        b = yaml.safe_load(p)["network"]["bonds"]["bond0"]
+        self.assertEqual(b["addresses6"], [A6])
+        self.assertEqual(b["gateway6"], G6)
+        self.assertNotIn("addresses", b)
+        self.assertEqual(b["interfaces"], ["eth1", "eth2"])   # bond 结构本身不受影响
+        # nmcli：bond0 的 modify 行退化成 ipv4.method auto，IPv6 键齐全
+        p = gen(os="rhel", format="nmcli", bonds=self.BOND_ONLY6)
+        mod = nmcli_modify(p, "bond0")
+        self.assertIn("ipv4.method auto", mod)
+        self.assertIn("ipv6.method manual", mod)
+        self.assertIn("ipv6.addresses " + A6, mod)
+        self.assertIn("ipv6.gateway " + G6, mod)
+        self.assertNotIn("ipv4.addresses", mod)
+        # ifcfg：bond 文件有 IPV6 三键、无 IPADDR
+        p = gen(os="rhel", format="ifcfg", bonds=self.BOND_ONLY6)
+        sec = ifcfg_section(p, "ifcfg-bond0")
+        self.assertIn("IPV6INIT=yes", sec)
+        self.assertIn("IPV6ADDR=" + A6, sec)
+        self.assertIn("IPV6_DEFAULTGW=" + G6, sec)
+        self.assertNotIn("IPADDR=", sec)
+        self.assertIn("BOOTPROTO=dhcp", sec)   # 无 IPv4 按既有语义退化，不写空 IPADDR
+
+    def test_ipv6_only_vlan_all_formats(self):
+        """纯 IPv6 vlan：三种后端都只带 IPv6 键、不写空 IPv4 地址。"""
+        # netplan：vlans.ens19.100 有 addresses6/gateway6、没有 addresses
+        p = gen(os="ubuntu", format="netplan", vlans=self.VLAN_ONLY6)
+        v = yaml.safe_load(p)["network"]["vlans"]["ens19.100"]
+        self.assertEqual(v["addresses6"], [A6])
+        self.assertEqual(v["gateway6"], G6)
+        self.assertNotIn("addresses", v)
+        self.assertEqual(v["id"], 100)          # vlan 结构本身不受影响
+        self.assertEqual(v["link"], "ens19")
+        # nmcli：ens19.100 的 modify 退化 ipv4.method auto，IPv6 键齐全
+        p = gen(os="rhel", format="nmcli", vlans=self.VLAN_ONLY6)
+        mod = nmcli_modify(p, "ens19.100")
+        self.assertIn("ipv4.method auto", mod)
+        self.assertIn("ipv6.method manual", mod)
+        self.assertIn("ipv6.addresses " + A6, mod)
+        self.assertIn("ipv6.gateway " + G6, mod)
+        self.assertNotIn("ipv4.addresses", mod)
+        # ifcfg：ifcfg-ens19.100 有 IPV6 三键、无 IPADDR
+        p = gen(os="rhel", format="ifcfg", vlans=self.VLAN_ONLY6)
+        sec = ifcfg_section(p, "ifcfg-ens19.100")
+        self.assertIn("IPV6INIT=yes", sec)
+        self.assertIn("IPV6ADDR=" + A6, sec)
+        self.assertIn("IPV6_DEFAULTGW=" + G6, sec)
+        self.assertNotIn("IPADDR=", sec)
+
+    def test_ipv6_only_bridge_all_formats(self):
+        """纯 IPv6 bridge：三种后端都只带 IPv6 键、不写空 IPv4 地址。"""
+        # netplan：bridges.br0 有 addresses6/gateway6、没有 addresses
+        p = gen(os="ubuntu", format="netplan", bridges=self.BRIDGE_ONLY6)
+        br = yaml.safe_load(p)["network"]["bridges"]["br0"]
+        self.assertEqual(br["addresses6"], [A6])
+        self.assertEqual(br["gateway6"], G6)
+        self.assertNotIn("addresses", br)
+        self.assertEqual(br["interfaces"], ["eth1", "eth2"])   # bridge 结构本身不受影响
+        # nmcli：br0 的 modify 退化 ipv4.method auto，IPv6 键齐全
+        p = gen(os="rhel", format="nmcli", bridges=self.BRIDGE_ONLY6)
+        mod = nmcli_modify(p, "br0")
+        self.assertIn("ipv4.method auto", mod)
+        self.assertIn("ipv6.method manual", mod)
+        self.assertIn("ipv6.addresses " + A6, mod)
+        self.assertIn("ipv6.gateway " + G6, mod)
+        self.assertNotIn("ipv4.addresses", mod)
+        # ifcfg：ifcfg-br0 有 IPV6 三键、无 IPADDR
+        p = gen(os="rhel", format="ifcfg", bridges=self.BRIDGE_ONLY6)
+        sec = ifcfg_section(p, "ifcfg-br0")
+        self.assertIn("IPV6INIT=yes", sec)
+        self.assertIn("IPV6ADDR=" + A6, sec)
+        self.assertIn("IPV6_DEFAULTGW=" + G6, sec)
+        self.assertNotIn("IPADDR=", sec)
+
+    # ---------------- 非法值 fail-closed ----------------
+
+    def test_gateway6_without_ip6_rejected_on_virtual_kinds(self):
+        """只给 gateway6、不给 ip6 → schema 层 ValueError（schemas._check_l3 :231）。
+
+        bond/bridge（无 mode=dhcp 概念）直接命中 gateway6 规则；vlan 默认
+        mode=static，会先命中「static 必须有 ip 或 ip6」（:224）——同样在 schema 层
+        拒绝、同样 fail-closed，只是报错走的是另一条规则，断言按实际报错锁。
+        """
+        cases = {
+            "bond": {"bonds": [{"name": "bond0", "mode": 1,
+                                "interfaces": ["eth1"], "gateway6": G6}]},
+            "vlan": {"vlans": [{"parent": "ens19", "vlan_id": 100,
+                                "gateway6": G6}]},
+            "bridge": {"bridges": [{"name": "br0", "interfaces": ["eth1"],
+                                    "gateway6": G6}]},
+        }
+        expect = {"bond": "bonds[0].gateway6",     # gateway6 规则的报错带设备路径
+                  "vlan": "vlans[0].ip",           # static 缺地址规则的报错带设备路径
+                  "bridge": "bridges[0].gateway6"}
+        for kind, kw in cases.items():
+            with self.subTest(kind=kind):
+                with self.assertRaises(ValueError) as cm:
+                    gen(os="ubuntu", format="netplan", **kw)
+                self.assertIn(expect[kind], str(cm.exception))
+
+    def test_ipv4_value_in_ip6_rejected_on_virtual_kinds(self):
+        """ip6 填 IPv4 值 → 生成期 generator._v6_check(:33) 在写出任何配置前抛 ValueError。
+
+        schema 层不查 ip6 的取值格式，所以这道闸在生成期；三类设备 × 三种后端
+        全部要拦（_v6_check 的注释就写明「同时覆盖 interface/bond/vlan/bridge 四条路径」）。
+        """
+        cases = {
+            "bond": {"bonds": [{"name": "bond0", "mode": 1,
+                                "interfaces": ["eth1"], "ip6": "192.168.1.5"}]},
+            "vlan": {"vlans": [{"parent": "ens19", "vlan_id": 100,
+                                "ip6": "192.168.1.5"}]},
+            "bridge": {"bridges": [{"name": "br0", "interfaces": ["eth1"],
+                                    "ip6": "192.168.1.5"}]},
+        }
+        for fmt, osname in (("netplan", "ubuntu"), ("nmcli", "rhel"), ("ifcfg", "rhel")):
+            for kind, kw in cases.items():
+                with self.subTest(format=fmt, kind=kind):
+                    with self.assertRaises(ValueError) as cm:
+                        gen(os=osname, format=fmt, **kw)
+                    self.assertIn("ip6 不是合法 IPv6", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

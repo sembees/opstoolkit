@@ -1,0 +1,18 @@
+# /etc/netplan/99-opstk.yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      dhcp4: false
+      addresses: [10.10.10.5/24]
+      addresses6: ["2001:db8::5/64"]
+      gateway6: "2001:db8::1"
+      routes:
+        - to: default
+          via: 10.10.10.1
+        - to: 10.20.0.0/16
+          via: 10.10.10.254
+          metric: 50
+      nameservers:
+        addresses: [10.10.10.53]

@@ -1,0 +1,9 @@
+# /etc/netplan/99-opstk.yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      dhcp4: true
+      addresses6: ["2001:db8::5/64"]
+      gateway6: "2001:db8::1"

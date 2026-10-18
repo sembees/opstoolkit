@@ -202,6 +202,17 @@ def _check_l3(
     「一个请求里有多个默认网关」不在这里判死：generator._route_metrics 会按声明顺序
     给它们写出确定的 metric（100/200/300…），见那边的注释。
     """
+    # ★ 2026-10-18：只有 IPv6 网关、没有 IPv6 地址 —— 生成器会写出一条没有落点的
+    #   `ipv6.gateway` / `gateway6`（netplan 直接报错，nmcli 默默忽略）。fail-closed。
+    #   ★★ 这条检查必须在 `mode=dhcp` 的早返回**之前**：dhcp 分支原先直接 return，
+    #   于是 "dhcp + gateway6、无 ip6" 会被静默丢弃 —— 而前端与文档都写着"fail-closed"。
+    #   三种后端在 dhcp 下仍会写 ip6（`_ipv6_lines` / `_netplan_v6` 与 IPv4 分支解耦），
+    #   所以 dhcp + ip6 + gateway6 是**合法且支持**的组合，只有"有网关没地址"才是错的。
+    if gateway6 and not ip6:
+        raise ValueError(
+            f"{path}.gateway6 给了 IPv6 网关，却没有 {path}.ip6：这条默认路由没有落点"
+            f"（请补 ip6，或删掉 gateway6）"
+        )
     if mode == "dhcp":
         for fname, val in (("ip", ip), ("gateway", gateway), ("netmask", netmask), ("cidr", cidr)):
             if val is not None and val != "":
@@ -225,13 +236,6 @@ def _check_l3(
         raise ValueError(
             f"{path}.ip 在 mode=static 时不能为空：空地址的静态接口既不是 DHCP 也没有地址，"
             f"请填 ip（或只配 IPv6 时填 ip6），或把 mode 改成 dhcp"
-        )
-    # ★ 2026-10-18：只有 IPv6 网关、没有 IPv6 地址 —— 生成器会写出一条没有落点的
-    #   `ipv6.gateway` / `gateway6`（netplan 直接报错，nmcli 默默忽略）。fail-closed。
-    if gateway6 and not ip6:
-        raise ValueError(
-            f"{path}.gateway6 给了 IPv6 网关，却没有 {path}.ip6：这条默认路由没有落点"
-            f"（请补 ip6，或删掉 gateway6）"
         )
     if not ip:
         # bond/bridge 没有 dhcp 开关，无 ip 时与 nmcli/ifcfg 一致按 DHCP 处理（不改这里的既有行为）。
