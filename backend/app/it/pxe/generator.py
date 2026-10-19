@@ -2057,8 +2057,12 @@ def _ubuntu_user_data(c):
     # || true 保证回调失败绝不把装好的系统判成装机失败（与上面 systemctl 同理）。
     _done = _safe_done_url(c.done_url)
     if _done:
+        # 2026-10-19：单次回调偶发失败（安装收尾那一瞬网络/服务可能还没就绪），
+        # 失败 = 记录永远 pending = 下次网卡引导又被重装一遍。改成 3 次重试；
+        # 整体仍以 true 收尾（回调失败绝不把装好的系统判成装机失败）。
         lines.append("    - " + json.dumps(
-            "curl -s -m 10 -X POST " + chr(34) + _done + chr(34) + " >/dev/null 2>&1 || true"))
+            "for i in 1 2 3; do curl -s -m 10 -X POST " + chr(34) + _done + chr(34)
+            + " >/dev/null 2>&1 && break; sleep 3; done; true"))
     # 这条必须容错。真机实测（22.04 live-server 最小安装）里 ssh 单元根本不存在，
     # 命令返回 1，curtin 于是把**已经装好的系统**判成 install_fail：
     #   串口实证 "Command '[... systemctl enable ssh]' returned non-zero exit status 1"
@@ -2756,9 +2760,11 @@ def _debian_preseed(c):
         #   之后仍保留安装器侧尝试作为兜底。任何一步失败都不阻断装机（|| true）。
         _late.append("in-target sh -c 'command -v curl >/dev/null 2>&1 || "
                      "apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; "
-                     "curl -s -m 10 " + _u + " >/dev/null 2>&1 || true'")
-        _late.append("wget -q -O- " + _u + " >/dev/null 2>&1 || curl -s -m 10 " + _u
-                     + " >/dev/null 2>&1 || true")
+                     "for i in 1 2 3; do curl -s -m 10 " + _u
+                     + " >/dev/null 2>&1 && break; sleep 3; done; true'")
+        _late.append("for i in 1 2 3; do wget -q -O- " + _u
+                     + " >/dev/null 2>&1 && break; curl -s -m 10 " + _u
+                     + " >/dev/null 2>&1 && break; sleep 3; done; true")
     if _late:
         L.append("d-i preseed/late_command string " + "; ".join(_late))
     return "\n".join(L) + "\n"
@@ -2903,7 +2909,9 @@ def _rhel_ks(c):
     # 失败（网络没通、服务端重启中等）绝不把装好的系统判成装机失败。
     _done = _safe_done_url(c.done_url)
     if _done:
-        L.append("curl -s -m 10 -X POST " + q + _done + q + " >/dev/null 2>&1 || true")
+        # 与 Ubuntu 侧同口径：3 次重试后再放弃（%post 里失败不阻断装机）。
+        L.append("for i in 1 2 3; do curl -s -m 10 -X POST " + q + _done + q
+                 + " >/dev/null 2>&1 && break; sleep 3; done; true")
     L.append("%end")
     return "\n".join(L) + "\n"
 
@@ -3058,6 +3066,33 @@ def _unsupported_auto_install_msg(os_type) -> str:
         "与 Ubuntu autoinstall 的自动装机生成" + family_hint + "；" + display +
         " 目前支持识别 ISO 与提取引导介质，自动装机请改用已支持的系统或手工安装。"
     )
+
+
+# ★ 2026-10-19 真机实证：装完之后、装完回调落库之前有几秒窗口，此时机器若走网卡
+#   引导会**再进一遍安装器**（实测撞上，又被抹一次盘）。给每机菜单加一个逃生口：
+#   开机后 8 秒内按 `l` 就 `sanboot`/`exit` 到本地磁盘，不按则照常安装。
+#
+#   为什么**默认仍是安装**而不是超时回本地盘：无人值守装机不能依赖有人按键 ——
+#   超时默认本地盘等于永远不装（而且这种失败是静默的：机器起来了、系统却是旧的）。
+#   所以逃生口只用于"人发现它又要重装，当场拦一下"，正常流程仍由装完回调收敛。
+_BOOT_ESCAPE_PROMPT = (
+    "prompt --key 0x6c --timeout 8000 "
+    "press 'l' to boot from local disk (auto-install starts in 8s) && goto local"
+)
+_BOOT_ESCAPE_TAIL = [":local", "sanboot --no-describe --drive 0x80 || exit"]
+
+
+def _with_boot_escape(L):
+    """给 iPXE 脚本插入"按 l 跳过本次安装"的逃生口（只对**每机**菜单生效）。
+
+    L 形如 ``["#!ipxe", "# boot: <host> (MAC ..)", <安装命令...>, "boot"]``：
+    在第 3 行（注释之后、第一条安装命令之前）插入 prompt，末尾补 :local 段。
+    脚本形状不认识就原样返回 —— 绝不能因为"形状没对上"把菜单改坏。
+    """
+    if len(L) < 3 or L[0] != "#!ipxe":
+        return L
+    head, body = L[:2], L[2:]
+    return head + [_BOOT_ESCAPE_PROMPT] + body + _BOOT_ESCAPE_TAIL
 
 
 def _ipxe_menu(c, mac="", answer_url=""):
@@ -3239,7 +3274,7 @@ def _ipxe_menu(c, mac="", answer_url=""):
         args += " ip=dhcp" + (" " + kernel_console if kernel_console else "")
         L = ["#!ipxe", "# boot: " + hn + " (MAC " + mac_s + ")", args,
              "initrd " + initrd, "boot"]
-    return "\n".join(L) + "\n"
+    return "\n".join(_with_boot_escape(L)) + "\n"
 
 
 # ===== dnsmasq 配置 =====

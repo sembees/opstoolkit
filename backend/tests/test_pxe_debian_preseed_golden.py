@@ -88,8 +88,6 @@ CASE_OVERRIDES = {
 # sha256 = sha256(掩码文本)，n_lines = len(text.split("\n"))。三重一致才算过。
 GOLDEN = {
     "static_lvm": {
-        "sha256": "be79557c3762effbdcf3761f65228438b04154d4af3b9b093db41c4b1eeed0bb",
-        "n_lines": 69,
         "lines": (
             '#_preseed_V1',
             '# 由 OpsToolkit 生成（Debian d-i preseed）',
@@ -158,13 +156,13 @@ GOLDEN = {
             '',
             '### 收尾',
             'd-i finish-install/reboot_in_progress note',
-            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 192.168.199.140 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
+            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 192.168.199.140 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; for i in 1 2 3; do curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; sleep 3; done; true\'; for i in 1 2 3; do wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; sleep 3; done; true',
             '',
         ),
+        "sha256": "3aae7ca3694c4716843dfa3bf61fbc3f6ec6b0e3d3040f17f3982e2b7fb5ddad",
+        "n_lines": 69,
     },
     "dhcp_lvm": {
-        "sha256": "13dddbf4015fad9b2e60f78d357c38a28c2299bfac3fe1a28bb0c7078df95e96",
-        "n_lines": 63,
         "lines": (
             '#_preseed_V1',
             '# 由 OpsToolkit 生成（Debian d-i preseed）',
@@ -227,13 +225,13 @@ GOLDEN = {
             '',
             '### 收尾',
             'd-i finish-install/reboot_in_progress note',
-            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 127.0.1.1 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
+            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 127.0.1.1 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; for i in 1 2 3; do curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; sleep 3; done; true\'; for i in 1 2 3; do wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; sleep 3; done; true',
             '',
         ),
+        "sha256": "da3fdbb6bee60b5eb5c2a397069ec8f9ca21ec3e46d033d8d21c0cfc7b274ef9",
+        "n_lines": 63,
     },
     "static_direct": {
-        "sha256": "f4752bad5b65d474e8c149e039d59738466413f9bc14c3c38a5c9d2f273fecdd",
-        "n_lines": 66,
         "lines": (
             '#_preseed_V1',
             '# 由 OpsToolkit 生成（Debian d-i preseed）',
@@ -299,9 +297,11 @@ GOLDEN = {
             '',
             '### 收尾',
             'd-i finish-install/reboot_in_progress note',
-            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 192.168.199.140 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true\'; wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 || true',
+            'd-i preseed/late_command string printf \'%s\\n\' pxe140-debian > /target/etc/hostname && printf \'127.0.0.1\\tlocalhost\\n%s\\t%s\\n\\n# The following lines are desirable for IPv6 capable hosts\\n::1     localhost ip6-localhost ip6-loopback\\nff02::1 ip6-allnodes\\nff02::2 ip6-allrouters\\n\' 192.168.199.140 pxe140-debian > /target/etc/hosts; mkdir -p /target/home/ops/.ssh && chmod 700 /target/home/ops/.ssh && printf \'%s\\n\' \'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey e2e@opstk\' >> /target/home/ops/.ssh/authorized_keys && chmod 600 /target/home/ops/.ssh/authorized_keys && chown -R 1000:1000 /target/home/ops/.ssh; echo \'ops ALL=(ALL) NOPASSWD:ALL\' > /target/etc/sudoers.d/90-opstk-ops && chmod 440 /target/etc/sudoers.d/90-opstk-ops; in-target sh -c \'command -v curl >/dev/null 2>&1 || apt-get -y -q install --no-install-recommends curl >/dev/null 2>&1 || true; for i in 1 2 3; do curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; sleep 3; done; true\'; for i in 1 2 3; do wget -q -O- "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; curl -s -m 10 "http://192.168.199.1:8000/api/it/pxe/installs/abc/done?t=xyz" >/dev/null 2>&1 && break; sleep 3; done; true',
             '',
         ),
+        "sha256": "70ae70ecd5b1ef0607ff585c097d815ab629f7548c3e9a2fd27b28e3300260f2",
+        "n_lines": 66,
     },
 }
 

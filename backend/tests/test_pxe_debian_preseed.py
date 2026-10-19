@@ -11,6 +11,7 @@
 
 另外**安全断言**：生成物里不得出现明文管理员口令（只允许 crypted 形态）。
 """
+import re
 import sys
 
 import pytest
@@ -251,7 +252,10 @@ class TestDebianPreseedGaps:
         p = lc.find("opstk-post.sh")
         d = lc.find(DONE)
         assert 0 <= p < d, "顺序必须是 公钥/sudo → post_script → done 回调"
-        assert lc.rstrip().endswith("|| true"), "回调容错必须保持在整行末尾"
+        # 2026-10-19：回调改成 3 次重试后行尾是 `; done; true`（不再是 `|| true`）；
+        # 判定意图不变 —— 回调失败绝不能把装好的系统判成装机失败。
+        assert re.search(r"(?:\|\| true|done; true)$", lc.rstrip()), "回调容错必须保持在整行末尾"
+        assert "for i in 1 2 3" in lc, "回调必须带重试"
 
     def test_post_script_multiline_written_verbatim(self):
         ps = _debian_preseed(_cfg(post_script="apt-get update\necho b"))

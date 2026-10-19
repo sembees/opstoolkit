@@ -111,7 +111,10 @@ class PxeMenuSuppressGeneratorTest(unittest.TestCase):
                  "id": "i-abc123", "done_url": url}]
         ks = generate_all(_rhel_cfg(), inst)["ks/" + TAG + "/ks.cfg"]
         post = ks.split("%post --interpreter=/bin/bash", 1)[1]
-        self.assertIn("curl -s -m 10 -X POST \"" + url + "\" >/dev/null 2>&1 || true", post)
+        # 2026-10-19：回调改成 3 次重试 —— 单次回调偶发失败 = 记录永远 pending =
+        # 下一次网卡引导又被重装一遍（真机验收时踩到过这个现象）。
+        self.assertIn("for i in 1 2 3; do curl -s -m 10 -X POST \"" + url
+                      + "\" >/dev/null 2>&1 && break; sleep 3; done; true", post)
         # ★ 必须是 POST：真机实测（2026-10-08）第一版发的是 GET，而 /done 只收 POST
         #   ⇒ 回调静默 404、记录永远 pending、机器被反复重装。
         self.assertIn("-X POST", post.split("curl -s -m 10", 1)[1].split("\n", 1)[0])
@@ -128,7 +131,9 @@ class PxeMenuSuppressGeneratorTest(unittest.TestCase):
         inst = [{"mac": MAC, "hostname": "web-01", "ip": IP, "status": "pending",
                  "id": "i-ubu", "done_url": url}]
         ud = generate_all(_cfg(), inst)["user-data/" + TAG + "/user-data"]
-        cmd = "curl -s -m 10 -X POST \"" + url + "\" >/dev/null 2>&1 || true"
+        # 2026-10-19：回调改 3 次重试（与 RHEL 侧同口径）。
+        cmd = ("for i in 1 2 3; do curl -s -m 10 -X POST \"" + url
+               + "\" >/dev/null 2>&1 && break; sleep 3; done; true")
         late = yaml.safe_load(ud)["autoinstall"]["late-commands"]
         self.assertIn(cmd, late)
         # 回调必须先于 reboot，且是 late-commands 的最后一条实际动作之后
