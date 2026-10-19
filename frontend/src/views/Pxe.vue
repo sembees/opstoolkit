@@ -66,7 +66,7 @@
                  加新系统不再改前端；可搜索，识别不出的 ISO 允许手选 + 手填版本 -->
             <el-select v-model="row._osType" size="small" class="os-type-select" filterable
                        placeholder="系统" :loading="!catalogReady">
-              <el-option v-for="o in osCatalog" :key="o.id" :label="o.name" :value="o.id" />
+              <el-option v-for="o in osCatalog" :key="o.id" :label="osLabel(o)" :value="o.id" />
             </el-select>
             <!-- 版本：常见版本候选 + 从文件名自动识别 + 已提取介质版本；识别不出可手填 -->
             <el-select v-model="row._osVer" size="small" class="os-ver-input" filterable allow-create
@@ -130,7 +130,7 @@
         <el-table-column prop="name" label="模板名称" min-width="130" />
         <el-table-column label="系统" width="120">
           <template #default="{ row }">
-            <el-tag size="small">{{ osLabel(row) }}</el-tag>
+            <el-tag size="small">{{ installOsLabel(row) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="disk_scheme" label="磁盘" width="70" />
@@ -284,12 +284,18 @@
           <el-col :span="8">
             <el-form-item label="系统">
               <!-- 同一份系统目录：与提取下拉、后端 pick_iso/家族判断同源（os_catalog.py）；
-                   不支持自动安装的系统在选项里就地标注 -->
+                   不支持自动安装 / 未经真机验证的系统在选项里就地标注（见 utils/oslabel.js） -->
               <el-select v-model="form.os_type" @change="onOsChange" filterable>
                 <el-option v-for="o in osCatalog" :key="o.id"
-                           :label="o.auto_install ? o.name : o.name + '（暂不支持自动安装）'"
+                           :label="osLabel(o)"
                            :value="o.id" />
               </el-select>
+              <!-- ★ 2026-10-19 审计：verified=false 的系统（oraclelinux/kylin/uos/anolis/fedora）
+                   能生成配置但本环境从未真机装过。以前界面一个字都不说，用户分不清，
+                   这里显式提示（与"暂不支持自动安装"同一套诚实标注思路）。 -->
+              <div v-if="osVerifyHint(currentOs)" class="os-verify-hint">
+                {{ osVerifyHint(currentOs) }}
+              </div>
             </el-form-item>
           </el-col>
           <el-col :span="8">
@@ -955,6 +961,7 @@ import http, { downloadZip, pxeIsoSpace, pxeIsoTransfers, pxeIsoFetch, pxeIsoUpl
 import { ElMessage, ElMessageBox } from "element-plus"
 import PageHeader from "../components/PageHeader.vue"
 import CardSection from "../components/CardSection.vue"
+import { osLabel, osVerifyHint } from "../utils/oslabel.js"
 
 const profiles = ref([])
 const installs = ref([])
@@ -995,6 +1002,9 @@ const extractLog = ref([])
 // 接口失败时的降级：从界面上已有的 os_type（模板 + 已提取介质 + 当前选中值）临时收集，
 // 不含硬编码的发行版列表；此时 family=unknown，isKickstart 按 RHEL 系口径兜底。
 const osCatalog = ref([])
+
+// ★ 2026-10-19：当前选中的系统条目 —— 用于"未验证"提示（oslabel.js 是唯一判定来源）
+const currentOs = computed(() => osCatalog.value.find(o => o.id === form.os_type) || null)
 const catalogReady = ref(false)
 
 async function loadOsCatalog() {
@@ -1748,7 +1758,7 @@ async function startRepoSync() {
   }
 }
 
-function osLabel(row) { return row.os_type + " " + row.os_version }
+function installOsLabel(row) { return row.os_type + " " + row.os_version }
 function statusType(s) { return { pending: "info", booting: "warning", installing: "warning", done: "success", installed: "success", failed: "danger" }[s] || "info" }
 function statusLabel(s) { return { pending: "待装机", booting: "引导中", installing: "安装中", done: "完成", installed: "已装完", failed: "失败" }[s] || s }
 
@@ -2302,4 +2312,10 @@ onMounted(() => {
 .iso-progress-line { margin-top: var(--ot-space-1); font-size: var(--ot-font-xs); color: var(--ot-text-2); }
 .iso-chunk-note { color: var(--ot-text-4); }
 .iso-error-line { margin-top: var(--ot-space-1); font-size: var(--ot-font-xs); line-height: 1.6; color: var(--ot-danger); }
+.os-verify-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b26a00;
+}
 </style>

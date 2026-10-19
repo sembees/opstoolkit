@@ -85,10 +85,13 @@ def _require_ifname_list(value, field: str = "interfaces") -> list:
 
 
 def _require_ipv4(value: str, kind: str) -> str:
-    """必须为合法 IPv4 地址；合法时原样返回（NC2）。"""
-    # TODO(IPv6): 整个 netconfig 模块只处理 IPv4 —— 地址/掩码/网关一律走 ipaddress.IPv4*，
-    # 生成器也只写 addresses/dhcp4（没有 addresses6/dhcp6/SLAAC）。支持 IPv6 是另一件独立
-    # 且更大的工作（地址族并存、SLAAC/DHCPv6、路由 metric 与 DNS 分族），不在本次修复范围。
+    """必须为合法 IPv4 地址；合法时原样返回（NC2）。
+
+    注意（2026-10-19 审计更正）：这个函数只校验 **IPv4** 字段（ip/gateway/netmask），
+    不代表 netconfig 只支持 IPv4 —— IPv6 走独立的 `ip6` / `ip6_addrs` / `gateway6` /
+    `ip6_mode` 字段，由 `_check_l3` 用 `ipaddress.IPv6*` 校验，生成器侧三后端都实现了
+    （addresses 合并、dhcp6、accept-ra/SLAAC、`ip6_mode=disabled`、IPv6 路由）。
+    """
     try:
         ipaddress.IPv4Address(value)
     except ValueError:

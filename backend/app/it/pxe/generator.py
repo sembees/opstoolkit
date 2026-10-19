@@ -269,8 +269,11 @@ class PxeConfig:
 #     preseed.cfg；离线前提：本地 HTTP 仓库必须带官方签名索引（dists/<suite>/InRelease
 #     或 Release+Release.gpg），DVD 直拷的 dists/+pool/ 缺 Release.gpg 时 d-i 停在
 #     <Change mirror>（真机实证见 _ipxe_menu 内 2026-10-09/10 注释）；
-#   · opensuse(autoyast) —— auto_install=False：只支持识别 ISO 与提取引导介质，
-#     生成配置时给出明确拒绝提示（见 _unsupported_auto_install_msg）。
+#   · opensuse(autoyast) —— _opensuse_autoyast 已实现（2026-10-18 起，AutoYaST XML），
+#     auto_install=True，且**真机装过**：openSUSE 15.6 在 BIOS+GPT 与 UEFI 两条路径都
+#     一次装通（os_catalog 里 verified=True，note 里写着真机证据）。
+#     （历史注：2026-10 上旬它确实是 auto_install=False、只认 ISO 不给应答文件；
+#       注释在这里一度没跟着改，2026-10-19 审计发现并更正。）
 # 家族成员的**唯一**定义点在 os_catalog.py；这里的常量都从目录派生，绝不再手抄一份。
 # 校验层 schemas._OS_TYPE_ALLOWED 必须与 os_catalog 派生的白名单一致，有测试锁住两者不漂移。
 RHEL_FAMILY = os_catalog.kickstart_family() + tuple(
@@ -2967,7 +2970,12 @@ def _unregistered_default_menu() -> str:
 
 
 def _unsupported_auto_install_msg(os_type) -> str:
-    """debian/openSUSE 等 auto_install=False 的系统：生成配置时的明确拒绝提示。
+    """`auto_install=False` 的系统：生成配置时的明确拒绝提示。
+
+    现状（2026-10-19 审计更正）：目录里 16 个系统**全部** auto_install=True
+    （debian/openSUSE 早已实现并真机验证过），所以本函数目前**没有实际调用对象** ——
+    它留作兜底：将来若有新系统只支持"识别 ISO + 提取介质"，走 false 就会落到这里，
+    而不是被硬凑一套假应答文件。
 
     要求（用户反馈语境）：能识别、能提取引导介质，但**不能硬凑**一套假应答文件 ——
     明确说清"只支持识别 + 提取"，并给出可行出路。

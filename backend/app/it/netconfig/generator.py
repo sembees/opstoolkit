@@ -209,8 +209,10 @@ def _cidr_to_netmask(cidr: int) -> str:
 
 
 def _prefix(obj) -> int:
-    # TODO(IPv6): 只处理 IPv4 —— netmask 是点分十进制 IPv4 掩码，缺省按 /24。
-    # 需要 IPv6 时这里要整体改成按地址族取前缀（netplan 还要写 addresses6/dhcp6）。
+    # IPv4 前缀：netmask 是点分十进制 IPv4 掩码，缺省按 /24。
+    # ★ 这不是"未实现的 TODO"，而是设计取舍（2026-10-19 审计更正）：IPv6 没有点分掩码，
+    #   它的前缀直接写在地址里（`2001:db8::5/64`），由 `_v6_check` 校验、`_netplan_addresses`
+    #   带进 addresses 列表，与本函数的 IPv4 前缀互不影响。
     # 第 2 层（schemas.NetConfigRequest）已用同一个默认值 /24 做网关同子网检查，
     # 两处默认值必须保持一致，否则会出现"校验通过但生成的默认路由不可达"。
     if obj.get("cidr"):
