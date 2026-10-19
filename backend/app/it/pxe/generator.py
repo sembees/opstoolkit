@@ -3075,24 +3075,24 @@ def _unsupported_auto_install_msg(os_type) -> str:
 #   为什么**默认仍是安装**而不是超时回本地盘：无人值守装机不能依赖有人按键 ——
 #   超时默认本地盘等于永远不装（而且这种失败是静默的：机器起来了、系统却是旧的）。
 #   所以逃生口只用于"人发现它又要重装，当场拦一下"，正常流程仍由装完回调收敛。
-_BOOT_ESCAPE_PROMPT = (
-    "prompt --key 0x6c --timeout 8000 "
-    "press 'l' to boot from local disk (auto-install starts in 8s) && goto local"
-)
-_BOOT_ESCAPE_TAIL = [":local", "sanboot --no-describe --drive 0x80 || exit"]
-
-
+# ★ 2026-10-19 结论：**不做**"菜单限时/按键逃生"。
+#   两种写法都在真机上把装机链打断了，证据（VM154 / OVMF + 2022 版 ipxe.efi）：
+#     · `prompt --key 0x6c --timeout 8000 ...` → 该构建不认这两个选项，直接中止脚本，
+#       机器掉进 UEFI Shell（只取了菜单、没取内核）；
+#     · 换成标准的 `menu` / `item` / `choose --timeout --default` → 菜单能显示，
+#       但 `choose` 之后 iPXE 的网络设备状态不可用，`kernel http://...` 报
+#       "Could not boot image: Connection timed out" + "No more network devices"。
+#   两种都属于"为了一个小概率窗口，把主流程（无人值守装机）弄坏"，不划算。
+#   重复装机的窗口改由**装完回调 3 次重试**收敛（见 _ubuntu_user_data / _rhel_ks /
+#   _debian_preseed 里的 for i in 1 2 3 循环）—— 那才是根因侧的处理。
 def _with_boot_escape(L):
-    """给 iPXE 脚本插入"按 l 跳过本次安装"的逃生口（只对**每机**菜单生效）。
+    """占位：逃生口方案已被真机否决，这里**原样返回**（保留函数名以免调用点再改）。
 
-    L 形如 ``["#!ipxe", "# boot: <host> (MAC ..)", <安装命令...>, "boot"]``：
-    在第 3 行（注释之后、第一条安装命令之前）插入 prompt，末尾补 :local 段。
-    脚本形状不认识就原样返回 —— 绝不能因为"形状没对上"把菜单改坏。
+    历史：2026-10-19 曾尝试 prompt / menu 两种写法，均在 UEFI + 旧 ipxe.efi 下
+    打断装机链（见上方注释）。若要重启这个需求，必须先在 BIOS 与 UEFI 两套
+    固件上各跑通一次"菜单 → 内核 → 安装器"，再合并。
     """
-    if len(L) < 3 or L[0] != "#!ipxe":
-        return L
-    head, body = L[:2], L[2:]
-    return head + [_BOOT_ESCAPE_PROMPT] + body + _BOOT_ESCAPE_TAIL
+    return L
 
 
 def _ipxe_menu(c, mac="", answer_url=""):

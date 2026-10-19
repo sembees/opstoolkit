@@ -40,73 +40,28 @@ def _cfg(**kw):
     return PxeConfig(**kw)
 
 
-class BootEscapeTest(unittest.TestCase):
-    """菜单逃生口：形状、默认动作、插入位置。"""
+class NoInteractiveEscapeTest(unittest.TestCase):
+    """逃生口已被真机否决：菜单里**不允许**出现任何交互/菜单命令。
 
-    def test_inserts_prompt_and_local_branch(self):
-        L = ["#!ipxe", "# boot: h (MAC aa:bb)", "kernel http://x/k", "initrd http://x/i", "boot"]
-        out = _with_boot_escape(L)
-        self.assertEqual(out[0], "#!ipxe")
-        self.assertEqual(out[1], "# boot: h (MAC aa:bb)")
-        # prompt 必须在**第一条安装命令之前**（否则它等完 8 秒才开始装机，白等）
-        self.assertIn("prompt --key 0x6c", out[2])
-        self.assertIn("goto local", out[2])
-        self.assertIn("kernel http://x/k", out[3])
-        # 末尾要有本地引导分支
-        self.assertIn(":local", out)
-        self.assertTrue(any("sanboot" in x for x in out))
-        self.assertTrue(any(x.strip() == "exit" or "|| exit" in x for x in out))
+    为什么用"不许出现"来钉：两轮失败都是"加了个看起来无害的交互命令"把装机链
+    打断（prompt 的选项不认 → 中止脚本；menu/choose 之后网络设备不可用 →
+    kernel 连接超时）。这里把"不许加回去"变成机械断言，避免以后又有人顺手加。
+    """
 
-    def test_default_action_is_install_not_local(self):
-        """超时必须落到**安装**（fall-through），不能 `|| goto local`。
+    def test_helper_is_passthrough(self):
+        L = ["#!ipxe", "# boot: h (MAC aa:bb)", "kernel http://x/k", "boot"]
+        self.assertEqual(_with_boot_escape(list(L)), L)
 
-        写成 `prompt ... || goto local` 的话，无人值守机器不按键 → 直接本地盘 →
-        系统永远装不上，而且是静默失败。这条断言就是防这个反向改法。
-        """
-        out = _with_boot_escape(["#!ipxe", "# boot: h", "kernel k", "boot"])
-        prompt = [x for x in out if x.startswith("prompt")][0]
-        self.assertIn("goto local", prompt)
-        self.assertNotIn("|| goto local", prompt)
-        # 安装命令在 prompt 之后，且中间没有 goto（顺序不能反）
-        idx_prompt = out.index(prompt)
-        idx_kernel = [i for i, x in enumerate(out) if x.startswith("kernel")][0]
-        self.assertLess(idx_prompt, idx_kernel)
-
-    def test_unexpected_shape_left_untouched(self):
-        """不认识的形状原样返回 —— 宁可没有逃生口，也不能把菜单改坏。"""
-        for bad in ([], ["#!ipxe"], ["foo", "bar", "baz"], ["#!grub", "# x", "linux"]):
-            self.assertEqual(_with_boot_escape(list(bad)), bad, bad)
-
-
-class PerMacMenuTest(unittest.TestCase):
-    """端到端：三族每机菜单都要带逃生口，且都能从生成结果里看到。"""
-
-    def _menu(self, **kw):
-        files = generate_all(_cfg(**kw), INSTALLS)
-        key = "boot/00-11-22-33-44-55.ipxe"
-        self.assertIn(key, files)
-        return files[key]
-
-    def test_ubuntu_menu_has_escape(self):
-        m = self._menu()
-        self.assertIn("prompt --key 0x6c --timeout 8000", m)
-        self.assertIn(":local", m)
-        self.assertIn("sanboot", m)
-        # 装机链本身不能丢
-        self.assertIn("autoinstall", m)
-        self.assertIn("cloud-config-url=", m)
-
-    def test_rhel_menu_has_escape(self):
-        m = self._menu(os_type="rhel", os_version="9.4")
-        self.assertIn("prompt --key 0x6c", m)
-        self.assertIn("inst.ks=", m)
-        self.assertIn(":local", m)
-
-    def test_debian_menu_has_escape(self):
-        m = self._menu(os_type="debian", os_version="12")
-        self.assertIn("prompt --key 0x6c", m)
-        self.assertIn("preseed/url=", m)
-        self.assertIn(":local", m)
+    def test_no_interactive_commands_in_menu(self):
+        for kw in (dict(), dict(os_type="rhel", os_version="9.4"),
+                   dict(os_type="debian", os_version="12")):
+            files = generate_all(_cfg(**kw), INSTALLS)
+            menu = files["boot/00-11-22-33-44-55.ipxe"]
+            for banned in ("prompt", "menu ", "item ", "choose", "sleep"):
+                self.assertNotIn(banned, menu, (kw, banned))
+            # 装机链本身必须在
+            self.assertIn("kernel ", menu)
+            self.assertIn("boot", menu)
 
 
 class InstallCallbackRetryTest(unittest.TestCase):
