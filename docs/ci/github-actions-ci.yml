@@ -1,0 +1,127 @@
+# CI —— 后端 pytest（Linux）+ 真 netplan 校验 + 前端单测与构建
+#
+# ⚠ 本文件放在 docs/ci/ 是**故意的**：推 `.github/workflows/**` 需要 Personal Access Token
+#   带 `workflow` scope，而当前 token 没有（GitHub 会直接拒绝整次 push）。
+#   启用方式见同目录 README.md：拿到 scope 后把本文件复制到 .github/workflows/ci.yml 再推。
+#
+# 三个作业各自的目的：
+#   backend   —— 全量 pytest。注意它跑在 Linux 上：Windows 本机那 21 条失败是环境基线
+#                （依赖真实网卡 / 真实 dnsmasq 单元），Linux runner 上应当全绿。
+#   netplan   —— 装 Ubuntu 真正的 netplan.io，跑 tests/test_netconfig_netplan_real.py，
+#                用真工具校验生成的 YAML（本地只有 Windows，靠这条兜住"YAML 语法对不对"）。
+#   frontend  —— npm ci / npm test（Node 自带 runner，零新依赖）/ npm run build。
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端测试（pytest）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      # OpenSUSE AutoYaST 的 RelaxNG 校验：开了 STRICT 之后，缺 lxml 必须**显式失败**，
+      # 而不是静默跳过（CI 里本来就装 lxml，这里是双保险）。
+      OPSTK_RNG_STRICT: "1"
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 装 Python 3.13（带 pip 缓存）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 装后端依赖
+        run: |
+          pip install -r requirements.txt
+          pip install lxml pytest
+
+      # PXE/ZTP 的部署用例不是拿桩数据，而是**读真实宿主机网卡**：它们断言"部署前红线检查"
+      # 会用真实网卡清单拒绝不存在的 interface。产品目标机是带专用装机网 192.168.199.1/24
+      # （ens19）的 PXE 宿主，而 GitHub runner 默认只有 eth0 → 9 条用例会因"没有 ens19"红。
+      # 这是环境前提、不是代码缺陷，所以在 CI 里造出同样的前提。
+      - name: 造出部署用例需要的 PXE 网卡（ens19）
+        run: |
+          # act 的镜像里没有 iproute2（真 runner 有）；缺了就装，别让环境差异伪装成代码问题。
+          if ! command -v ip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y iproute2
+          fi
+          # 幂等：已存在（重跑 / act 复用容器）不算错。
+          sudo ip link add ens19 type dummy 2>/dev/null || true
+          sudo ip link set ens19 up
+          sudo ip addr add 192.168.199.1/24 dev ens19 2>/dev/null || true
+          ip -4 -o addr show ens19
+
+      - name: 跑后端测试
+        run: python -m pytest tests -q
+
+  netplan:
+    name: netplan 真工具校验
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 装 Python 3.13（带 pip 缓存）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 装后端依赖
+        run: |
+          pip install -r requirements.txt
+          pip install lxml pytest
+
+      - name: 装真正的 netplan.io
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y netplan.io
+          netplan --version
+
+      - name: 用真 netplan 校验生成的 YAML
+        env:
+          OPSTK_NETPLAN_STRICT: "1"
+        run: python -m pytest tests/test_netconfig_netplan_real.py -q
+
+  frontend:
+    name: 前端单测与构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 装 Node 20（带 npm 缓存）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 装前端依赖
+        run: npm ci
+
+      # package.json 里的 "test": "node --test" —— 用 Node 自带 runner，
+      # 不引入 vitest 等新依赖；Node 20+ 默认会发现 frontend/tests/*.test.mjs。
+      - name: 前端单测
+        run: npm test
+
+      - name: 前端构建
+        run: npm run build
