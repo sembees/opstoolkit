@@ -513,27 +513,81 @@ _RAID_LEVELS = (0, 1, 5, 6, 10)
 _DISK_MODES = ("auto", "name", "match")
 _DISK_LAYOUTS = ("lvm", "direct", "zfs", "custom")
 
-# ★ A6（2026-10-15）：**ZFS 口径统一为"明确拒绝"**。
-#   改前三个地方说法不一致，而其中两个会**静默给出别的东西**：
-#     · schemas 的 disk_scheme 白名单：拒绝 zfs（422）—— 与手册一致；
-#     · _disk_plan 的 disk_config.layout：**接受** zfs，随后 RHEL 侧 `_rhel_layout_lines`
-#       把它当 lvm/其它分支处理 ⇒ 运维写 zfs、装出来是 LVM，**产物上看不出问题**；
-#     · Ubuntu 的旧 disk_scheme 路径：会真的给 subiquity 发 `layout.name=zfs`
-#       （subiquity 认这个键，于是"界面说没实现、直连却真去建 zfs"）。
-#   本工具的 ZFS 支持确实没做（界面选项已移除、手册写明未实现）。既然没做，就在**所有**
-#   能到达的路径上一律拒绝，并说清替代方案 —— 宁可当场报错，不要"配置与实际不符"。
-_ZFS_REJECT_MSG = (
-    "ZFS 未实现：本工具的 ZFS 布局尚未落地（界面上已移除该选项，只有 lvm / direct / custom）。"
-    "现在请用 layout=lvm（推荐）或 layout=direct；确有 ZFS 需求时，"
-    "先让 ZFS 方案通过真机验收（分区/挂载/引导三项）再打开这个键。"
-    "这里**拒绝**而不是静默按 LVM 生成 —— 那会变成「配置写 zfs、装出来是 LVM」这种看不出问题的偏差。"
+# ★ ZFS 口径（2026-10-19）：**仅 Ubuntu（subiquity autoinstall）支持**，其余安装器路径明确拒绝。
+#   为什么不是"一律拒绝"了：subiquity 原生支持 `storage.layout.name = zfs`，且 match 的写法
+#   与 lvm/direct **完全同构**（`_ubuntu_storage_obj` 对 layout 是数据驱动的），所以 Ubuntu
+#   这条路径不需要另写一套生成逻辑。真机依据只到"subiquity 认这个键 / 产物结构与官方
+#   layout 简写一致"这一层；分区/挂载/引导三项的真机验收见交付说明里"未验证"清单。
+#
+#   其余家族**仍然必须拒绝**，而且理由各不相同（不能退回成 A6 之前那种静默换方案）：
+#     · RHEL 系（anaconda/kickstart）：anaconda 没有原生 ZFS root —— 写 zfs 只会落到
+#       lvm 分支，产物"看着正常"但配置与实物不符（A6 记录的正是这个偏差）；
+#     · Debian preseed(partman)：partman-auto 没有 zfs root 方案，硬生成等于悄悄按别的
+#       方案分区；
+#     · 其它（如 openSUSE autoyast）：本工具没有实现，同样不猜。
+#   三处文案各说各的安装器限制，但都收敛到同一句"仅支持 Ubuntu"。
+_ZFS_RHEL_REJECT_MSG = (
+    "RHEL 系没有原生 ZFS root（anaconda 不支持），ZFS 布局仅支持 Ubuntu；"
+    "请改用 lvm 或 direct。"
+)
+_ZFS_PRESEED_REJECT_MSG = (
+    "Debian 的 preseed(partman) 路径不支持 ZFS 布局（partman 没有 zfs root 方案），"
+    "ZFS 布局仅支持 Ubuntu（subiquity 原生 zfs root）；请改用 lvm 或 direct。"
+)
+# schemas 层复用这一句（保存期 422 与生成期消息同源，避免两套口径漂移）
+_ZFS_UBUNTU_ONLY_MSG = (
+    "ZFS 布局仅支持 Ubuntu（subiquity 原生 zfs root），当前系统的安装器没有 ZFS root 方案；"
+    "请改用 lvm 或 direct。"
 )
 
 
-def _reject_zfs(scheme, where: str) -> None:
-    """ZFS 的唯一口径（见 `_ZFS_REJECT_MSG`）。`where` 只用于把出错位置写进消息。"""
-    if str(scheme or "").strip().lower() == "zfs":
-        raise ValueError(where + "：" + _ZFS_REJECT_MSG)
+def _is_zfs(scheme) -> bool:
+    """是否 zfs 布局（大小写/空白归一后判断）。"""
+    return str(scheme or "").strip().lower() == "zfs"
+
+
+def _is_ubuntu_family(os_type) -> bool:
+    """是否 Ubuntu 家族。
+
+    目前系统目录里只有 `key="ubuntu"` 一条、**没有别名**（grep os_catalog：ubuntu 的
+    aliases 为空；alma/redhat/centos-stream 才是别名）。这里仍走目录查表而不是直接比较
+    字符串：与 `is_rhel_family` 同一套归一化口径，历史库里的 " Ubuntu " 之类值也能认出来，
+    将来若给 ubuntu 加别名也不会漏判。
+    """
+    e = os_catalog.entry(os_type)
+    return bool(e and e.key == "ubuntu")
+
+
+def _reject_zfs_rhel(scheme, where: str) -> None:
+    """RHEL 系（anaconda/kickstart）的 ZFS 口径：没有原生 ZFS root，明确拒绝。"""
+    if _is_zfs(scheme):
+        raise ValueError(where + "：" + _ZFS_RHEL_REJECT_MSG)
+
+
+def _reject_zfs_preseed(scheme, where: str) -> None:
+    """Debian preseed(partman) 的 ZFS 口径：partman 没有 zfs root 方案，明确拒绝。"""
+    if _is_zfs(scheme):
+        raise ValueError(where + "：" + _ZFS_PRESEED_REJECT_MSG)
+
+
+def _reject_zfs_for_plan(os_type, scheme, where: str) -> None:
+    """按**安装器家族**决定 ZFS 是否放行（`_disk_plan` 是 RHEL/Ubuntu/Debian 共用入口）。
+
+    · Ubuntu → 放行（subiquity 原生支持，产物由 `_ubuntu_storage_obj` 生成）；
+    · RHEL 系 / Debian → 各自的准确文案；
+    · 其它 → 统一"仅 Ubuntu"文案。
+    共同底线：**绝不**让 zfs 静默落到 lvm 分支（那正是 A6 要消除的"配置与产物不符"）。
+    """
+    if not _is_zfs(scheme):
+        return
+    if _is_ubuntu_family(os_type):
+        return
+    if is_rhel_family(os_type):
+        raise ValueError(where + "：" + _ZFS_RHEL_REJECT_MSG)
+    e = os_catalog.entry(os_type)
+    if e is not None and e.key == "debian":
+        raise ValueError(where + "：" + _ZFS_PRESEED_REJECT_MSG)
+    raise ValueError(where + "：" + _ZFS_UBUNTU_ONLY_MSG)
 _SIZE_UNIT = {"M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4, "P": 1024 ** 5}
 # "吃掉剩余空间"的两种写法：kickstart 用 --grow，subiquity 用字符串 "rest"
 _GROW_SIZES = ("rest", "100%FREE")
@@ -788,12 +842,14 @@ def _disk_plan(c, dc):
         if layout not in _DISK_LAYOUTS:
             raise ValueError(
                 "disk_config.layout 非法 " + repr(raw_layout) + "：只允许 lvm|direct|custom"
-                "（zfs 不再是可选项，见下）"
+                "（zfs 是可选布局，但仅 Ubuntu 支持，见下）"
             )
-    # A6：zfs 在 _DISK_LAYOUTS 里只是为了给出**准确**的拒绝消息（它不是"非法值"，
-    # 而是"认得但没实现"）—— 从元组里删掉会落到上面那句"非法"，反而误导。
-    # 放在 if/else **之后**：两条来源（disk_config.layout 与旧 disk_scheme）都要拦。
-    _reject_zfs(layout, "disk_config.layout")
+    # zfs 的放行与否**按 os_type 分岔**（_reject_zfs_for_plan）：Ubuntu 放行，其余家族拒绝。
+    # 放在 if/else **之后**：两条来源（disk_config.layout 与旧 disk_scheme）都要过这一道；
+    # 错误里点名的字段也跟着来源走，运维不用猜是哪一层配置写错了。
+    _reject_zfs_for_plan(
+        c.os_type, layout,
+        "disk_config.layout" if raw_layout not in (None, "") else "disk_scheme")
 
     custom = layout == "custom"
     parts_in = dc.get("partitions") or []
@@ -1327,10 +1383,11 @@ def _rhel_layout_lines(scheme, disk) -> str:
     disk_config 缺省时**必须逐字命中**本函数返回值（回归红线 §5.1）——所以这里只做
     参数替换，标点/顺序/空格一个都不许动。
 
-    ★ A6：`zfs` 以前落到本函数的 lvm 分支（"沿用既有行为（与 lvm 同构）"）——
-    那意味着**运维写 zfs、装出来是 LVM，产物上看不出来**。现在明确拒绝。
+    ★ ZFS（2026-10-19）：RHEL 系没有原生 ZFS root（anaconda 不支持）⇒ 继续拒绝，
+    但她不是"没实现"，而是**安装器能力边界**，所以文案指向 anaconda 并建议 lvm/direct。
+    输出格式本身一个字节都没动（回归红线 §5.1）。
     """
-    _reject_zfs(scheme, "_rhel_layout_lines")
+    _reject_zfs_rhel(scheme, "_rhel_layout_lines")
     if scheme == "direct":
         return (
             "clearpart --drives=" + disk + " --all --initlabel\n"
@@ -1903,9 +1960,10 @@ def _ubuntu_user_data(c):
         scheme = c.disk_scheme
         if scheme not in ("lvm", "direct", "zfs"):
             scheme = "lvm"
-        # A6：Ubuntu 这条旧路径会**真的**给 subiquity 发 `layout.name=zfs`
-        #（subiquity 认这个键）—— 与"界面说没实现"矛盾，统一为拒绝。
-        _reject_zfs(scheme, "disk_scheme")
+        # ZFS（2026-10-19）：subiquity **原生支持** layout.name=zfs，旧 disk_scheme 路径与
+        # 结构化路径同属 Ubuntu autoinstall，因此这里放行（以前 A6 在这里拒绝，是因为
+        # 当时"界面说没实现、直连却真去建 zfs"不一致；现在界面/手册/生成器口径一致）。
+        # 其它家族在 _reject_zfs_for_plan / _rhel_layout_lines / _debian_preseed 各自拒绝。
         cfg = {"name": scheme}
         if disk is not None:
             cfg["match"] = {"path": "/dev/" + disk}
@@ -2373,6 +2431,12 @@ def _debian_preseed(c):
     #     绝不静默回退到 sda。
     #   `plan is None`（老模板只给 {disk: 盘名}）时**逐字节保持原样**，不动既有产物。
     _plan = _disk_plan(c, c.disk_config or {})
+    # ★ ZFS（2026-10-19）：d-i 的 partman-auto 没有 zfs root 方案 —— 生成一份"没有 zfs"的
+    #   preseed 等于静默换成别的分区方案，所以明确拒绝。结构化 layout 已由 `_disk_plan`
+    #   按 os_type 拒绝（它给的消息会点到 disk_config.layout）；这里补拦旧 `disk_scheme`：
+    #   `{disk: "sda"}` + disk_scheme=zfs 的老模板会走 plan=None 的既有路径、绕过 _disk_plan。
+    if _plan is None:
+        _reject_zfs_preseed(c.disk_scheme, "disk_scheme")
     _resolve = []
     if _plan is not None and _plan["mode"] == "name":
         _nm = _plan["name"]

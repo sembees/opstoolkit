@@ -668,7 +668,7 @@ scp Rocky-9.5-x86_64-dvd.iso <运维账号>@服务器IP:/srv/opstk/iso/</pre>
                 <li>「挂已有文件系统」同时开「格式化」（互相矛盾，422）。</li>
                 <li>32 位 UEFI 引导（发行版无 i386 iPXE 固件）。</li>
                 <li>装机模板管理员口令留空（安全设计：不代填默认口令）。</li>
-                <li>ZFS 暂未支持（后端未实现，选项已移除）：分区方案只提供 LVM / 直通分区 / 自定义分区表；API 直连传 disk_scheme=zfs 仍会被 422 拒绝。</li>
+                <li>ZFS 布局仅支持 Ubuntu（subiquity 原生 zfs root）：分区方案在 Ubuntu 模板里可选 ZFS；RHEL 系（anaconda 没有原生 ZFS root）与 Debian（preseed/partman 没有 zfs root 方案）选 ZFS 会被 422 拒绝。</li>
               </ul>
             </el-collapse-item>
 
@@ -1149,7 +1149,7 @@ const pxeFields = [
   { field: "root 密码", required: "否", desc: "仅 kickstart 家族（RHEL 系/RHEL 克隆/openEuler/麒麟/UOS 等）显示；生成 rootpw --iscrypted 哈希" },
   { field: "时区/语言/键盘", required: "否", desc: "默认 Asia/Shanghai / en_US.UTF-8 / us" },
   { field: "SSH 公钥", required: "否", desc: "每行一个公钥，写入 authorized_keys 免密登录" },
-  { field: "分区方案", required: "是", desc: "LVM（推荐）/ 直通分区 / 自定义分区表（ZFS 暂未支持：后端未实现，选项已移除）" },
+  { field: "分区方案", required: "是", desc: "LVM（推荐）/ 直通分区 / 自定义分区表；ZFS 根仅 Ubuntu 支持（subiquity 原生 zfs root，选项只在 Ubuntu 模板显示）" },
   { field: "目标磁盘", required: "是", desc: "自动（最大盘，仅 RHEL 系）/ 按盘名 / 按序列号或型号；按盘名只接受 /dev/<盘名>，盘名剥掉 /dev/ 前缀后仅字母数字与 . _ -（sda、nvme0n1 合法；sda,sdb 或含 $/引号/空白/分号 → 生成期明确报错，不再静默接受）" },
   { field: "最小容量 (GB)", required: "否", desc: "自动选盘时过滤小盘（如排除装了引导的 U 盘）" },
   { field: "清空目标盘", required: "否", desc: "默认开：只清空目标盘，其它盘一律不碰" },

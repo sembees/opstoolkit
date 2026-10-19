@@ -262,12 +262,22 @@ class PxeInputSurfaceTest(unittest.TestCase):
 
     def test_disk_scheme_whitelist(self):
         from app.core.schemas import PxeProfileIn
-        for bad in ("zfs", "lvm2", "raid"):
+        # 拼写错误/无意义值仍拒绝
+        for bad in ("lvm2", "raid"):
             with self.subTest(bad=bad):
                 with pytest.raises(ValueError) as e:
                     PxeProfileIn(name="t", os_type="ubuntu", admin_password="Test@123",
                                  disk_scheme=bad)
                 self.assertIn("disk_scheme", str(e.value))
+        # ZFS（2026-10-19）：仅 Ubuntu 放行（subiquity 原生 zfs root）
+        self.assertEqual(PxeProfileIn(name="t", os_type="ubuntu", admin_password="T@1",
+                                      disk_scheme="zfs").disk_scheme, "zfs")
+        # 其它 os_type 仍 422，且消息指到 disk_scheme、说明"仅 Ubuntu"
+        with pytest.raises(ValueError) as e:
+            PxeProfileIn(name="t", os_type="rhel", admin_password="Test@123",
+                         disk_scheme="zfs")
+        self.assertIn("disk_scheme", str(e.value))
+        self.assertIn("仅支持 Ubuntu", str(e.value))
         # 大小写/空白归一后合法（"CUSTOM " 是**应当接受**的写法）
         self.assertEqual(PxeProfileIn(name="t", os_type="ubuntu", admin_password="T@1",
                                       disk_scheme="Direct").disk_scheme, "direct")

@@ -365,9 +365,13 @@
               <el-select v-model="form.disk_scheme">
                 <el-option label="LVM (推荐)" value="lvm" />
                 <el-option label="直通分区" value="direct" />
-                <!-- ZFS 选项已移除：后端 disk_scheme 白名单只收 lvm/direct/custom
-                     （backend/app/core/schemas.py _check_scheme），保留此项则保存必然 422；
-                     后端实现 ZFS 后再恢复。 -->
+                <!-- ZFS 根：**仅 Ubuntu**（subiquity 原生支持 layout.name=zfs）。
+                     其它系统不显示该项，避免选了才在后端 422：
+                       · RHEL 系（anaconda）没有原生 ZFS root；
+                       · Debian 的 preseed(partman) 没有 zfs root 方案。
+                     后端仍按 os_type 兜底拒绝（schema 与生成器两层），这里只是提前收窄界面。 -->
+                <el-option v-if="form.os_type === 'ubuntu'"
+                           label="ZFS 根（仅 Ubuntu）" value="zfs" />
                 <el-option label="自定义分区表" value="custom" />
               </el-select>
             </el-form-item>
@@ -1792,6 +1796,13 @@ function defaultVersion(osType) {
 }
 
 function onOsChange() {
+  // ZFS 选项只在 Ubuntu 下出现（subiquity 原生 zfs root）。从 ubuntu 切到别的系统时，
+  // 已选中的 zfs 会变成一个"界面看不见、提交却照发"的隐藏值 —— 就地退回 lvm 并说明，
+  // 而不是让运维保存时撞后端的 422（后端仍会兜底拒绝）。
+  if (form.os_type !== "ubuntu" && form.disk_scheme === "zfs") {
+    form.disk_scheme = "lvm"
+    ElMessage.info("已把分区方案从 ZFS 改为 LVM：ZFS 根仅 Ubuntu 支持")
+  }
   // 目录里 auto_install=false 的系统（debian/openSUSE）：切换时就地说清边界，
   // 不让运维填完整个模板才在「生成配置」时撞一个 422。
   if (form.os_type && !supportsAutoInstall(form.os_type)) {

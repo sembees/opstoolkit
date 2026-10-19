@@ -1,18 +1,23 @@
 # -*- coding: utf-8 -*-
-"""A6：**ZFS 口径统一**；A4：目标盘与数据盘的冲突拦截（含"其实早已关闭"的核实结论）。
+"""ZFS 磁盘布局（2026-10-19 起：**仅 Ubuntu**）与 A4 数据盘护栏。
 
-## A6 的实情（本轮核准）
+## ZFS 的语义（本文件锁住的行为）
 
-改前**三处说法不一致**，其中两处会静默给出别的东西：
+subiquity 原生支持 `storage.layout.name = zfs`，且 `match` 的写法与 lvm/direct **完全同构**
+（`_ubuntu_storage_obj` 对 layout 是数据驱动的），所以 Ubuntu(autoinstall) 这条路径放行：
 
-| 位置 | 改前行为 |
+| target.mode | 生成的 storage |
 |---|---|
-| `schemas.disk_scheme` 白名单 | 拒绝 zfs（422）—— 与手册一致 |
-| `_disk_plan` 的 `disk_config.layout` | **接受** zfs，随后 RHEL 侧按 lvm 分支生成 ⇒ 写 zfs、装出来是 LVM，**产物上看不出问题** |
-| Ubuntu 旧 `disk_scheme` 路径 | 会真的给 subiquity 发 `layout.name=zfs`（subiquity 认这个键） |
+| auto  | `{"layout": {"name": "zfs", "match": {"size": "largest"}}}` |
+| name  | `{"layout": {"name": "zfs", "match": {"path": "/dev/<盘名>"}}}` |
+| match | `{"layout": {"name": "zfs", "match": {"serial"/"model": …}}}`（id_path 仍拒绝） |
 
-本工具的 ZFS 支持确实没做（界面选项已移除、手册写明未实现）。既然没做，就在**所有**能到达的
-路径上一致拒绝，并说清替代方案 —— 不静默生成"配置写 zfs、实际是 LVM"的产物。
+其余安装器**没有原生 ZFS root**，必须继续拒绝（静默按 LVM 生成 = "配置写 zfs、装出来是
+LVM"，产物上看不出问题 —— 这正是 A6 要消除的偏差）：
+  · RHEL 系（anaconda/kickstart）：明确说"RHEL 系没有原生 ZFS root（anaconda 不支持）"；
+  · Debian（preseed/partman）：partman-auto 没有 zfs root 方案；
+  · schema 保存期：`disk_scheme=zfs` 与 `disk_config.layout=zfs` 都按 os_type 分岔，
+    非 Ubuntu 一律 422 且点名字段。
 
 ## A4 的实情（**与我原先的预期不同，如实记**）
 
@@ -27,9 +32,13 @@ RUNBOOK 里那条"data_disks 与目标盘的一致性校验仍未做"**其实已
 import sys
 import unittest
 
+import yaml
+from pydantic import ValidationError
+
 sys.path.insert(0, __file__.rsplit("tests", 1)[0])
 
-from app.it.pxe.generator import PxeConfig, generate_all   # noqa: E402
+from app.core.schemas import PxeProfileIn                      # noqa: E402
+from app.it.pxe.generator import PxeConfig, generate_all       # noqa: E402
 
 
 def cfg(os_type="rhel", ver="9.3", dc=None, scheme="lvm"):
@@ -47,39 +56,121 @@ def gen(**kw):
     return f.get("ks.cfg") or f.get("preseed.cfg") or f.get("user-data") or ""
 
 
-class ZfsRejectedEverywhereTest(unittest.TestCase):
-    """A6：zfs 在任何能到达的路径上都拒绝，且**理由一致**（不是"非法值"）。"""
+def storage_of(user_data):
+    """从 user-data 取 autoinstall.storage —— 用 YAML 解析，不靠字符串切片。"""
+    return yaml.safe_load(user_data)["autoinstall"]["storage"]
 
-    def _assert_rejected(self, ks_callable):
+
+class UbuntuZfsTest(unittest.TestCase):
+    """Ubuntu(autoinstall/subiquity)：zfs 是**一等布局**，产物与官方 layout 简写同构。"""
+
+    def _ud(self, dc, scheme="zfs"):
+        return generate_all(cfg(os_type="ubuntu", ver="22.04", dc=dc, scheme=scheme), [])["user-data"]
+
+    def test_layout_zfs_auto_uses_size_largest(self):
+        """target.mode=auto → subiquity 的 `match: {size: largest}`（与 lvm/direct 同一写法）。"""
+        st = storage_of(self._ud({"target": {"mode": "auto"}, "layout": "zfs"}))
+        self.assertEqual(st, {"layout": {"name": "zfs", "match": {"size": "largest"}}})
+
+    def test_layout_zfs_name_uses_device_path(self):
+        """target.mode=name(sda) → `match: {path: /dev/sda}`。"""
+        st = storage_of(self._ud({"target": {"mode": "name", "name": "sda"}, "layout": "zfs"}))
+        self.assertEqual(st, {"layout": {"name": "zfs", "match": {"path": "/dev/sda"}}})
+
+    def test_layout_zfs_match_uses_serial_and_model(self):
+        """target.mode=match → 沿用 `_ubuntu_disk_match` 的 serial/model 规则。"""
+        st = storage_of(self._ud({
+            "target": {"mode": "match", "serial": "S3Z1NB0K123456", "model": "INTEL SSDSC2KB480G8"},
+            "layout": "zfs"}))
+        self.assertEqual(st, {"layout": {"name": "zfs", "match": {
+            "serial": "S3Z1NB0K123456", "model": "INTEL SSDSC2KB480G8"}}})
+
+    def test_layout_zfs_match_still_rejects_id_path(self):
+        """id_path 的拒绝是 subiquity 行为决定的，与 layout 无关 —— zfs 也不能放行它。"""
         with self.assertRaises(ValueError) as ctx:
-            ks_callable()
+            self._ud({"target": {"mode": "match", "id_path": "pci-0000:00:05.0-scsi-0:0:0:1"},
+                      "layout": "zfs"})
+        self.assertIn("id_path", str(ctx.exception))
+
+    def test_legacy_disk_scheme_zfs_is_supported_too(self):
+        """旧字段 disk_scheme=zfs + 历史键 {disk: sda}：同一 subiquity 路径，同样放行。"""
+        st = storage_of(self._ud({"disk": "sda"}, scheme="zfs"))
+        self.assertEqual(st, {"layout": {"name": "zfs", "match": {"path": "/dev/sda"}}})
+
+    def test_lvm_direct_outputs_unchanged(self):
+        """回归红线：放行 zfs 不能顺手改动 lvm/direct 的既有产物。"""
+        self.assertEqual(storage_of(self._ud({}, scheme="lvm")), {"layout": {"name": "lvm"}})
+        self.assertEqual(storage_of(self._ud({}, scheme="direct")), {"layout": {"name": "direct"}})
+
+
+class ZfsRejectedOutsideUbuntuTest(unittest.TestCase):
+    """除 Ubuntu 外：没有原生 ZFS root，必须在生成期明确拒绝（不是静默换方案）。"""
+
+    def test_rhel_structured_layout_zfs_is_rejected(self):
+        for os_type, ver in (("rhel", "9.3"), ("rocky", "9.4"), ("openeuler", "24.03")):
+            with self.subTest(os_type=os_type):
+                with self.assertRaises(ValueError) as ctx:
+                    gen(os_type=os_type, ver=ver,
+                        dc={"target": {"mode": "name", "name": "sda"}, "layout": "zfs"})
+                msg = str(ctx.exception)
+                self.assertIn("仅支持 Ubuntu", msg, msg)
+                self.assertIn("anaconda", msg, msg)          # 说清是安装器能力边界
+
+    def test_rhel_legacy_disk_scheme_zfs_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            gen(os_type="rhel", ver="9.3", scheme="zfs")
+        self.assertIn("仅支持 Ubuntu", str(ctx.exception))
+
+    def test_debian_structured_layout_zfs_is_rejected_with_partman_reason(self):
+        with self.assertRaises(ValueError) as ctx:
+            gen(os_type="debian", ver="13.7.0",
+                dc={"target": {"mode": "name", "name": "sda"}, "layout": "zfs"})
         msg = str(ctx.exception)
-        self.assertIn("ZFS 未实现", msg, msg)
-        self.assertIn("layout=lvm", msg, msg)          # 必须给出替代方案
-        return msg
+        self.assertIn("disk_config.layout", msg, msg)         # 指到字段
+        self.assertIn("partman", msg, msg)                    # 说清安装器限制
+        self.assertIn("仅支持 Ubuntu", msg, msg)
 
-    def test_structured_layout_zfs_is_rejected_for_every_family(self):
-        for os_type, ver in (("rhel", "9.3"), ("rocky", "9.4"), ("ubuntu", "22.04"),
-                             ("debian", "13.7.0"), ("openeuler", "24.03")):
-            self._assert_rejected(lambda o=os_type, v=ver: gen(
-                os_type=o, ver=v,
-                dc={"target": {"mode": "name", "name": "sda"}, "layout": "zfs"}))
-
-    def test_legacy_disk_scheme_zfs_is_rejected_too(self):
-        """旧字段也要拦：它绕过 disk_config，以前 Ubuntu 侧会真的发 layout.name=zfs 给 subiquity。"""
-        self._assert_rejected(lambda: gen(os_type="ubuntu", ver="22.04", dc={"disk": "sda"},
-                                          scheme="zfs"))
-        self._assert_rejected(lambda: gen(os_type="rhel", ver="9.3", scheme="zfs"))
-
-    def test_error_says_it_is_recognized_but_unimplemented(self):
-        """消息不能说"非法值"：zfs 是被**认得**的键，只是没实现。混为一谈会误导运维去查拼写。"""
-        msg = self._assert_rejected(lambda: gen(
-            dc={"target": {"mode": "name", "name": "sda"}, "layout": "zfs"}))
-        self.assertNotIn("layout 非法", msg, msg)
+    def test_debian_legacy_disk_scheme_zfs_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            gen(os_type="debian", ver="13.7.0", scheme="zfs")
+        self.assertIn("partman", str(ctx.exception))
 
     def test_normal_layouts_still_generate(self):
         for dc, scheme in ((None, "lvm"), (None, "direct"), ({"disk": "sda"}, "lvm")):
-            self.assertTrue(gen(dc=dc, scheme=scheme).strip())
+            with self.subTest(dc=dc, scheme=scheme):
+                self.assertTrue(gen(dc=dc, scheme=scheme).strip())
+
+
+class ZfsSchemaGateTest(unittest.TestCase):
+    """schema 第 2 层：保存期就按 os_type 分岔，且错误点名字段、说明"仅 Ubuntu"。"""
+
+    def test_ubuntu_disk_scheme_zfs_passes(self):
+        p = PxeProfileIn(name="t", os_type="ubuntu", admin_password="T@1", disk_scheme="zfs")
+        self.assertEqual(p.disk_scheme, "zfs")
+
+    def test_ubuntu_layout_zfs_passes(self):
+        dc = {"target": {"mode": "auto"}, "layout": "zfs"}
+        p = PxeProfileIn(name="t", os_type="ubuntu", admin_password="T@1", disk_config=dc)
+        self.assertEqual(p.disk_config["layout"], "zfs")
+
+    def test_other_os_disk_scheme_zfs_is_rejected_with_field_name(self):
+        for os_type in ("rhel", "rocky", "debian", "openeuler"):
+            with self.subTest(os_type=os_type):
+                with self.assertRaises(ValueError) as ctx:
+                    PxeProfileIn(name="t", os_type=os_type, admin_password="T@1",
+                                 disk_scheme="zfs")
+                msg = str(ctx.exception)
+                self.assertIn("disk_scheme", msg, msg)
+                self.assertIn("仅支持 Ubuntu", msg, msg)
+
+    def test_other_os_layout_zfs_is_rejected_with_field_name(self):
+        """结构化 layout 走 _disk_check_layout_rules：字段名必须是 disk_config.layout。"""
+        with self.assertRaises(ValidationError) as ctx:
+            PxeProfileIn(name="t", os_type="rhel", admin_password="T@1",
+                         disk_config={"target": {"mode": "auto"}, "layout": "zfs"})
+        msg = str(ctx.exception)
+        self.assertIn("disk_config.layout", msg, msg)
+        self.assertIn("仅支持 Ubuntu", msg, msg)
 
 
 class TargetVsDataDiskTest(unittest.TestCase):

@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_serializer, m
 #   · RHEL_FAMILY         —— RHEL 家族判定（Ubuntu 独有的拒绝规则要按它分岔）
 #   · _size_to_bytes      —— data_disks.size 的**解析**（"30G"/"500M"/纯字节数 → 字节数；R2-L1）
 #   · _safe_matcher_value —— data_disks 的 serial/wwid 字符白名单（拼进 %pre 的 shell 串前的那道闸）
+#   · _is_ubuntu_family / _ZFS_UBUNTU_ONLY_MSG —— ZFS 布局"仅 Ubuntu"的判定与文案
+#     （字形放行在 PxeDiskConfigIn，os_type 分岔在 _disk_check_layout_rules / _check_scheme）
 # 理由：白名单这类**常量**可以用漂移测试锁住（见 test_schema_and_generator_whitelists_
 # do_not_drift），而**函数**锁不住 —— 两层各抄一份换算，基准一旦漂移就会让同一个 RAID 成员
 # 在校验层与生成层指到不同的分区（校验放行、生成物却把另一块分区做成 RAID 成员并抹掉它）。
@@ -21,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_serializer, m
 # 这也是本模块 it/ → core/ 的反向依赖，为"单一规则来源"让路。
 from app.it.pxe.generator import (
     RHEL_FAMILY as _RHEL_FAMILY,
+    _ZFS_UBUNTU_ONLY_MSG,
+    _is_ubuntu_family,
     _raid_part_ref,
     _safe_matcher_value,
     _size_to_bytes,
@@ -555,10 +559,16 @@ _DISK_SIZE_PATTERN = r"^[0-9]+(\.[0-9]+)?[MGTP]$|^rest$|^100%FREE$"
 _DISK_SIZE_RE = re.compile(_DISK_SIZE_PATTERN)
 _DISK_MOUNT_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
 _DISK_FSTYPE_ALLOWED = ("ext4", "xfs", "btrfs", "fat32", "vfat", "swap", "bios_grub")
-# ★ A6（2026-10-15）：元组里**刻意不再列 zfs** —— 它是"认得但没实现"，由 _check_layout
-# 单独给出准确文案；留在元组里只会让错误消息说成"只允许 lvm|direct|zfs|custom"（误导：
-# 看起来 zfs 可用）。生成器侧有同一道拒绝（覆盖旧库行与绕过接口的调用）。
+# ★ ZFS（2026-10-19）：**仅 Ubuntu 支持**（subiquity 原生 zfs root）。
+#   这里刻意**不把 zfs 放进 `_DISK_LAYOUT_ALLOWED`**：那个元组是"无条件允许集"，
+#   `_disk_check_layout_rules` 与多处提示都直接引用它 —— 放进去就等于让 RHEL/Debian
+#   也过（正是本次要避免的）。zfs 单列为"有条件允许"，由 `_disk_check_layout_rules`
+#   按 os_type 分岔：Ubuntu 放行，其余 422，且错误信息点名字段并说明"仅 Ubuntu"。
+#   `_check_layout` 是 PxeDiskConfigIn 的**字段**校验器、看不到同级 os_type，所以它只做
+#   字形/已知值检查（认得 zfs），真正的放行判定在能看到 os_type 的那一层 + 生成器兜底。
 _DISK_LAYOUT_ALLOWED = ("lvm", "direct", "custom")
+_DISK_LAYOUT_CONDITIONAL = ("zfs",)          # 语法上合法，可用性取决于 os_type
+_DISK_LAYOUT_KNOWN = _DISK_LAYOUT_ALLOWED + _DISK_LAYOUT_CONDITIONAL
 _DISK_MODE_ALLOWED = ("auto", "name", "match")
 _RAID_LEVEL_ALLOWED = (0, 1, 5, 6, 10)
 _GROW_SIZE_TOKENS = ("rest", "100%FREE")
@@ -639,6 +649,8 @@ def _disk_check_layout_rules(dc: dict, os_type: str, disk_scheme: str = "lvm") -
     就是同时发 disk_scheme=custom 与 layout=custom）。
 
     规则清单（违反一律 422，且 detail 里点名到字段）：
+      · zfs 布局：**仅 Ubuntu**（subiquity 原生 zfs root）放行；其余 os_type 拒绝
+        （RHEL 系没有原生 ZFS root、Debian 的 partman 没有 zfs root 方案）；
       · 非 custom 布局：partitions / raid 不会出现在产物里 → 拒绝；
       · 非 custom 布局：data_disks 的 mount / wipe=true 不会出现在产物里 → 拒绝
         （只有 wipe=false+无 mount 例外，它的语义是"别碰这块盘"，见 generator 的 %pre 排除集）；
@@ -646,8 +658,16 @@ def _disk_check_layout_rules(dc: dict, os_type: str, disk_scheme: str = "lvm") -
         "最大盘"可能就是数据盘 → 拒绝（绝不猜一块盘然后 wipe 掉它）；
       · custom 布局必须有一个 / 分区。
     """
-    layout = (dc.get("layout") or "").strip().lower() or (disk_scheme or "").strip().lower()
-    if layout not in _DISK_LAYOUT_ALLOWED:
+    raw_layout = (dc.get("layout") or "").strip().lower()
+    raw_scheme = (disk_scheme or "").strip().lower()
+    layout = raw_layout or raw_scheme
+    # zfs 必须在"未知值回退 lvm"**之前**判定：否则 zfs 会被静默当成 lvm 继续往下走，
+    # 既漏掉 422，也正好复现"配置写 zfs、实际按 lvm"的偏差。
+    if layout == "zfs":
+        if not _is_ubuntu_family(os_type):
+            field = "disk_config.layout" if raw_layout else "disk_scheme"
+            raise ValueError(field + "：" + _ZFS_UBUNTU_ONLY_MSG)
+    elif layout not in _DISK_LAYOUT_ALLOWED:
         layout = "lvm"              # 未知值：生成器同样回退 lvm（layout 自身另有白名单校验）
     # 只有历史键 disk（或空）时生成器走【既有路径】，layout 根本不参与生成 —— 这里也不能按
     # layout 报错，否则老模板（例如 disk_scheme=custom + {"disk": "sda"}）会被误拒，
@@ -888,20 +908,14 @@ class PxeDiskConfigIn(BaseModel):
     @classmethod
     def _check_layout(cls, v: str) -> str:
         s = (v or "").strip().lower()
-        # ★ A6（2026-10-15）：zfs **在保存期就拒**，不是等到生成/部署期。
-        #   为什么必须在这里而不是只靠生成器：`_DISK_LAYOUT_ALLOWED` 原来把 zfs 列为合法，
-        #   于是"模板保存 200、生成/部署才 4xx"—— 本项目在 netconfig 上已经栽过一次同类问题
-        #   （见本文件里那段"保存能过、生成/部署期才 4xx"的注释）。
-        #   生成器侧仍保留同一道拒绝（旧的库行、绕过接口的调用都要拦），两处文案一致。
-        if s == "zfs":
-            raise ValueError(
-                "ZFS 未实现：本工具的 ZFS 布局尚未落地（界面上已移除该选项）。"
-                "现在请用 layout=lvm（推荐）或 layout=direct；"
-                "确有 ZFS 需求时，先让 ZFS 方案通过真机验收（分区/挂载/引导三项）再放行。"
-            )
-        if s and s not in _DISK_LAYOUT_ALLOWED:
+        # ★ ZFS（2026-10-19）：本校验器属于 PxeDiskConfigIn（disk_config 的**字段**校验器），
+        #   **看不到同级的 os_type**，所以这里只做字形/已知值检查 —— zfs 语法上合法，放行；
+        #   "仅 Ubuntu"的可用性判定在 `_disk_check_layout_rules`（拿得到 os_type 与
+        #   disk_scheme），生成器再兜一次。三层用的是同一句 `_ZFS_UBUNTU_ONLY_MSG`。
+        if s and s not in _DISK_LAYOUT_KNOWN:
             raise ValueError(
                 f"layout 非法 {v!r}：只允许 " + "|".join(_DISK_LAYOUT_ALLOWED)
+                + "（zfs 仅 Ubuntu 支持）"
             )
         return s
 
@@ -1248,10 +1262,17 @@ class PxeProfileIn(BaseModel):
 
     # ★ 外部审查 U7-F11：disk_scheme 原来没有白名单 —— 传个未知值（例如 "zfs"）保存期
     #   一路放行，到生成器里被静默当成 lvm，运维以为选了别的方案却装成了 LVM。
+    # ★ ZFS（2026-10-19）：zfs 只对 Ubuntu 放行（subiquity 原生 zfs root）。本校验器声明在
+    #   os_type 之后，`info.data` 里已经有归一化后的 os_type，因此能在这里给出保存期 422；
+    #   其余 os_type 的文案指向 disk_scheme 字段并说明"仅 Ubuntu"。
     @field_validator("disk_scheme")
     @classmethod
-    def _check_scheme(cls, v: str) -> str:
+    def _check_scheme(cls, v: str, info) -> str:
         val = (v or "").strip().lower()
+        if val == "zfs":
+            if _is_ubuntu_family((info.data or {}).get("os_type", "")):
+                return val
+            raise ValueError("disk_scheme：" + _ZFS_UBUNTU_ONLY_MSG)
         if val not in ("lvm", "direct", "custom"):
             raise ValueError(
                 "disk_scheme 只允许 lvm / direct / custom（自定义分区请用 custom + disk_config），"
