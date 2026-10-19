@@ -202,6 +202,10 @@ class Ipv6DisabledTest(unittest.TestCase):
         p = gen(os="rhel", format="ifcfg",
                 interfaces=[{"name": "eth0", "mode": "dhcp", "ip6_mode": "disabled"}])
         self.assertIn("IPV6INIT=no", p)
+        # ★ 2026-10-19 真机抓到的缺陷回归：只有 IPV6INIT=no 时 NM 映射成 ipv6.method=ignore，
+        #   disable_ipv6 仍为 0、link-local 还在（实测 inet6 数 1）。必须同时写
+        #   IPV6_DISABLED=yes，NM 才映射成 ipv6.method=disabled（实测 inet6 数 0）。
+        self.assertIn("IPV6_DISABLED=yes", p)
 
     def test_disabled_conflicts_with_static_v6(self):
         for extra in ({"ip6": A6}, {"ip6_addrs": [A6]}, {"gateway6": G6}):

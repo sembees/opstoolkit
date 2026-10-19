@@ -779,8 +779,15 @@ def _build_ifcfg(req):
         mode6 = _v6_mode(obj)
         _addrs6 = _v6_addrs(obj)
         if mode6 == "disabled":
-            # initscripts：IPV6INIT=no 是"这块网卡不启用 IPv6"的官方开关
-            lines += ["IPV6INIT=no"]
+            # ★ 2026-10-19 真机修（Rocky 9.8 / NetworkManager，A/B 对照实测）：
+            #   只写 IPV6INIT=no 时，NM 的 ifcfg-rh 插件把连接映射成
+            #   **ipv6.method=ignore**（不是 disabled）→ 内核 disable_ipv6 仍是 0，
+            #   接口上照样留着 link-local fe80::。也就是说"禁用 IPv6"没真禁掉。
+            #   加上 IPV6_DISABLED=yes 后 NM 才映射成 ipv6.method=disabled、
+            #   disable_ipv6=1、接口上连 link-local 都没有 —— 这才与另外两个后端一致
+            #   （nmcli 用 `ipv6.method disabled`、netplan 用 `link-local: []`）。
+            #   实测数据（VM151 eth3）：IPV6INIT=no → inet6 数 1；再加 IPV6_DISABLED=yes → 0。
+            lines += ["IPV6INIT=no", "IPV6_DISABLED=yes"]
         elif mode6 == "dhcp6":
             lines += ["IPV6INIT=yes", "DHCPV6C=yes", "IPV6_AUTOCONF=no"]
         elif mode6 == "slaac":
