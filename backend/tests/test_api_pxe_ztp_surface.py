@@ -59,6 +59,19 @@ def _mk(tmp_path, role="admin"):
     return TestClient(app), Session, app
 
 
+@pytest.fixture(autouse=True)
+def _restore_dhcp_policy_cache(monkeypatch):
+    """保护邻居用例：`dhcp._SITE_POLICY_CACHE` 是**模块级缓存**，site-policy 的 PUT 会改它。
+
+    真改了而不还原，后续 `test_dhcp_site_protection.py` 会以为站点策略被改过而集体变红
+    （第一次跑完整套时就是这么红的 6 条）。
+    monkeypatch.setattr 会在用例结束时把原值放回去，所以这里"设成原值"就是在打快照。
+    """
+    from app.core import dhcp
+    monkeypatch.setattr(dhcp, "_SITE_POLICY_CACHE", dhcp._SITE_POLICY_CACHE, raising=False)
+    yield
+
+
 # ── ISO ─────────────────────────────────────────────────────────────────────
 
 def test_iso_list_passes_through(tmp_path, monkeypatch):
@@ -204,6 +217,7 @@ def test_repo_sync_status_passes_through(tmp_path, monkeypatch):
 
 def test_site_policy_roundtrip_and_validation(tmp_path):
     """写进 AppMeta → 读出来一致；坏 CIDR 必须 422（不能静默存下去）。"""
+    from app.core import dhcp
     c, _, _ = _mk(tmp_path)
 
     r = c.get("/api/it/pxe/site-policy")
@@ -218,6 +232,10 @@ def test_site_policy_roundtrip_and_validation(tmp_path):
     body = c.get("/api/it/pxe/site-policy").json()
     assert "192.168.250.0/24" in body["protected_networks"]
     assert body["protect_default_route"] is True
+
+    # 关键：写下去的策略必须**真的进了 dhcp 层的内存缓存**（否则只是存了个寂寞）
+    cache = dhcp._SITE_POLICY_CACHE or {}
+    assert any("192.168.250.0/24" in str(n) for n in cache.get("protected_networks", [])), cache
 
     r = c.put("/api/it/pxe/site-policy", json={"protected_networks": "10.0.0.0/33"})
     assert r.status_code == 422, r.text
