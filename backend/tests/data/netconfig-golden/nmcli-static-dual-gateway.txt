@@ -2,6 +2,7 @@
 # 由 OpsToolkit 网络配置生成器自动生成
 # 目标系统: rhel  后端: NetworkManager (nmcli)
 set -e
+FAILED=0
 
 # 检查 nmcli 是否可用
 if ! command -v nmcli >/dev/null 2>&1; then
@@ -14,11 +15,15 @@ hostnamectl set-hostname app01
 # 接口 eth0
 nmcli connection show eth0 >/dev/null 2>&1 || nmcli connection add type ethernet ifname eth0 con-name eth0
 nmcli connection modify eth0 ipv4.addresses 10.0.0.5/24 ipv4.method manual ipv4.gateway 10.0.0.1 ipv4.route-metric 100 ipv4.dns '10.0.0.53 114.114.114.114' +ipv4.routes '172.16.0.0/16 10.0.0.254'
-nmcli connection up eth0
+nmcli connection up eth0 || { echo "警告: eth0 激活失败（配置已写入，可稍后重试）"; FAILED=1; }
 
 # 接口 eth1
 nmcli connection show eth1 >/dev/null 2>&1 || nmcli connection add type ethernet ifname eth1 con-name eth1
 nmcli connection modify eth1 ipv4.addresses 10.0.1.5/24 ipv4.method manual ipv4.gateway 10.0.1.1 ipv4.route-metric 200
-nmcli connection up eth1
+nmcli connection up eth1 || { echo "警告: eth1 激活失败（配置已写入，可稍后重试）"; FAILED=1; }
 
 # 应用完成。可执行 nmcli connection show 复核。
+if [ "$FAILED" != "0" ]; then
+  echo "有接口激活失败（配置已写入，见上面警告）；修正后重跑本脚本即可。"
+  exit 1
+fi

@@ -73,5 +73,39 @@ class NmcliIdempotentTest(unittest.TestCase):
         self.assertNotIn("connection delete", p)
 
 
+class ActivationFailureNotFatalTest(unittest.TestCase):
+    """★ 2026-10-19 真机发现：一次激活失败不该让整份脚本半途而废。
+
+    现场：父口写 `mode=dhcp`，而该网段没有 DHCP 服务器 → `nmcli connection up <父口>`
+    报 "IP configuration could not be reserved"，脚本是 `set -e` ⇒ **后面的 VLAN 连接
+    根本没被创建**（配置只做了一半）。修法：激活失败记 FAILED=1 继续，结尾统一 exit 1。
+    """
+
+    def _script(self, **kw):
+        return gen(os="rhel", format="nmcli", **kw)
+
+    def test_activation_failure_is_guarded(self):
+        p = self._script(interfaces=[{"name": "eth1", "mode": "dhcp"}],
+                         vlans=[{"parent": "eth1", "vlan_id": 100,
+                                 "ip": "172.31.100.71", "cidr": 24}])
+        ups = [l for l in p.splitlines() if "connection up" in l]
+        self.assertGreaterEqual(len(ups), 2, "这份配置应有两处激活")
+        for line in ups:
+            self.assertIn("FAILED=1", line, "激活失败没有被兜住：" + line)
+
+    def test_script_initialises_and_reports_failed(self):
+        p = self._script(interfaces=[{"name": "eth0", "mode": "static",
+                                      "ip": "10.0.0.5", "cidr": 24}])
+        self.assertIn("FAILED=0", p)
+        self.assertIn('if [ "$FAILED" != "0" ]', p)
+        self.assertIn("exit 1", p)
+
+    def test_config_write_still_strict(self):
+        """兜住的只是"激活"，`add`/`modify` 出错仍要让脚本失败（set -e 保留）。"""
+        p = self._script(interfaces=[{"name": "eth0", "mode": "static",
+                                      "ip": "10.0.0.5", "cidr": 24}])
+        self.assertIn("set -e", p)
+
+
 if __name__ == "__main__":
     unittest.main()

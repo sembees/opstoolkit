@@ -348,6 +348,19 @@ def _idem_add(cmd: str, con_name: str) -> str:
     return ("nmcli connection show " + _sh(con_name) + " >/dev/null 2>&1 || " + cmd)
 
 
+def _up(name: str) -> str:
+    """激活连接：**失败不中断整份脚本**，但最后统一报错。
+
+    2026-10-19 真机发现：父口写 `mode=dhcp` 而网段里没有 DHCP 服务器时，
+    `nmcli connection up <父口>` 会失败；脚本是 `set -e`，于是 **VLAN/后续设备根本没被创建**。
+    配置早就写进 NM 了（add/modify 是持久的），一次激活失败不代表配置错，
+    不该让整份脚本半途而废。这里改成：记一笔 FAILED，继续往下，结尾统一 exit 1，
+    既不掩盖问题，也不制造"只改了一半"的状态。
+    """
+    return (f"nmcli connection up {_sh(name)} || "
+            "{ echo \"警告: " + name + " 激活失败（配置已写入，可稍后重试）\"; FAILED=1; }")
+
+
 def _mod(cmds, name, obj, metric=None):
     lines = _ipv4_lines(obj, metric)
     if lines:
@@ -360,7 +373,7 @@ def _iface(cmds, obj, metric=None):
     cmds.append(_idem_add(f"nmcli connection add type ethernet ifname {_sh(name)} "
                                 f"con-name {_sh(name)}", name))
     _mod(cmds, name, obj, metric)
-    cmds.append(f"nmcli connection up {_sh(name)}")
+    cmds.append(_up(name))
     cmds.append("")
 
 
@@ -389,7 +402,7 @@ def _bond(cmds, obj, metric=None):
             f"nmcli connection add type ethernet ifname {_sh(i)} "
             f"con-name {_sh(sub)} master {_sh(name)}", sub))
         cmds.append(f"nmcli connection up {_sh(sub)}")
-    cmds.append(f"nmcli connection up {_sh(name)}")
+    cmds.append(_up(name))
     cmds.append("")
 
 
@@ -400,7 +413,7 @@ def _vlan(cmds, obj, metric=None):
         f"nmcli connection add type vlan ifname {_sh(name)} con-name {_sh(name)} "
         f"dev {_sh(obj['parent'])} id {int(obj['vlan_id'])}", name))
     _mod(cmds, name, obj, metric)
-    cmds.append(f"nmcli connection up {_sh(name)}")
+    cmds.append(_up(name))
     cmds.append("")
 
 
@@ -416,7 +429,7 @@ def _bridge(cmds, obj, metric=None):
             f"nmcli connection add type ethernet ifname {_sh(i)} "
             f"con-name {_sh(sub)} master {_sh(name)}", sub))
         cmds.append(f"nmcli connection up {_sh(sub)}")
-    cmds.append(f"nmcli connection up {_sh(name)}")
+    cmds.append(_up(name))
     cmds.append("")
 
 
@@ -429,6 +442,10 @@ def _build_nmcli(req):
     # 可执行命令（HTTP 层已在 NetConfigRequest 白名单拦下，这里是绕过接口时的兜底）。
     cmds.append(f"# 目标系统: {_safe_line(req.os, 'os')}  后端: NetworkManager (nmcli)")
     cmds.append("set -e")
+    # ★ 2026-10-19 真机发现：激活失败（例如父口配了 dhcp、而该网段根本没有 DHCP 服务器）
+    #   不该让整份脚本中断 —— 那时后面的 VLAN/bond/bridge 连接**一个都不会被创建**。
+    #   `_up()` 只记 FAILED=1 并继续；脚本结尾统一 exit 1，既不掩盖问题，也不留半套配置。
+    cmds.append("FAILED=0")
     cmds.append("")
     cmds.append("# 检查 nmcli 是否可用")
     cmds.append("if ! command -v nmcli >/dev/null 2>&1; then")
@@ -460,6 +477,10 @@ def _build_nmcli(req):
     for i, o in enumerate(req.bridges):
         _bridge(cmds, o.model_dump(), metrics.get(("bridge", i)))
     cmds.append("# 应用完成。可执行 nmcli connection show 复核。")
+    cmds.append('if [ "$FAILED" != "0" ]; then')
+    cmds.append('  echo "有接口激活失败（配置已写入，见上面警告）；修正后重跑本脚本即可。"')
+    cmds.append("  exit 1")
+    cmds.append("fi")
     return "\n".join(cmds) + "\n"
 
 
