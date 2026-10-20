@@ -73,8 +73,12 @@ async def compare_results(
         l_status = lv.get("status", "unknown")
         p_status = pv.get("status", "unknown")
         # 数值对比
-        l_val = lv.get("value") or lv
-        p_val = pv.get("value") or pv
+        # ★ 2026-10-19 修：原来写的是 `lv.get("value") or lv` —— 0 是合法数值，
+        #   但 0 是假值，于是会退回整个 dict，把 "0 → 45" 判成 "changed"（趋势与
+        #   change 全丢）。运维看到的就是"指标变了但说不清变成多少"。
+        #   这里改成"有 value 键就用它，哪怕它是 0"。
+        l_val = lv["value"] if ("value" in lv) else lv
+        p_val = pv["value"] if ("value" in pv) else pv
         if isinstance(l_val, dict) and isinstance(p_val, dict):
             # 嵌套对象，如 temperature/device/fan 等
             if l_val == p_val:
