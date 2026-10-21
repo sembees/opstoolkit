@@ -284,6 +284,29 @@ async def delete_plan(pid: str, db: AsyncSession = Depends(get_db),
 
 # ── 生成（dry-run，不碰任何目标机）──────────────────────────────────────────
 
+async def _render_plan(db: AsyncSession, p: models.NodePlan) -> dict:
+    """把一条规划渲染成脚本（不做任何 HTTP 判断，供单机与批量共用）。
+
+    抛 ValueError = 这条规划的配置有问题（要原样给人看）；调用方决定是 422 还是记进 item.error。
+    """
+    ifaces = await _ifaces(db, p.id)
+    if not ifaces:
+        raise ValueError("规划里还没有任何网卡配置，先加至少一项再生成")
+    buckets = {"interface": [], "bond": [], "vlan": [], "bridge": []}
+    for it in ifaces:
+        buckets.setdefault(it.kind, []).append(it.spec or {})
+    fmt = p.fmt or _DEFAULT_FMT.get(p.os_type or "ubuntu", "nmcli")
+    req = NetConfigRequest(
+        os=p.os_type or "ubuntu", hostname=(p.planned_hostname or None), format=fmt,
+        interfaces=buckets["interface"], bonds=buckets["bond"],
+        vlans=buckets["vlan"], bridges=buckets["bridge"],
+    )
+    content, filename = generate_netconfig(req)
+    return {"format": fmt, "file_name": filename, "content": content,
+            "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "interface_count": len(ifaces)}
+
+
 @router.post("/plans/{pid}/generate")
 async def generate_plan(pid: str, db: AsyncSession = Depends(get_db),
                         _user=Depends(get_current_user)) -> dict:
@@ -298,28 +321,14 @@ async def generate_plan(pid: str, db: AsyncSession = Depends(get_db),
         raise HTTPException(
             status_code=409,
             detail="这台机器还没开启（请在记录行上点「为该机开启」）。装机完成不会自动开启。")
-    ifaces = await _ifaces(db, pid)
-    if not ifaces:
-        raise HTTPException(status_code=422, detail="规划里还没有任何网卡配置，先加至少一项再生成")
-
-    buckets = {"interface": [], "bond": [], "vlan": [], "bridge": []}
-    for it in ifaces:
-        buckets.setdefault(it.kind, []).append(it.spec or {})
-
-    fmt = p.fmt or _DEFAULT_FMT.get(p.os_type or "ubuntu", "nmcli")
     try:
-        req = NetConfigRequest(
-            os=p.os_type or "ubuntu",
-            hostname=(p.planned_hostname or None),
-            format=fmt,
-            interfaces=buckets["interface"], bonds=buckets["bond"],
-            vlans=buckets["vlan"], bridges=buckets["bridge"],
-        )
-        content, filename = generate_netconfig(req)
+        out = await _render_plan(db, p)
     except ValueError as e:
         # 生成器的报错本身就是要给运维看的那句话，原样透出（不要包成 500）
         raise HTTPException(status_code=422, detail=str(e))
-
+    out.update({"plan_id": pid,
+                "status_hint": "dry-run：未下发，可下载或人工核对后再进入下发流程"})
+    return out
     sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return {"plan_id": pid, "format": fmt, "file_name": filename,
             "sha256": sha, "content": content,
@@ -371,3 +380,86 @@ async def disable_plan(pid: str, db: AsyncSession = Depends(get_db),
     await db.commit()
     await db.refresh(p)
     return {"ok": True, "id": p.id, "enabled": False}
+
+
+# ── 批量生成（多台一次出脚本；逐台隔离失败）────────────────────────────────
+
+@router.post("/jobs")
+async def create_job(body: dict = None, db: AsyncSession = Depends(get_db),
+                     user=Depends(get_current_user)) -> dict:
+    """一次为多台规划生成脚本，落成可审计的 job。
+
+    body: {plan_ids: [...], skip_invalid: bool=true}
+      · skip_invalid=True  —— 不合法的行只标红该行，其它行照常生成（默认，便于先看全貌）
+      · skip_invalid=False —— 任一行不合法 → 整批 422（谨慎模式）
+    """
+    await _require_global(db)
+    body = body or {}
+    ids = [str(x) for x in (body.get("plan_ids") or []) if str(x).strip()]
+    if not ids:
+        raise HTTPException(status_code=422, detail="plan_ids 不能为空")
+    skip_invalid = bool(body.get("skip_invalid", True))
+
+    job = models.ConfigJob(mode="dry_run", status="generating",
+                           created_by=user.get("username", ""))
+    db.add(job)
+    await db.flush()
+
+    items, bad = [], []
+    for pid in ids:
+        p = await db.get(models.NodePlan, pid)
+        if p is None:
+            row = {"plan_id": pid, "status": "failed", "error": "规划不存在"}
+            bad.append(row); items.append(row); continue
+        if not bool(getattr(p, "enabled", False)):
+            row = {"plan_id": pid, "status": "failed",
+                   "error": "该机未开启（请先在记录上点「为该机开启」）"}
+            bad.append(row); items.append(row); continue
+        try:
+            out = await _render_plan(db, p)
+        except ValueError as e:
+            row = {"plan_id": pid, "status": "failed", "error": str(e)}
+            bad.append(row); items.append(row); continue
+        db.add(models.ConfigJobItem(
+            job_id=job.id, plan_id=pid, script_name=out["file_name"],
+            script_text=out["content"], script_sha=out["sha256"], status="generated"))
+        p.status = "generated"
+        items.append({"plan_id": pid, "status": "generated",
+                      "file_name": out["file_name"], "sha256": out["sha256"]})
+
+    if bad and not skip_invalid:
+        await db.rollback()
+        raise HTTPException(status_code=422,
+                            detail="有 %d 台不合法（谨慎模式已整批中止）：%s"
+                                   % (len(bad), "; ".join(b["error"] for b in bad[:5])))
+
+    job.status = "done"
+    await db.commit()
+    await db.refresh(job)
+    return {"job_id": job.id, "change_id": job.change_id, "status": job.status,
+            "generated": len([i for i in items if i["status"] == "generated"]),
+            "failed": len(bad), "items": items}
+
+
+@router.get("/jobs")
+async def list_jobs(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)) -> list[dict]:
+    res = await db.execute(select(models.ConfigJob).order_by(models.ConfigJob.created_at.desc()).limit(50))
+    return [{"id": j.id, "change_id": j.change_id, "mode": j.mode, "status": j.status,
+             "created_by": j.created_by,
+             "created_at": j.created_at.isoformat() if j.created_at else None}
+            for j in res.scalars().all()]
+
+
+@router.get("/jobs/{jid}")
+async def get_job(jid: str, db: AsyncSession = Depends(get_db),
+                  _user=Depends(get_current_user)) -> dict:
+    j = await db.get(models.ConfigJob, jid)
+    if j is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    res = await db.execute(select(models.ConfigJobItem)
+                           .where(models.ConfigJobItem.job_id == jid))
+    items = [{"plan_id": i.plan_id, "status": i.status, "script_name": i.script_name,
+              "script_sha": i.script_sha, "error": i.error,
+              "probe": i.probe or {}} for i in res.scalars().all()]
+    return {"id": j.id, "change_id": j.change_id, "mode": j.mode, "status": j.status,
+            "created_by": j.created_by, "items": items}
