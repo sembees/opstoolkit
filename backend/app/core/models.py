@@ -396,3 +396,106 @@ class Notification(Base):
     # 预留：发送层 FeishuResult 目前不回传飞书 message_id，恒为 NULL
     message_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
+
+
+# ===== 装机后：节点规划与批量变更（2026-10-21）=====
+#
+# 背景：PXE/ZTP 把机器装好只是第一步，真正落地还要 人工核对机架/规划 IP/端口聚合/路由
+# → 批量生成配置 → 下发到目标机 → 目标机本地自校验。这四张表承载这条链路。
+#
+# 为什么业务键用 SN（用户 2026-10-21 拍板）而不是 MAC：
+#   机箱 SN 是资产台账上人眼可核对的那个号；MAC 会因为换网卡/虚拟化而变。
+#   但 SN 在虚拟化/白牌机上可能是空、Not Specified 或重复 —— 所以：
+#     · serial 唯一（空串除外，空串 = 还没取到）；
+#     · serial_trusted=False 时必须显式改走 MAC 键（key_source='mac'），不阻塞流程；
+#     · 技术上恒以 install_id/ztp_device_id 为外键，SN/MAC 只是业务标识。
+class NodePlan(Base):
+    """一台机器的"正式配置规划"（1 台 1 行）。"""
+    __tablename__ = "node_plans"
+    __table_args__ = (
+        # SN 唯一：空串表示"还没取到 SN"，不参与唯一约束（否则所有待取 SN 的行互相冲突）
+        Index("uq_node_plan_serial", "serial", unique=True, sqlite_where=text("serial <> ''")),
+        UniqueConstraint("install_id", name="uq_node_plan_install"),
+        UniqueConstraint("ztp_device_id", name="uq_node_plan_ztp"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # 两种来源二选一：PXE 装好的 Linux / ZTP 开局过的网络设备（M4）
+    install_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("pxe_installs.id", ondelete="CASCADE"), nullable=True, index=True)
+    ztp_device_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("ztp_devices.id", ondelete="CASCADE"), nullable=True, index=True)
+
+    serial: Mapped[str] = mapped_column(String(128), default="")            # 机箱 SN（业务键）
+    serial_trusted: Mapped[bool] = mapped_column(default=True)             # False = 取不到/可疑
+    key_source: Mapped[str] = mapped_column(String(16), default="serial")  # serial / mac
+    mac: Mapped[str] = mapped_column(String(32), default="", index=True)   # 辅助键
+
+    rack: Mapped[str] = mapped_column(String(128), default="")             # 机架位置 A01-03-U12
+    planned_hostname: Mapped[str] = mapped_column(String(128), default="")
+    mgmt_ip: Mapped[str] = mapped_column(String(64), default="")           # 管理 IP（可能为空）
+    os_type: Mapped[str] = mapped_column(String(32), default="ubuntu")     # 决定生成后端
+    fmt: Mapped[str] = mapped_column(String(16), default="")               # netplan/nmcli/ifcfg，空=按 os 推
+    # pending(已登记待生成) / generated(已生成) / applying / applied / failed / rolled_back
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    updated_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class NodePlanInterface(Base):
+    """规划里的一"项"网络配置：网卡 / bond / vlan / bridge。
+
+    spec 存的是生成器入参的**原样 JSON**（NetInterfaceIn / NetBondIn / NetVlanIn / NetBridgeIn），
+    生成时按 kind 分派到 NetConfigRequest 的四个列表。不在这里重抄字段，避免与生成器漂移。
+    """
+    __tablename__ = "node_plan_interfaces"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "kind", "name", name="uq_node_plan_iface"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("node_plans.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="interface")     # interface/bond/vlan/bridge
+    name: Mapped[str] = mapped_column(String(64), default="")              # 设备名（用于展示与查重）
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)                 # 生成器入参原样
+    sort: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ConfigJob(Base):
+    """一次批量变更（含 canary 与分批）。"""
+    __tablename__ = "config_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    change_id: Mapped[str] = mapped_column(String(32), default=_uuid, index=True)  # 审计用
+    mode: Mapped[str] = mapped_column(String(16), default="dry_run")      # dry_run / apply
+    batch_size: Mapped[int] = mapped_column(Integer, default=1)
+    canary_done: Mapped[bool] = mapped_column(default=False)
+    status: Mapped[str] = mapped_column(String(16), default="created", index=True)
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ConfigJobItem(Base):
+    """批量里的一台机器：生成的脚本原文不可变留档 + 逐台执行结果。"""
+    __tablename__ = "config_job_items"
+    __table_args__ = (
+        UniqueConstraint("job_id", "plan_id", name="uq_config_job_item"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("config_jobs.id", ondelete="CASCADE"), index=True)
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("node_plans.id", ondelete="CASCADE"), index=True)
+    script_name: Mapped[str] = mapped_column(String(128), default="")
+    script_text: Mapped[str] = mapped_column(Text, default="")     # 不可变留档（审计/对账/回滚）
+    script_sha: Mapped[str] = mapped_column(String(64), default="")
+    # pending / sent / applied / failed / rolled_back / unreachable
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    probe: Mapped[dict] = mapped_column(JSON, default=dict)        # 目标机本地探测结果
+    error: Mapped[str] = mapped_column(Text, default="")
+    reported_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
