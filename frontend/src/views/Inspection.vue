@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="CT 巡检" desc="选择模板与设备执行巡检，实时输出、结果明细与历次对比" />
+    <PageHeader title="巡检" desc="按模板批量巡检设备，结果可对比历次。" />
 
     <!-- 巡检控制区 -->
     <CardSection title="巡检执行">

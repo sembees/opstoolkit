@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="告警管理" desc="配置指标告警规则，并查看历史触发记录" />
+    <PageHeader title="告警规则" desc="配置指标告警规则，查看历史触发记录。" />
 
     <!-- 告警规则管理 -->
     <CardSection title="告警规则" icon="Bell">

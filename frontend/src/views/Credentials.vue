@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="凭据管理" desc="统一管理设备登录用户名、密码与 SSH 私钥，密码加密存储" />
+    <PageHeader title="凭据" desc="设备登录账号、密码与 SSH 私钥，加密存储。" />
     <CardSection>
       <div class="row-between stack-4">
         <span class="text-muted">设备登录凭据（密码加密存储）</span>

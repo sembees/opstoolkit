@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="PXE 装机" desc="维护 ISO 引导介质与装机模板，生成 PXE 部署文件并跟踪裸机装机进度" />
+    <PageHeader title="PXE 装机" desc="管理镜像与装机模板，跟踪裸机装机进度。" />
 
     <!-- PXE 服务器本机状态 -->
     <CardSection title="PXE 服务器（本机）" icon="Cpu">

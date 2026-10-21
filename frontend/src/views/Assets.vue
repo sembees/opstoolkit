@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="资产管理" desc="维护 CT / IT 资产台账，管理设备连接信息与关联凭据" />
+    <PageHeader title="资产" desc="维护服务器与网络设备台账，关联登录凭据。" />
     <CardSection>
       <div class="row-between stack-4">
         <el-radio-group v-model="filterCategory" @change="loadAssets">

@@ -1,6 +1,6 @@
 <template>
   <div class="page help-page">
-    <PageHeader title="使用帮助" desc="按主题分类的在线手册，覆盖零基础入门、巡检、网络配置、PXE 装机、ZTP 开局与部署排错。" />
+    <PageHeader title="使用帮助" desc="按主题分类的在线手册。" />
     <CardSection icon="Reading">
       <el-tabs v-model="activeTab" tab-position="left" class="help-tabs">
                 <!-- ===== 小白手册 ===== -->
@@ -19,7 +19,7 @@
                 <li>配置服务器网卡 Bond 聚合（以前要查文档手敲，现在填表自动生成脚本）</li>
                 <li>新上架的交换机初始化（以前要控制台手配，现在上电自动拉取配置）</li>
               </ul>
-              <p>左侧菜单共 9 个功能页：仪表盘、CT 巡检、告警管理、网络配置生成、PXE 装机、ZTP 开局、资产管理、凭据管理、使用帮助。</p>
+              <p>左侧菜单分 6 组：总览（仪表盘）、资源（资产与凭据）、监控（巡检、告警规则）、交付（PXE 装机、ZTP 开局）、网络（网络配置）、工具箱（变更审计、系统设置、安装引导、使用帮助）。</p>
             </el-collapse-item>
 
             <el-collapse-item title="代码在哪？服务在哪？" name="b1">

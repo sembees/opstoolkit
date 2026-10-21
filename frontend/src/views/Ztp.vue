@@ -1,6 +1,6 @@
 <template>
   <div class="page">
-    <PageHeader title="ZTP 开局" desc="管理 ZTP 服务器、开局模板与设备落位认领，生成并部署 DHCP/TFTP 开局配置" />
+    <PageHeader title="ZTP 开局" desc="管理开局模板与设备落位，一键部署开局服务。" />
 
     <!-- ZTP 服务器状态 -->
     <CardSection title="ZTP 服务器（本机）" icon="Cpu">

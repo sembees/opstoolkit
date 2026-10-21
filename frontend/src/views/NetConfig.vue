@@ -3,7 +3,7 @@
        高度自适应父容器（el-main 本身是有界 flex 项），不再写死"视口高度 − 顶栏高度"。
        .netconfig-page（见底部 scoped）只补 height:100% 让预览区可以 flex 撑满并内部滚动。 -->
   <div class="page netconfig-page">
-    <PageHeader title="网络配置生成" desc="编辑物理接口 / Bond / VLAN / 网桥，实时生成对应发行版的网络配置脚本" />
+    <PageHeader title="网络配置 · 单机生成" desc="按发行版生成单机网卡配置脚本（不下发）。" />
 
     <!-- 上半部: 网络组件编辑表 -->
     <CardSection title="网络组件">
