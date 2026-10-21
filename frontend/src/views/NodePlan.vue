@@ -15,10 +15,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">装机后网络规划</h2>
-        <p class="page-desc">
-          装机完成后，由人登记机架位置 / 规划 IP / 端口与路由，批量生成正式配置。
-          <b>本功能默认关闭，也不会随装机自动开启</b>；这里只生成脚本，<b>不下发、不改生产网络</b>。
-        </p>
+        <p class="page-desc">登记机架与规划 IP/端口/路由，批量生成并下发正式配置。</p>
       </div>
       <div class="header-actions">
         <span class="switch-label">全局开关</span>

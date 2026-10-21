@@ -29,42 +29,69 @@ export const HELP_TOPICS = {
 // 菜单显示顺序由下面的 MENU_GROUP_ORDER + 组内声明顺序决定（与 children 声明序解耦）。
 const layoutChildren = [
   { path: 'dashboard', name: 'dashboard', component: () => import('../views/Dashboard.vue'), meta: { title: '仪表盘', icon: 'Odometer', group: '总览' } },
-  { path: 'assets', name: 'assets', component: () => import('../views/Assets.vue'), meta: { title: '资产管理', icon: 'Box', group: '基础数据' } },
-  { path: 'credentials', name: 'credentials', component: () => import('../views/Credentials.vue'), meta: { title: '凭据管理', icon: 'Key', group: '基础数据' } },
-  // CT 巡检：页内「执行 / 模板」两个状态路由化（Inspection.vue 的「模板」面即模板管理抽屉）
+
+  // ── 资产与凭据（合并：两个子页，靠子路由区分）────────────────────────────
+  {
+    path: 'assets',
+    name: 'assets',
+    redirect: '/assets/list',
+    meta: { title: '资产与凭据', icon: 'Box', group: '基础' },
+    children: [
+      { path: 'list', name: 'assets-list', component: () => import('../views/Assets.vue'), meta: { tab: 'list', title: '资产' } },
+      { path: 'credentials', name: 'credentials', component: () => import('../views/Credentials.vue'), meta: { tab: 'credentials', title: '凭据' } },
+    ],
+  },
+  // 旧路径：书签/文档里的 /credentials 不能 404
+  { path: 'credentials', redirect: '/assets/credentials' },
+
+  // ── 巡检（沿用既有父子结构，只改名与分组）────────────────────────────────
   {
     path: 'inspection',
     name: 'inspection',
     redirect: '/inspection/run',
-    meta: { title: 'CT 巡检', icon: 'Monitor', group: '网络设备' },
+    meta: { title: '巡检', icon: 'Monitor', group: '运维' },
     children: [
-      { path: 'run', name: 'inspection-run', component: () => import('../views/Inspection.vue'), meta: { tab: 'run', title: 'CT 巡检 · 执行' } },
-      { path: 'templates', name: 'inspection-templates', component: () => import('../views/Inspection.vue'), meta: { tab: 'templates', title: 'CT 巡检 · 模板' } },
+      { path: 'run', name: 'inspection-run', component: () => import('../views/Inspection.vue'), meta: { tab: 'run', title: '执行' } },
+      { path: 'templates', name: 'inspection-templates', component: () => import('../views/Inspection.vue'), meta: { tab: 'templates', title: '模板' } },
     ],
   },
-  { path: 'netconfig', name: 'netconfig', component: () => import('../views/NetConfig.vue'), meta: { title: '网络配置生成', icon: 'SetUp', group: '服务器交付' } },
-  { path: 'pxe', name: 'pxe', component: () => import('../views/Pxe.vue'), meta: { title: 'PXE 装机', icon: 'Cpu', group: '服务器交付' } },
-  { path: 'nodeplan', name: 'nodeplan', component: () => import('../views/NodePlan.vue'), meta: { title: '装机后网络规划', icon: 'Connection', group: '服务器交付' } },
-  { path: 'jobaudit', name: 'jobaudit', component: () => import('../views/JobAudit.vue'), meta: { title: '变更审计', icon: 'Tickets', group: '服务器交付' } },
-  { path: 'ztp', name: 'ztp', component: () => import('../views/Ztp.vue'), meta: { title: 'ZTP 开局', icon: 'Share', group: '服务器交付' } },
-  { path: 'alerts', name: 'alerts', component: () => import('../views/Alerts.vue'), meta: { title: '告警管理', icon: 'Bell', group: '网络设备' } },
-  // 首次访问引导向导：不带 meta.group ⇒ menuGroups 不会把它收进侧栏（它只在
-  // "安装未完成"时由登录跳转/顶栏横幅入口出现，不该常驻菜单）。完成后进入此页
-  // 只会看到"已完成"说明（后端 checks/complete 已 403 关闭）。
-  { path: 'setup', name: 'setup', component: () => import('../views/Setup.vue'), meta: { title: '安装引导', icon: 'Compass' } },
-  // 使用帮助：左侧 9 个主题 tab 路由化为 /help/:topic（主题 key/标题见 HELP_TOPICS）
+
+  // ── 装机（两个不同任务，并列）────────────────────────────────────────────
+  { path: 'pxe', name: 'pxe', component: () => import('../views/Pxe.vue'), meta: { title: 'PXE 装机', icon: 'Cpu', group: '交付' } },
+  { path: 'ztp', name: 'ztp', component: () => import('../views/Ztp.vue'), meta: { title: 'ZTP 开局', icon: 'Share', group: '交付' } },
+
+  // ── 网络配置（合并：规划与下发 / 单机生成）──────────────────────────────
+  {
+    path: 'network',
+    name: 'network',
+    redirect: '/network/plan',
+    meta: { title: '网络配置', icon: 'Connection', group: '网络' },
+    children: [
+      { path: 'plan', name: 'network-plan', component: () => import('../views/NodePlan.vue'), meta: { tab: 'plan', title: '规划与下发' } },
+      { path: 'single', name: 'network-single', component: () => import('../views/NetConfig.vue'), meta: { tab: 'single', title: '单机生成' } },
+    ],
+  },
+  // 旧路径重定向（本轮重构前这两个是独立一级菜单）
+  { path: 'nodeplan', name: 'nodeplan', redirect: '/network/plan' },
+  { path: 'netconfig', name: 'netconfig', redirect: '/network/single' },
+
+  // ── 告警 ────────────────────────────────────────────────────────────────
+  { path: 'alerts', name: 'alerts', component: () => import('../views/Alerts.vue'), meta: { title: '告警规则', icon: 'Bell', group: '告警' } },
+
+  // ── 工具箱（低频/杂项，后续小功能都往这里加）────────────────────────────
+  { path: 'jobaudit', name: 'jobaudit', component: () => import('../views/JobAudit.vue'), meta: { title: '变更审计', icon: 'Tickets', group: '工具箱' } },
+  { path: 'settings', name: 'settings', component: () => import('../views/SystemSettings.vue'), meta: { title: '系统设置', icon: 'Setting', group: '工具箱' } },
+  { path: 'setup', name: 'setup', component: () => import('../views/Setup.vue'), meta: { title: '安装引导', icon: 'Compass', group: '工具箱' } },
   {
     path: 'help',
     name: 'help',
     redirect: '/help/beginner',
-    meta: { title: '使用帮助', icon: 'Reading', group: '帮助' },
+    meta: { title: '使用帮助', icon: 'QuestionFilled', group: '工具箱' },
     children: [
-      // meta.title 是 :topic 非法兜底值；合法主题的标题由全局守卫按参数覆盖
       { path: ':topic', name: 'help-topic', component: () => import('../views/Help.vue'), meta: { tab: 'topic', title: '使用帮助' } },
     ],
   },
 ]
-
 const routes = [
   { path: '/login', name: 'login', component: () => import('../views/Login.vue') },
   {
@@ -80,12 +107,14 @@ const routes = [
 // 不再让 MainLayout 按 routes[1].children 下标取 —— 那样以后路由数组顺序一变就静默错位。
 // 这里从路由配置**本身**推导：分组顺序显式声明（MENU_GROUP_ORDER），组成员 = meta.group
 // 归属该组的子路由（组内按声明顺序），菜单数据永远和路由表一致。
-const MENU_GROUP_ORDER = ['总览', '网络设备', '服务器交付', '基础数据', '帮助']
+const MENU_GROUP_ORDER = ['总览', '基础', '运维', '交付', '网络', '告警', '工具箱']
 
 export const menuGroups = MENU_GROUP_ORDER.map((group) => ({
   name: group,
   items: layoutChildren
-    .filter((c) => c.meta.group === group)
+    // `?.` 不能省：纯重定向路由（如 nodeplan → /network/plan）没有 meta，
+    // 直接读 c.meta.group 会让整个菜单构建抛异常 → 白屏（本轮真实踩过）。
+    .filter((c) => c.meta?.group === group)
     .map((c) => ({ path: `/${c.path}`, title: c.meta.title, icon: c.meta.icon })),
 }))
 

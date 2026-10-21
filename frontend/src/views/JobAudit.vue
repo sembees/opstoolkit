@@ -10,10 +10,7 @@
     <div class="page-header">
       <div>
         <h2 class="page-title">变更审计</h2>
-        <p class="page-desc">
-          每次批量生成/下发都会留档：谁、什么时候、对哪些机器、生成了什么脚本（sha256）、
-          每台的结果。这里**只读**，用于事后核对与追责。
-        </p>
+        <p class="page-desc">每次批量生成/下发都留档：谁、何时、对哪些机器、脚本原文与逐台结果。</p>
       </div>
       <el-button :icon="Refresh" @click="load">刷新</el-button>
     </div>
