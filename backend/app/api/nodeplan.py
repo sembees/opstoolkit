@@ -25,6 +25,7 @@ from app.core.schemas import NetConfigRequest
 from app.database import get_db
 from app.it.netconfig.generator import generate_netconfig
 from app.it.nodeplan.apply import build_expected, render_bundle
+from app.it.nodeplan.verify import verify_plan
 from app.it.nodeplan.deploy import (SshError, SshRunner, deploy_bundle,
                                    fetch_result)
 
@@ -607,9 +608,14 @@ async def sync_plan(pid: str, body: dict = None, db: AsyncSession = Depends(get_
         p.status = "applied" if res.get("result") == "applied" else "rolled_back"
         p.updated_by = "sync"
         await db.commit()
+        # 逐字段对账（M3）：目标机那层只决定该不该回滚，这里回答"到底哪一项不对"
+        ifaces_now = await _ifaces(db, pid)
+        expected_now = build_expected(p.os_type or "ubuntu",
+                                      [{"kind": i.kind, "spec": i.spec or {}} for i in ifaces_now])
+        verify = verify_plan(expected_now, out.get("probe_text", ""))
         # 探测原文随结果一起返回（界面要能看"到底差在哪"）
         return {"ok": True, "host": host, "status": p.status, "result": res,
-                "probe_text": out.get("probe_text", "")[:8000],
+                "verify": verify, "probe_text": out.get("probe_text", "")[:8000],
                 "apply_log": out.get("apply_log", ""), "tried": tried}
 
     return {"ok": False, "reason": last_err or "目标机不可达", "tried": tried}

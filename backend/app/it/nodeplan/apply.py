@@ -63,7 +63,11 @@ mkdir -p "$STATE"
   echo "== ip_route =="
   ip -o route show 2>/dev/null || true
   echo "== resolv =="
+  # 注意：Ubuntu 22.04 默认 systemd-resolved，/etc/resolv.conf 是桩（127.0.0.53）。
+  # 真实上游 DNS 必须从 resolvectl 取，否则"DNS 对不上"会是假告警（真机踩过）。
   cat "$ROOT/etc/resolv.conf" 2>/dev/null || true
+  echo "== resolvectl =="
+  resolvectl dns 2>/dev/null || true
   echo "== bonding =="
   for b in "$ROOT"/proc/net/bonding/*; do [ -e "$b" ] && { echo "--- $b"; cat "$b"; }; done 2>/dev/null || true
   echo "== bridge_vlan =="

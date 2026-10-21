@@ -66,6 +66,10 @@
         <template #default="{ row }">
           <el-button link type="primary" size="small" :disabled="!canGenerate(row)"
                      @click="generateOne(row)">生成配置</el-button>
+          <el-button link type="warning" size="small" :disabled="!canGenerate(row)"
+                     @click="openApply(row)">下发</el-button>
+          <el-button link type="success" size="small" :disabled="!row.change_id"
+                     @click="syncPlan(row)">拉取结果</el-button>
           <el-button link type="primary" size="small" :disabled="!globalOn"
                      @click="openDialog(row)">编辑</el-button>
           <el-popconfirm title="确定删除这条规划？" @confirm="remove(row)">
@@ -155,6 +159,85 @@
       </template>
     </el-dialog>
 
+    <!-- 下发（二次确认：默认禁止改管理口） -->
+    <el-dialog v-model="applyVisible" title="下发配置到目标机" width="560px">
+      <el-alert type="warning" :closable="false" show-icon
+                title="这会真的改目标机的网络配置"
+                description="平台只负责布置脚本并启动一次性 timer（90 秒后执行）；应用、探测、失败回滚都在目标机本地完成。" />
+      <el-form label-width="130px" class="mt-3">
+        <el-form-item label="目标机 IP">
+          <el-input v-model="applyForm.target_ip" placeholder="留空则用规划里的管理 IP" />
+        </el-form-item>
+        <el-form-item label="SSH 用户">
+          <el-input v-model="applyForm.ssh_user" placeholder="ops" />
+        </el-form-item>
+        <el-form-item label="私钥路径（容器内）">
+          <el-input v-model="applyForm.ssh_key_path" placeholder="/tmp/e2e_key（必须是容器内可见的路径）" />
+        </el-form-item>
+        <el-form-item label="允许改管理网卡">
+          <el-checkbox v-model="applyForm.allow_mgmt_change">
+            我确认允许修改 SSH 所走的那块网卡（一改就可能失联，需带外兜底）
+          </el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="applyVisible = false">取消</el-button>
+        <el-button type="danger" :loading="applying" :disabled="!applyForm.allow_mgmt_change"
+                   @click="doApply">确认下发</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 结果与逐项对账 -->
+    <el-dialog v-model="syncVisible" title="下发结果与逐项对账" width="860px">
+      <template v-if="syncOut">
+        <el-alert v-if="!syncOut.ok" type="error" :closable="false" show-icon
+                  :title="'没取到结果：' + (syncOut.reason || '目标机不可达')"
+                  :description="'已尝试：' + JSON.stringify(syncOut.tried || [])" />
+        <template v-else>
+          <div class="sync-head">
+            <el-tag :type="syncOut.status === 'applied' ? 'success' : 'warning'">
+              {{ syncOut.status === 'applied' ? '已生效' : '已回滚' }}
+            </el-tag>
+            <span class="ml-2">目标机 {{ syncOut.host }}</span>
+            <span v-if="syncOut.result?.finished_at" class="hint ml-2">
+              完成于 {{ syncOut.result.finished_at }}
+            </span>
+          </div>
+
+          <el-divider content-position="left">逐项对账（期望 vs 实际）</el-divider>
+          <el-table :data="syncOut.verify?.items || []" size="small" border>
+            <el-table-column prop="item" label="项" width="130" />
+            <el-table-column label="期望" min-width="180">
+              <template #default="{ row }"><code>{{ row.expected }}</code></template>
+            </el-table-column>
+            <el-table-column label="实际" min-width="220">
+              <template #default="{ row }"><code>{{ Array.isArray(row.actual) ? row.actual.join(', ') : row.actual }}</code></template>
+            </el-table-column>
+            <el-table-column label="结果" width="90">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.ok ? 'success' : 'danger'">
+                  {{ row.ok ? '一致' : '不一致' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+          <p class="hint mt-3">
+            对账说明：地址/默认路由/DNS 必须与规划逐项一致才算成功——「ping 通」不作为判定依据
+            （IP 写错一位也可能 ping 通网关）。目标机本地那层只决定该不该回滚。
+          </p>
+
+          <el-collapse class="mt-3">
+            <el-collapse-item title="目标机探测原文（ip -o / resolv）">
+              <pre class="raw">{{ syncOut.probe_text }}</pre>
+            </el-collapse-item>
+            <el-collapse-item title="目标机执行日志">
+              <pre class="raw">{{ syncOut.apply_log }}</pre>
+            </el-collapse-item>
+          </el-collapse>
+        </template>
+      </template>
+    </el-dialog>
+
     <!-- 生成结果 -->
     <el-dialog v-model="resultVisible" title="生成结果（dry-run，未下发）" width="820px">
       <el-alert type="info" :closable="false" show-icon
@@ -197,6 +280,14 @@ const form = ref(emptyForm())
 
 const resultVisible = ref(false)
 const results = ref([])
+
+const applyVisible = ref(false)
+const applying = ref(false)
+const applyTarget = ref(null)
+const applyForm = ref({ target_ip: '', ssh_user: 'ops', ssh_key_path: '',
+                        allow_mgmt_change: false })
+const syncVisible = ref(false)
+const syncOut = ref(null)
 
 function emptyForm() {
   return { id: '', install_id: '', serial: '', mac: '', rack: '', planned_hostname: '',
@@ -343,6 +434,40 @@ async function generateOne(row) {
   }
 }
 
+function openApply(row) {
+  applyTarget.value = row
+  applyForm.value = { target_ip: row.mgmt_ip || '', ssh_user: 'ops',
+                      ssh_key_path: '', allow_mgmt_change: false }
+  applyVisible.value = true
+}
+
+async function doApply() {
+  applying.value = true
+  try {
+    const r = await http.post(`/it/nodeplan/plans/${applyTarget.value.id}/apply`, applyForm.value)
+    ElMessage.success(`已布置到 ${r.data.target}，90 秒后点「拉取结果」`)
+    applyVisible.value = false
+    await loadAll()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '下发失败')
+  } finally {
+    applying.value = false
+  }
+}
+
+async function syncPlan(row) {
+  try {
+    const r = await http.post(`/it/nodeplan/plans/${row.id}/sync`, {
+      ssh_user: 'ops', ssh_key_path: applyForm.value.ssh_key_path || '',
+    })
+    syncOut.value = r.data
+    syncVisible.value = true
+    await loadAll()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '拉取失败')
+  }
+}
+
 async function generateBatch() {
   const ids = selection.value.map((r) => r.id)
   try {
@@ -394,5 +519,7 @@ onMounted(() => {
 .iface-row { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px; }
 .result-row { padding: 8px 0; border-bottom: 1px dashed var(--el-border-color-light); }
 .result-error { color: var(--el-color-danger); font-size: 12px; margin-top: 4px; }
+.sync-head { display: flex; align-items: center; }
+.raw { background: var(--el-fill-color-light); padding: 8px; max-height: 260px; overflow: auto; font-size: 12px; }
 .result-content pre { background: var(--el-fill-color-light); padding: 8px; max-height: 240px; overflow: auto; font-size: 12px; }
 </style>
