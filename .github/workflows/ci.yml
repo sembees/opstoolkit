@@ -87,16 +87,22 @@ jobs:
           pip install -r requirements.txt
           pip install lxml pytest
 
-      - name: 装真正的 netplan.io
+      # ubuntu-latest 通常自带 netplan（netplan.io 是 systemd-networkd 的默认渲染器配置工具）；
+      # 只有确实没有时才装，并给 apt 加 retries —— 之前这一步失败过一次（镜像源抖动）。
+      - name: 准备 netplan（自带则跳过安装）
         run: |
-          sudo apt-get update
-          sudo apt-get install -y netplan.io
+          if ! command -v netplan >/dev/null 2>&1; then
+            sudo apt-get update -o Acquire::Retries=3 || true
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends netplan.io
+          fi
           netplan --version
 
+      # `netplan generate --root-dir` 需要 root，而 setup-python 的解释器在用户目录下，
+      # 所以用 sudo 但显式保留 PATH 与 PYTHONPATH（否则会用到系统 python，import 全失败）。
       - name: 用真 netplan 校验生成的 YAML
-        env:
-          OPSTK_NETPLAN_STRICT: "1"
-        run: python -m pytest tests/test_netconfig_netplan_real.py -q
+        run: |
+          sudo env "PATH=$PATH" "OPSTK_NETPLAN_STRICT=1" "PYTHONPATH=$PWD" \
+            "$(command -v python)" -m pytest tests/test_netconfig_netplan_real.py -q
 
   frontend:
     name: 前端单测与构建
