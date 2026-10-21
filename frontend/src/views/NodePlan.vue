@@ -187,6 +187,45 @@
       </template>
     </el-dialog>
 
+    <!-- 设备下发（网络设备：口令登录 + 是否保存） -->
+    <el-dialog v-model="deviceApplyVisible" title="下发配置到网络设备" width="600px">
+      <el-alert type="warning" :closable="false" show-icon
+                title="这会真的改设备的运行配置"
+                description="平台会推配置并回读对账；**默认不保存**（persist=false），对账不通过就 return 丢弃未保存配置。" />
+      <el-form label-width="150px" class="mt-3">
+        <el-form-item label="设备管理 IP">
+          <el-input v-model="deviceForm.target_ip" placeholder="留空则用规划里的管理 IP" />
+        </el-form-item>
+        <el-form-item label="SSH 端口">
+          <el-input-number v-model="deviceForm.ssh_port" :min="1" :max="65535" />
+        </el-form-item>
+        <el-form-item label="SSH 用户">
+          <el-input v-model="deviceForm.ssh_user" placeholder="admin" />
+        </el-form-item>
+        <el-form-item label="SSH 口令">
+          <el-input v-model="deviceForm.ssh_password" type="password" show-password
+                    placeholder="设备本地账号口令（不走 key）" />
+        </el-form-item>
+        <el-form-item label="对账通过后保存">
+          <el-checkbox v-model="deviceForm.persist">
+            保存启动配置（save / write memory）；不勾 = 只改运行配置，重启即恢复
+          </el-checkbox>
+        </el-form-item>
+        <el-form-item label="允许改管理口">
+          <el-checkbox v-model="deviceForm.allow_mgmt_change">
+            我确认允许修改管理 VLAN/管理口（一改就可能失联，需带外兜底）
+          </el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="deviceApplyVisible = false">取消</el-button>
+        <el-button type="danger" :loading="applyingDevice"
+                   :disabled="!deviceForm.allow_mgmt_change" @click="doApplyDevice">
+          确认下发
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 结果与逐项对账 -->
     <el-dialog v-model="syncVisible" title="下发结果与逐项对账" width="860px">
       <template v-if="syncOut">
@@ -225,6 +264,14 @@
             对账说明：地址/默认路由/DNS 必须与规划逐项一致才算成功——「ping 通」不作为判定依据
             （IP 写错一位也可能 ping 通网关）。目标机本地那层只决定该不该回滚。
           </p>
+
+          <template v-if="(syncOut.errors || []).length">
+            <el-divider content-position="left">被设备拒绝的命令</el-divider>
+            <el-table :data="syncOut.errors" size="small" border>
+              <el-table-column prop="line" label="命令" width="280" />
+              <el-table-column prop="output" label="设备回显" />
+            </el-table>
+          </template>
 
           <el-collapse class="mt-3">
             <el-collapse-item title="目标机探测原文（ip -o / resolv）">
@@ -288,6 +335,12 @@ const applyForm = ref({ target_ip: '', ssh_user: 'ops', ssh_key_path: '',
                         allow_mgmt_change: false })
 const syncVisible = ref(false)
 const syncOut = ref(null)
+
+const deviceApplyVisible = ref(false)
+const applyingDevice = ref(false)
+const deviceTarget = ref(null)
+const deviceForm = ref({ target_ip: '', ssh_port: 22, ssh_user: 'admin', ssh_password: '',
+                          persist: false, allow_mgmt_change: false })
 
 function emptyForm() {
   return { id: '', install_id: '', serial: '', mac: '', rack: '', planned_hostname: '',
@@ -435,6 +488,13 @@ async function generateOne(row) {
 }
 
 function openApply(row) {
+  if (row.ztp_device_id) {                 // 网络设备走另一条路（没有 systemd timer）
+    deviceTarget.value = row
+    deviceForm.value = { target_ip: row.mgmt_ip || '', ssh_port: 22, ssh_user: 'admin',
+                         ssh_password: '', persist: false, allow_mgmt_change: false }
+    deviceApplyVisible.value = true
+    return
+  }
   applyTarget.value = row
   applyForm.value = { target_ip: row.mgmt_ip || '', ssh_user: 'ops',
                       ssh_key_path: '', allow_mgmt_change: false }
@@ -452,6 +512,28 @@ async function doApply() {
     ElMessage.error(e?.response?.data?.detail || '下发失败')
   } finally {
     applying.value = false
+  }
+}
+
+async function doApplyDevice() {
+  applyingDevice.value = true
+  try {
+    const r = await http.post(`/it/nodeplan/plans/${deviceTarget.value.id}/apply-device`,
+                              deviceForm.value)
+    const out = r.data
+    syncOut.value = { ok: out.ok, status: out.status, host: deviceForm.value.target_ip,
+                      result: { finished_at: '' }, verify: out.verify,
+                      errors: out.errors, apply_log: out.transcript,
+                      probe_text: '' }
+    syncVisible.value = true
+    deviceApplyVisible.value = false
+    if (out.ok) ElMessage.success(out.saved ? '对账通过且已保存' : '对账通过（未保存，重启即恢复）')
+    else ElMessage.warning('设备拒绝了部分命令，已丢弃未保存配置')
+    await loadAll()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '设备下发失败')
+  } finally {
+    applyingDevice.value = false
   }
 }
 
