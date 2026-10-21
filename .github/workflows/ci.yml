@@ -95,7 +95,10 @@ jobs:
             sudo apt-get update -o Acquire::Retries=3 || true
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends netplan.io
           fi
-          netplan --version
+          # 注意：`netplan --version` 不是通用参数（部分版本会当未知参数非 0 退出）。
+          # 这里只验证"可执行文件在"，版本信息用 -h 打一行出来，且允许失败。
+          command -v netplan
+          netplan -h 2>&1 | head -3 || true
 
       # `netplan generate --root-dir` 需要 root，而 setup-python 的解释器在用户目录下，
       # 所以用 sudo 但显式保留 PATH 与 PYTHONPATH（否则会用到系统 python，import 全失败）。
