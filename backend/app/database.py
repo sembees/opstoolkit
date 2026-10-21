@@ -45,6 +45,8 @@ _ADDITIVE_COLUMNS = (
     ("pxe_profiles", "sudo_nopasswd", "BOOLEAN NOT NULL DEFAULT 1"),
     # 装机后节点规划：每台机器的"手动开启"标记（2026-10-21）。默认 0 = 未开启。
     ("node_plans", "enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("node_plans", "change_id", "VARCHAR(32) NOT NULL DEFAULT ''"),
+    ("node_plans", "applied_at", "DATETIME"),
 )
 
 

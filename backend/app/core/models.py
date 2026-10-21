@@ -441,6 +441,9 @@ class NodePlan(Base):
     # ★ 每台机器的"手动开启"标记（默认关）：装机完成后由人在界面上点开才生效。
     #   这是用户 2026-10-21 的明确要求 —— 本功能是额外功能，不能随装机自动启用。
     enabled: Mapped[bool] = mapped_column(default=False)
+    # 最近一次下发的变更号与生效时间（审计与"事后拉结果"都要用）
+    change_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(String(64), default="")
     updated_by: Mapped[str] = mapped_column(String(64), default="")

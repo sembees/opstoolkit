@@ -10,6 +10,7 @@
 **不做**下发（M2），也**不做**批量（下一刀），所以不会有任何副作用：不碰 dnsmasq、不碰目标机。
 """
 import hashlib
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,6 +23,9 @@ from app.core.auth import get_current_user, require_role
 from app.core.schemas import NetConfigRequest
 from app.database import get_db
 from app.it.netconfig.generator import generate_netconfig
+from app.it.nodeplan.apply import build_expected, render_bundle
+from app.it.nodeplan.deploy import (SshError, SshRunner, deploy_bundle,
+                                   fetch_result)
 
 router = APIRouter()
 
@@ -463,3 +467,111 @@ async def get_job(jid: str, db: AsyncSession = Depends(get_db),
               "probe": i.probe or {}} for i in res.scalars().all()]
     return {"id": j.id, "change_id": j.change_id, "mode": j.mode, "status": j.status,
             "created_by": j.created_by, "items": items}
+
+
+# ── 下发（M2）：布置脚本包 + 启动一次性 timer；不等结果 ─────────────────────
+
+def _ssh_for(body: dict, host: str):
+    user = (body.get("ssh_user") or "").strip() or "ops"
+    return SshRunner(host, user,
+                     key_path=(body.get("ssh_key_path") or "").strip(),
+                     password=(body.get("ssh_password") or ""),
+                     port=int(body.get("ssh_port") or 22))
+
+
+@router.post("/plans/{pid}/apply")
+async def apply_plan(pid: str, body: dict = None, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_role("admin"))) -> dict:
+    """把配置下发到目标机（**只布置，不等结果**）。
+
+    body: {ssh_user, ssh_key_path|ssh_password, ssh_port, allow_mgmt_change, target_ip?}
+    """
+    await _require_global(db)
+    p = await _get_or_404(db, pid)
+    if not bool(getattr(p, "enabled", False)):
+        raise HTTPException(status_code=409,
+                            detail="这台机器还没开启（请先在记录行上点「为该机开启」）")
+    body = body or {}
+    if not body.get("allow_mgmt_change"):
+        raise HTTPException(
+            status_code=409,
+            detail="默认禁止通过批量下发修改管理网卡（改错就一改失联）。确需修改时，"
+                   "请传 allow_mgmt_change=true 并在工单里记录，最好走带外/串口。")
+
+    target = (body.get("target_ip") or p.mgmt_ip or "").strip()
+    if not target:
+        raise HTTPException(status_code=422, detail="这台规划没有管理 IP，无法确定下发目标")
+
+    try:
+        rendered = await _render_plan(db, p)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    ifaces = await _ifaces(db, pid)
+    iface_dicts = [{"kind": i.kind, "spec": i.spec or {}} for i in ifaces]
+    expected = build_expected(p.os_type or "ubuntu", iface_dicts)
+    change_id = uuid.uuid4().hex[:32]
+    bundle = render_bundle(change_id=change_id, os_type=p.os_type or "ubuntu",
+                           fmt=rendered["format"], config_name=rendered["file_name"],
+                           config_text=rendered["content"], expected=expected)
+
+    try:
+        info = deploy_bundle(_ssh_for(body, target), bundle["files"], change_id)
+    except SshError as e:
+        raise HTTPException(status_code=502, detail="下发失败（未改动任何配置）：%s" % e)
+
+    p.change_id = change_id
+    p.status = "applying"
+    p.updated_by = user.get("username", "")
+    await db.commit()
+    return {"ok": True, "change_id": change_id, "target": target,
+            "state_dir": info["state_dir"], "timer_active": info["timer_active"],
+            "delay_sec": 90,
+            "next": "90 秒后调用 /plans/{id}/sync 拉结果；新 IP 连不上时再用旧 IP 试一次"}
+
+
+@router.post("/plans/{pid}/sync")
+async def sync_plan(pid: str, body: dict = None, db: AsyncSession = Depends(get_db),
+                    _user=Depends(get_current_user)) -> dict:
+    """拉取目标机本地结果（result.json / probe.txt / apply.log）。
+
+    target_ip 可传"新 IP"；连不上时自动用旧的 install.ip 再试一次 ——
+    只有旧 IP 连得上，通常意味着已经自动回滚（这正是我们想要的信号）。
+    """
+    p = await _get_or_404(db, pid)
+    if not p.change_id:
+        raise HTTPException(status_code=409, detail="这台机器还没有下发过（没有 change_id）")
+    body = body or {}
+    tried = []
+
+    candidates = []
+    for h in ((body.get("target_ip") or "").strip(), (p.mgmt_ip or "").strip()):
+        if h and h not in candidates:
+            candidates.append(h)
+    if p.install_id:
+        inst = await db.get(models.PxeInstall, p.install_id)
+        if inst is not None and (inst.ip or "").strip() and inst.ip.strip() not in candidates:
+            candidates.append(inst.ip.strip())
+
+    last_err = ""
+    for host in candidates:
+        try:
+            out = fetch_result(_ssh_for(body, host), p.change_id)
+        except Exception as e:                      # noqa: BLE001 — 连不上就换下一个
+            tried.append({"host": host, "error": str(e)[:160]})
+            last_err = str(e)[:160]
+            continue
+        tried.append({"host": host, "ready": out.get("ready")})
+        if not out.get("ready"):
+            last_err = out.get("reason", "")
+            continue
+        res = out["result"]
+        p.status = "applied" if res.get("result") == "applied" else "rolled_back"
+        p.updated_by = "sync"
+        await db.commit()
+        # 探测原文随结果一起返回（界面要能看"到底差在哪"）
+        return {"ok": True, "host": host, "status": p.status, "result": res,
+                "probe_text": out.get("probe_text", "")[:8000],
+                "apply_log": out.get("apply_log", ""), "tried": tried}
+
+    return {"ok": False, "reason": last_err or "目标机不可达", "tried": tried}
