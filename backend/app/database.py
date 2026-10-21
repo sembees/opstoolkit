@@ -43,6 +43,8 @@ _ADDITIVE_COLUMNS = (
     # 存量模板补列后即取该默认值，不需要回填。
     ("pxe_profiles", "allow_root", "BOOLEAN NOT NULL DEFAULT 0"),
     ("pxe_profiles", "sudo_nopasswd", "BOOLEAN NOT NULL DEFAULT 1"),
+    # 装机后节点规划：每台机器的"手动开启"标记（2026-10-21）。默认 0 = 未开启。
+    ("node_plans", "enabled", "BOOLEAN NOT NULL DEFAULT 0"),
 )
 
 

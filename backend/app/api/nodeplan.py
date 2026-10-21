@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import models
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_role
 from app.core.schemas import NetConfigRequest
 from app.database import get_db
 from app.it.netconfig.generator import generate_netconfig
@@ -105,10 +105,32 @@ def _out(p: models.NodePlan, ifaces: list[models.NodePlanInterface]) -> dict:
         "key_source": p.key_source or "serial", "mac": p.mac or "",
         "rack": p.rack or "", "planned_hostname": p.planned_hostname or "",
         "mgmt_ip": p.mgmt_ip or "", "os_type": p.os_type or "ubuntu",
-        "fmt": p.fmt or "", "status": p.status or "pending", "note": p.note or "",
+        "fmt": p.fmt or "", "status": p.status or "pending",
+        "enabled": bool(getattr(p, "enabled", False)), "note": p.note or "",
         "created_by": p.created_by or "", "updated_by": p.updated_by or "",
         "interfaces": [{"kind": i.kind, "name": i.name, "spec": i.spec or {}} for i in ifaces],
     }
+
+
+DISABLED_MSG = ("本功能未开启。它是 PXE 装机之后的**额外**功能，需先由管理员在"
+                "「设置 → 装机后网络规划」里手动开启（全局），再对具体机器点「为该机开启」。")
+
+
+async def _settings(db: AsyncSession) -> models.NodePlanSettings:
+    """取全局开关（单行表，懒创建：缺行 = 未开启）。"""
+    row = await db.get(models.NodePlanSettings, 1)
+    if row is None:
+        row = models.NodePlanSettings(id=1, enabled=False)
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return row
+
+
+async def _require_global(db: AsyncSession) -> None:
+    """全局总闸：关着就挡在**任何写操作之前**（不做事后拦截）。"""
+    if not (await _settings(db)).enabled:
+        raise HTTPException(status_code=409, detail=DISABLED_MSG)
 
 
 async def _get_or_404(db: AsyncSession, pid: str) -> models.NodePlan:
@@ -184,6 +206,7 @@ async def get_plan(pid: str, db: AsyncSession = Depends(get_db), _user=Depends(g
 @router.post("/plans")
 async def create_plan(body: PlanIn, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)) -> dict:
+    await _require_global(db)
     if not body.install_id and not body.ztp_device_id:
         raise HTTPException(status_code=422, detail="install_id（Linux）与 ztp_device_id（网络设备）必须给一个")
     if body.install_id and body.ztp_device_id:
@@ -212,6 +235,7 @@ async def create_plan(body: PlanIn, db: AsyncSession = Depends(get_db),
 @router.put("/plans/{pid}")
 async def update_plan(pid: str, body: PlanIn, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)) -> dict:
+    await _require_global(db)
     p = await _get_or_404(db, pid)
     src, key = _resolve_key(body)
     await _check_unique(db, body, src, key, exclude=pid)
@@ -269,6 +293,11 @@ async def generate_plan(pid: str, db: AsyncSession = Depends(get_db),
     转义、幂等、IPv6 三模式等规则都在生成器里沉淀过（含真机事故），重写一遍必然漏。
     """
     p = await _get_or_404(db, pid)
+    await _require_global(db)
+    if not bool(getattr(p, "enabled", False)):
+        raise HTTPException(
+            status_code=409,
+            detail="这台机器还没开启（请在记录行上点「为该机开启」）。装机完成不会自动开启。")
     ifaces = await _ifaces(db, pid)
     if not ifaces:
         raise HTTPException(status_code=422, detail="规划里还没有任何网卡配置，先加至少一项再生成")
@@ -296,3 +325,49 @@ async def generate_plan(pid: str, db: AsyncSession = Depends(get_db),
             "sha256": sha, "content": content,
             "interface_count": len(ifaces),
             "status_hint": "dry-run：未下发，可下载或人工核对后再进入下发流程"}
+
+
+# ── 全局开关 & 每机开关 ─────────────────────────────────────────────────────
+
+@router.get("/settings")
+async def get_settings(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)) -> dict:
+    row = await _settings(db)
+    return {"enabled": bool(row.enabled), "updated_by": row.updated_by or "",
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "hint": "默认关闭；开启后才允许登记规划。每台机器还要单独开启。"}
+
+
+@router.put("/settings")
+async def put_settings(body: dict = None, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_role("admin"))) -> dict:
+    row = await _settings(db)
+    row.enabled = bool((body or {}).get("enabled"))
+    row.updated_by = user.get("username", "")
+    await db.commit()
+    await db.refresh(row)
+    return {"enabled": bool(row.enabled), "updated_by": row.updated_by or ""}
+
+
+@router.post("/plans/{pid}/enable")
+async def enable_plan(pid: str, db: AsyncSession = Depends(get_db),
+                      user=Depends(get_current_user)) -> dict:
+    """对**某一台机器**手动开启（= 用户说的"由用户手动点击开启"）。"""
+    await _require_global(db)
+    p = await _get_or_404(db, pid)
+    p.enabled = True
+    p.updated_by = user.get("username", "")
+    await db.commit()
+    await db.refresh(p)
+    return {"ok": True, "id": p.id, "enabled": True}
+
+
+@router.post("/plans/{pid}/disable")
+async def disable_plan(pid: str, db: AsyncSession = Depends(get_db),
+                       user=Depends(get_current_user)) -> dict:
+    await _require_global(db)
+    p = await _get_or_404(db, pid)
+    p.enabled = False
+    p.updated_by = user.get("username", "")
+    await db.commit()
+    await db.refresh(p)
+    return {"ok": True, "id": p.id, "enabled": False}

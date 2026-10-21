@@ -52,7 +52,22 @@ def _client(tmp_path, role="admin"):
     return TestClient(app), Session
 
 
+def _enable_global(c):
+    """开全局总闸（每个用例独立库，所以每次都要开一次）。"""
+    r = c.put(BASE + "/settings", json={"enabled": True})
+    assert r.status_code == 200, r.text
+    return r
+
+
+def _enable_plan(c, pid):
+    """对某台机器手动开启（用户要求：装机后由人点开，不自动）。"""
+    r = c.post(BASE + "/plans/%s/enable" % pid)
+    assert r.status_code == 200, r.text
+    return r
+
+
 def _mk(c, **kw):
+    _enable_global(c)
     body = {"install_id": "inst-1", "serial": "SN-AAA-001", "rack": "A01-03-U12",
             "planned_hostname": "web-01", "os_type": "ubuntu",
             "interfaces": [{"kind": "interface", "name": "eth0", "spec": IFACE}]}
@@ -121,6 +136,7 @@ def test_generate_dry_run_uses_generator(tmp_path):
     """生成：ubuntu 默认 netplan，内容里要有网卡与地址；必须是 dry-run（带 sha256 与提示）。"""
     c, _ = _client(tmp_path)
     pid = _mk(c).json()["id"]
+    _enable_plan(c, pid)
     r = c.post(BASE + "/plans/%s/generate" % pid)
     assert r.status_code == 200, r.text
     out = r.json()
@@ -135,6 +151,7 @@ def test_generate_dry_run_uses_generator(tmp_path):
 def test_generate_requires_interfaces(tmp_path):
     c, _ = _client(tmp_path)
     pid = _mk(c, interfaces=[]).json()["id"]
+    _enable_plan(c, pid)
     r = c.post(BASE + "/plans/%s/generate" % pid)
     assert r.status_code == 422 and "网卡" in r.json()["detail"]
 
@@ -144,6 +161,7 @@ def test_generate_surfaces_generator_error(tmp_path):
     c, _ = _client(tmp_path)
     bad = dict(IFACE, ip="999.1.1.1")
     pid = _mk(c, interfaces=[{"kind": "interface", "name": "eth0", "spec": bad}]).json()["id"]
+    _enable_plan(c, pid)
     r = c.post(BASE + "/plans/%s/generate" % pid)
     assert r.status_code == 422, r.text
     assert "999.1.1.1" in r.json()["detail"] or "IPv4" in r.json()["detail"]
@@ -175,3 +193,61 @@ def test_delete_is_idempotent(tmp_path):
     assert c.delete(BASE + "/plans/" + pid).status_code == 200
     assert c.delete(BASE + "/plans/" + pid).status_code == 200
     assert c.get(BASE + "/plans").json() == []
+
+
+# ── 双重开关（用户 2026-10-21：额外功能，必须手动开启，不能自动）─────────────
+
+def test_feature_is_off_by_default(tmp_path):
+    """默认**关闭**：连"建规划"都不允许，并给出明确提示（不是 500/静默）。"""
+    c, _ = _client(tmp_path)
+    st = c.get(BASE + "/settings").json()
+    assert st["enabled"] is False
+    r = c.post(BASE + "/plans", json={"install_id": "i1", "serial": "SN-1"})
+    assert r.status_code == 409
+    assert "未开启" in r.json()["detail"]
+
+
+def test_global_on_but_device_not_enabled(tmp_path):
+    """开了全局也不能直接生成：每台机器还要人点"为该机开启"。"""
+    c, _ = _client(tmp_path)
+    pid = _mk(c).json()["id"]                      # _mk 里已开全局
+    assert c.get(BASE + "/plans/" + pid).json()["enabled"] is False
+    r = c.post(BASE + "/plans/%s/generate" % pid)
+    assert r.status_code == 409
+    assert "还没开启" in r.json()["detail"]
+
+    _enable_plan(c, pid)
+    assert c.get(BASE + "/plans/" + pid).json()["enabled"] is True
+    assert c.post(BASE + "/plans/%s/generate" % pid).status_code == 200
+
+    c.post(BASE + "/plans/%s/disable" % pid)
+    assert c.post(BASE + "/plans/%s/generate" % pid).status_code == 409
+
+
+def test_global_off_blocks_everything_even_if_device_enabled(tmp_path):
+    """关总闸后：已开启的机器也不能生成、不能新建 —— 闸门在任何写操作之前。"""
+    c, _ = _client(tmp_path)
+    pid = _mk(c).json()["id"]
+    _enable_plan(c, pid)
+    c.put(BASE + "/settings", json={"enabled": False})
+
+    assert c.post(BASE + "/plans/%s/generate" % pid).status_code == 409
+    assert c.post(BASE + "/plans", json={"install_id": "i2", "serial": "SN-2"}).status_code == 409
+    # 连"开/关某台机器"也不许（否则等于绕过总闸）
+    assert c.post(BASE + "/plans/%s/disable" % pid).status_code == 409
+
+
+def test_settings_update_requires_admin(tmp_path):
+    """全局开关只有 admin 能改；viewer 403。"""
+    c, _ = _client(tmp_path, role="viewer")
+    assert c.put(BASE + "/settings", json={"enabled": True}).status_code == 403
+    assert c.get(BASE + "/settings").status_code == 200      # 读可以
+
+
+def test_install_path_does_not_touch_nodeplan():
+    """装机链路里**不许**出现 nodeplan 引用（保证"不自动开启"不是靠自觉）。"""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1] / "app" / "api"
+    for name in ("pxe.py",):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "nodeplan" not in text and "NodePlan" not in text, name

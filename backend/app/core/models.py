@@ -438,6 +438,9 @@ class NodePlan(Base):
     fmt: Mapped[str] = mapped_column(String(16), default="")               # netplan/nmcli/ifcfg，空=按 os 推
     # pending(已登记待生成) / generated(已生成) / applying / applied / failed / rolled_back
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    # ★ 每台机器的"手动开启"标记（默认关）：装机完成后由人在界面上点开才生效。
+    #   这是用户 2026-10-21 的明确要求 —— 本功能是额外功能，不能随装机自动启用。
+    enabled: Mapped[bool] = mapped_column(default=False)
     note: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(String(64), default="")
     updated_by: Mapped[str] = mapped_column(String(64), default="")
@@ -499,3 +502,17 @@ class ConfigJobItem(Base):
     probe: Mapped[dict] = mapped_column(JSON, default=dict)        # 目标机本地探测结果
     error: Mapped[str] = mapped_column(Text, default="")
     reported_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class NodePlanSettings(Base):
+    """本功能的**全局总开关**（单行表，id 恒为 1）。
+
+    为什么要有全局开关：这是"额外功能"，默认应当完全不参与生产流程 ——
+    关闭时连"建规划"都不允许，避免有人误以为它在自动跑。
+    """
+    __tablename__ = "node_plan_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(default=False)
+    updated_by: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
