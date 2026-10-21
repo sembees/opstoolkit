@@ -28,6 +28,8 @@ from app.it.nodeplan.apply import build_expected, render_bundle
 from app.it.nodeplan.verify import verify_plan
 from app.api.ztp import _to_profile
 from app.ct.ztp.generator import ZtpDevice, generate_all
+from app.it.nodeplan.device import (expected_lines_from_config, push_config,
+                                    save_config, verify_device)
 from app.it.nodeplan.deploy import (SshError, SshRunner, deploy_bundle,
                                    fetch_result)
 
@@ -679,3 +681,101 @@ async def generate_device(pid: str, db: AsyncSession = Depends(get_db),
             "sha256": hashlib.sha256(str(content).encode("utf-8")).hexdigest(),
             "content": content, "all_files": sorted(files),
             "status_hint": "dry-run：未下发；核对无误后再走设备下发（下一刀）"}
+
+
+# ── 网络设备下发（M4b）────────────────────────────────────────────────────
+
+def _shell_for(body: dict, host: str):
+    from app.it.nodeplan.device import Shell
+    return Shell(host, (body.get("ssh_user") or "admin").strip(),
+                 password=(body.get("ssh_password") or ""),
+                 key_path=(body.get("ssh_key_path") or "").strip(),
+                 port=int(body.get("ssh_port") or 22))
+
+
+async def _render_device_config(db: AsyncSession, p: models.NodePlan):
+    """复用 generate-device 的渲染路径（避免两处逻辑分叉）。"""
+    dev = await db.get(models.ZtpDevice, p.ztp_device_id)
+    if dev is None:
+        raise HTTPException(status_code=404, detail="对应的 ZTP 设备不存在")
+    tpl = await db.get(models.ZtpTemplate, dev.template_id)
+    if tpl is None:
+        raise HTTPException(status_code=404, detail="对应的 ZTP 模板不存在")
+    prof = _to_profile(tpl)
+    zd = ZtpDevice(hostname=(p.planned_hostname or dev.hostname or "").strip(),
+                   mac=dev.mac or "", serial=dev.serial or "",
+                   mgmt_ip=(p.mgmt_ip or dev.mgmt_ip or "").strip())
+    files = generate_all(prof, [zd])
+    key = _device_config_key(files, zd.hostname, zd.mac)
+    if not key:
+        raise HTTPException(status_code=502, detail="没能定位这台设备的配置文件")
+    return (prof.vendor or "").lower(), key, files[key]
+
+
+@router.post("/plans/{pid}/apply-device")
+async def apply_device(pid: str, body: dict = None, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_role("admin"))) -> dict:
+    """把正式配置推到网络设备（H3C/Huawei/Cisco）。
+
+    body: {ssh_user, ssh_password|ssh_key_path, ssh_port, allow_mgmt_change, persist}
+      · persist 默认 **false**：先推 + 回读对账，通过后**也不保存**；确认无误再显式 persist=true；
+      · 失败时 `return` 丢弃未保存配置 = 设备侧回滚，重启即恢复原样。
+    """
+    await _require_global(db)
+    p = await _get_or_404(db, pid)
+    if not bool(getattr(p, "enabled", False)):
+        raise HTTPException(status_code=409,
+                            detail="这台设备还没开启（请先在记录行上点「为该机开启」）")
+    if not p.ztp_device_id:
+        raise HTTPException(status_code=422, detail="这不是网络设备规划（没有 ztp_device_id）")
+    body = body or {}
+    if not body.get("allow_mgmt_change"):
+        raise HTTPException(
+            status_code=409,
+            detail="默认禁止通过批量下发修改管理口/管理 VLAN（改错就失联）。确需修改时传 "
+                   "allow_mgmt_change=true，并确保有带外/串口兜底。")
+
+    host = (body.get("target_ip") or p.mgmt_ip or "").strip()
+    if not host:
+        raise HTTPException(status_code=422, detail="没有管理 IP，无法确定下发目标")
+
+    try:
+        vendor, file_name, config_text = await _render_device_config(db, p)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    shell = _shell_for(body, host)
+    try:
+        shell.open()
+    except Exception as e:                                # noqa: BLE001
+        raise HTTPException(status_code=502, detail="连不上设备：%s: %s" % (type(e).__name__, e))
+
+    try:
+        pushed = push_config(shell, vendor, str(config_text), persist=False)
+        if not pushed["ok"]:
+            p.status = "rolled_back"      # 设备侧：未保存 = 已回滚
+            p.updated_by = user.get("username", "")
+            await db.commit()
+            return {"ok": False, "vendor": vendor, "saved": False, "status": "rolled_back",
+                    "errors": pushed["errors"][:5],
+                    "transcript": pushed["transcript"][-4000:],
+                    "note": "检测到命令报错，已 return 丢弃未保存配置（重启即恢复原样）"}
+
+        expected = expected_lines_from_config(str(config_text))
+        verify = verify_device(expected, pushed["running_config"])
+        saved = False
+        if verify["ok"] and body.get("persist"):
+            saved = save_config(shell, vendor)["saved"]
+    finally:
+        shell.close()
+
+    p.status = "applied" if verify["ok"] else "failed"
+    p.updated_by = user.get("username", "")
+    await db.commit()
+    return {"ok": verify["ok"], "vendor": vendor, "file_name": file_name,
+            "saved": saved, "status": p.status, "verify": verify,
+            "expected_count": verify["counts"]["total"],
+            "transcript": pushed["transcript"][-4000:],
+            "note": ("对账通过；未保存（persist=false），设备重启会回到原配置"
+                     if verify["ok"] and not saved else
+                     "对账通过且已保存" if saved else "对账不一致，未保存")}
