@@ -26,6 +26,7 @@ from app.database import get_db
 from app.it.netconfig.generator import generate_netconfig
 from app.it.nodeplan.apply import build_expected, render_bundle
 from app.it.nodeplan.verify import verify_plan
+from app.it.nodeplan.csvimport import parse_csv, row_to_body
 from app.api.ztp import _to_profile
 from app.ct.ztp.generator import ZtpDevice, generate_all
 from app.it.nodeplan.device import (expected_lines_from_config, push_config,
@@ -779,3 +780,56 @@ async def apply_device(pid: str, body: dict = None, db: AsyncSession = Depends(g
             "note": ("对账通过；未保存（persist=false），设备重启会回到原配置"
                      if verify["ok"] and not saved else
                      "对账通过且已保存" if saved else "对账不一致，未保存")}
+
+
+# ── CSV 批量导入 ───────────────────────────────────────────────────────────
+
+@router.post("/plans/import")
+async def import_plans(body: dict = None, db: AsyncSession = Depends(get_db),
+                       user=Depends(get_current_user)) -> dict:
+    """从 CSV 批量登记规划（逐行隔离失败；与逐条创建共用同一套校验）。
+
+    body: {csv: "<文本>", skip_invalid: true}
+    """
+    await _require_global(db)
+    body = body or {}
+    try:
+        rows = parse_csv(body.get("csv") or "")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    created, skipped, errors = 0, 0, []
+    for idx, row in enumerate(rows, start=2):        # 第 2 行起 = 数据行（1 是表头）
+        try:
+            payload = row_to_body(row)
+            p_body = PlanIn(**payload)
+            if not p_body.install_id and not p_body.ztp_device_id:
+                pass                                  # CSV 允许只按 SN + IP 登记
+            src, key = _resolve_key(p_body)
+            await _check_unique(db, p_body, src, key)
+            await _check_unique_owner(db, p_body)
+            p = models.NodePlan(
+                install_id=p_body.install_id, ztp_device_id=p_body.ztp_device_id,
+                serial=(p_body.serial or "").strip(), serial_trusted=bool(p_body.serial_trusted),
+                key_source=src, mac=(p_body.mac or "").strip(), rack=p_body.rack,
+                planned_hostname=p_body.planned_hostname, mgmt_ip=p_body.mgmt_ip,
+                os_type=p_body.os_type, fmt=(p_body.fmt or "").strip(), note=p_body.note,
+                created_by=user.get("username", ""), updated_by=user.get("username", ""))
+            db.add(p)
+            await db.flush()
+            for i, it in enumerate(p_body.interfaces):
+                db.add(models.NodePlanInterface(plan_id=p.id, kind=it.kind, name=it.name,
+                                                spec=it.spec or {}, sort=i))
+            await db.commit()
+            created += 1
+        except HTTPException as e:
+            await db.rollback()
+            skipped += 1
+            errors.append({"row": idx, "error": e.detail})
+        except Exception as e:                        # noqa: BLE001
+            await db.rollback()
+            skipped += 1
+            errors.append({"row": idx, "error": "%s: %s" % (type(e).__name__, e)})
+
+    return {"ok": True, "created": created, "skipped": skipped, "errors": errors[:50],
+            "total": len(rows)}

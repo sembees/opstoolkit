@@ -25,6 +25,9 @@
         <el-switch :model-value="globalOn" :loading="switching" :disabled="!isAdmin"
                    @change="toggleGlobal" />
         <el-button :icon="Refresh" @click="loadAll">刷新</el-button>
+        <el-button :disabled="!globalOn" @click="$refs.csvInput.click()">导入 CSV</el-button>
+        <input ref="csvInput" type="file" accept=".csv,text/csv" style="display:none"
+               @change="onCsvPicked" />
         <el-button type="primary" :icon="Plus" :disabled="!globalOn" @click="openDialog()">
           新建规划
         </el-button>
@@ -547,6 +550,27 @@ async function syncPlan(row) {
     await loadAll()
   } catch (e) {
     ElMessage.error(e?.response?.data?.detail || '拉取失败')
+  }
+}
+
+async function onCsvPicked(ev) {
+  const file = ev.target.files?.[0]
+  ev.target.value = ""
+  if (!file) return
+  const text = await file.text()
+  try {
+    const r = await http.post('/it/nodeplan/plans/import', { csv: text })
+    const out = r.data
+    if (out.skipped) {
+      const detail = (out.errors || []).slice(0, 8)
+        .map((e) => `第 ${e.row} 行：${e.error}`).join('\n')
+      ElMessage.warning(`导入完成：成功 ${out.created} 行，跳过 ${out.skipped} 行\n${detail}`)
+    } else {
+      ElMessage.success(`导入完成：${out.created} 行`)
+    }
+    await loadAll()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || '导入失败')
   }
 }
 

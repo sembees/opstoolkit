@@ -13,6 +13,8 @@
 import re
 from typing import Optional
 
+from app.it.nodeplan.links import diff_links, parse_links
+
 _INET = re.compile(r"^\s*\d+:\s+(\S+)\s+(inet|inet6)\s+([0-9a-fA-F:.]+/\d+)")
 
 
@@ -98,5 +100,12 @@ def diff_expected(expected: dict, parsed: dict) -> dict:
 def verify_plan(expected: dict, probe_text: str) -> dict:
     parsed = parse_probe(probe_text)
     out = diff_expected(expected, parsed)
+    # MTU / VLAN / bond 模式：来源不同（ip -o link / bridge vlan / /proc/net/bonding），合并进同一份报告
+    lk = diff_links(expected, parse_links(probe_text))
+    out["items"] = out["items"] + lk["items"]
+    out["ok"] = out["ok"] and lk["ok"]
+    out["counts"] = {"total": len(out["items"]),
+                     "failed": len([i for i in out["items"] if not i["ok"]])}
     out["parsed"] = parsed
+    out["parsed_links"] = parse_links(probe_text)
     return out

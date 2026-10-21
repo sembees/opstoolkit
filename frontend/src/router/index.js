@@ -45,6 +45,7 @@ const layoutChildren = [
   { path: 'netconfig', name: 'netconfig', component: () => import('../views/NetConfig.vue'), meta: { title: '网络配置生成', icon: 'SetUp', group: '服务器交付' } },
   { path: 'pxe', name: 'pxe', component: () => import('../views/Pxe.vue'), meta: { title: 'PXE 装机', icon: 'Cpu', group: '服务器交付' } },
   { path: 'nodeplan', name: 'nodeplan', component: () => import('../views/NodePlan.vue'), meta: { title: '装机后网络规划', icon: 'Connection', group: '服务器交付' } },
+  { path: 'jobaudit', name: 'jobaudit', component: () => import('../views/JobAudit.vue'), meta: { title: '变更审计', icon: 'Tickets', group: '服务器交付' } },
   { path: 'ztp', name: 'ztp', component: () => import('../views/Ztp.vue'), meta: { title: 'ZTP 开局', icon: 'Share', group: '服务器交付' } },
   { path: 'alerts', name: 'alerts', component: () => import('../views/Alerts.vue'), meta: { title: '告警管理', icon: 'Bell', group: '网络设备' } },
   // 首次访问引导向导：不带 meta.group ⇒ menuGroups 不会把它收进侧栏（它只在

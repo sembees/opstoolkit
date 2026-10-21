@@ -28,7 +28,21 @@ def build_expected(os_type: str, ifaces: list[dict]) -> dict:
     只收能机械判定的项：地址、默认网关、DNS。bond/vlan 细节留给平台侧 diff
     （输出格式各发行版不一致，本地粗判只负责"该不该回滚"）。
     """
-    addrs, dns, gw = [], [], ""
+    addrs, dns, gw, mtu, bond, vlans = [], [], "", [], [], []
+    for it in ifaces:
+        spec0 = it.get("spec") or {}
+        if it.get("kind") == "interface" and spec0.get("mtu"):
+            try:
+                mtu.append({"iface": str(spec0.get("name") or ""), "mtu": int(spec0["mtu"])})
+            except (TypeError, ValueError):
+                pass
+        if it.get("kind") == "bond" and spec0.get("mode"):
+            bond.append({"iface": str(spec0.get("name") or ""), "mode": str(spec0["mode"])})
+        if it.get("kind") == "vlan" and spec0.get("id"):
+            try:
+                vlans.append(int(spec0["id"]))
+            except (TypeError, ValueError):
+                pass
     for it in ifaces:
         if it.get("kind") != "interface":
             continue
@@ -43,7 +57,8 @@ def build_expected(os_type: str, ifaces: list[dict]) -> dict:
                 dns.append(d)
         if not gw and spec.get("gateway"):
             gw = str(spec["gateway"]).strip()
-    return {"addresses": addrs, "default_gateway": gw, "dns": dns, "os_type": os_type}
+    return {"addresses": addrs, "default_gateway": gw, "dns": dns, "os_type": os_type,
+            "mtu": mtu, "bond_mode": bond, "vlan_ids": vlans}
 
 
 def _sha(text: str) -> str:
@@ -60,6 +75,8 @@ mkdir -p "$STATE"
 {
   echo "== ip_addr =="
   ip -o addr show 2>/dev/null || true
+  echo "== ip_link =="
+  ip -o link show 2>/dev/null || true
   echo "== ip_route =="
   ip -o route show 2>/dev/null || true
   echo "== resolv =="
