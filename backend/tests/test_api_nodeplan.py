@@ -251,3 +251,16 @@ def test_install_path_does_not_touch_nodeplan():
     for name in ("pxe.py",):
         text = (root / name).read_text(encoding="utf-8")
         assert "nodeplan" not in text and "NodePlan" not in text, name
+
+
+def test_duplicate_install_record_is_409_not_500(tmp_path):
+    """同一台装机记录只能有一条规划：撞了要 409（人话），不能 500。
+
+    这个回归来自真机验收：`UNIQUE constraint failed: node_plans.install_id` 被包成 500，
+    看起来像代码坏了。
+    """
+    c, _ = _client(tmp_path)
+    first = _mk(c).json()
+    r = c.post(BASE + "/plans", json={"install_id": "inst-1", "serial": "SN-OTHER"})
+    assert r.status_code == 409
+    assert "已经有一条规划" in r.json()["detail"] and first["id"] in r.json()["detail"]

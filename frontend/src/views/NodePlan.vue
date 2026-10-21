@@ -186,7 +186,7 @@ const plans = ref([])
 const loading = ref(false)
 const globalOn = ref(false)
 const switching = ref(false)
-const isAdmin = ref(true)      // 后端会再校验；这里只用于禁用按钮
+const isAdmin = ref(true)      // 后端会再校验；这里只用于禁用按钮（下面按登录用户纠正）
 const selection = ref([])
 const cautious = ref(false)
 
@@ -222,15 +222,21 @@ function statusLabel(s) {
             applied: '已生效', failed: '失败', rolled_back: '已回滚' })[s] || s
 }
 
-async function loadAll() {
+async function loadAll(retry = true) {
   loading.value = true
   try {
-    const st = await http.get('/it/nodeplan/settings')
+    // _silent：失败由这里统一提示，避免"加载失败"和拦截器的提示重复弹两次
+    const st = await http.get('/it/nodeplan/settings', { _silent: true })
     globalOn.value = !!st.data.enabled
-    const r = await http.get('/it/nodeplan/plans')
+    const r = await http.get('/it/nodeplan/plans', { _silent: true })
     plans.value = r.data
   } catch (e) {
-    ElMessage.error(e?.response?.data?.detail || '加载失败')
+    if (retry && !e?.response) {          // 没有响应 = 网络/后端重启，重试一次
+      await new Promise((r) => setTimeout(r, 1200))
+      return loadAll(false)
+    }
+    const detail = e?.response?.data?.detail
+    ElMessage.error(detail || '加载失败：后端可能正在重启，请点右上角「刷新」重试')
   } finally {
     loading.value = false
   }
@@ -364,7 +370,13 @@ function download(it) {
   URL.revokeObjectURL(a.href)
 }
 
-onMounted(loadAll)
+onMounted(() => {
+  try {
+    const u = JSON.parse(localStorage.getItem('opstk_user') || '{}')
+    isAdmin.value = (u.role || '') === 'admin'
+  } catch { isAdmin.value = false }
+  loadAll()
+})
 </script>
 
 <style scoped>

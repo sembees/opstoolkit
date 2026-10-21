@@ -16,6 +16,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import models
@@ -172,6 +173,28 @@ def _resolve_key(body: PlanIn) -> tuple[str, bool]:
     return src, (serial if src == "serial" else mac)
 
 
+async def _check_unique_owner(db: AsyncSession, body: PlanIn, exclude: str = "") -> None:
+    """同一台装机记录 / 同一台 ZTP 设备只能有一条规划（表上也有唯一约束，这里先给出人话）。"""
+    if body.install_id:
+        res = await db.execute(select(models.NodePlan).where(
+            models.NodePlan.install_id == body.install_id))
+        for other in res.scalars().all():
+            if other.id != exclude:
+                raise HTTPException(
+                    status_code=409,
+                    detail="这台装机记录已经有一条规划：%s（机架 %s，状态 %s）。请直接改那条。"
+                           % (other.id, other.rack or "未填", other.status or "pending"))
+    if body.ztp_device_id:
+        res = await db.execute(select(models.NodePlan).where(
+            models.NodePlan.ztp_device_id == body.ztp_device_id))
+        for other in res.scalars().all():
+            if other.id != exclude:
+                raise HTTPException(
+                    status_code=409,
+                    detail="这台 ZTP 设备已经有一条规划：%s（机架 %s）。请直接改那条。"
+                           % (other.id, other.rack or "未填"))
+
+
 async def _check_unique(db: AsyncSession, body: PlanIn, src: str, key: str,
                         exclude: str = "") -> None:
     """SN（或 MAC）唯一：撞了就 409，并把已有那条的 id / 机架 / 状态指出来 —— 不静默覆盖。"""
@@ -217,6 +240,7 @@ async def create_plan(body: PlanIn, db: AsyncSession = Depends(get_db),
         raise HTTPException(status_code=422, detail="install_id 与 ztp_device_id 只能给一个")
     src, key = _resolve_key(body)
     await _check_unique(db, body, src, key)
+    await _check_unique_owner(db, body)
 
     p = models.NodePlan(
         install_id=body.install_id, ztp_device_id=body.ztp_device_id,
@@ -227,7 +251,13 @@ async def create_plan(body: PlanIn, db: AsyncSession = Depends(get_db),
         created_by=user.get("username", ""), updated_by=user.get("username", ""),
     )
     db.add(p)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as e:                      # 并发下预检可能漏，兜底成人话
+        await db.rollback()
+        raise HTTPException(status_code=409,
+                            detail="这台机器已经登记过规划（唯一约束冲突），请刷新后再改已有那条。"
+                                   " 原始信息：%s" % str(e.orig)[:120])
     for i, it in enumerate(body.interfaces):
         db.add(models.NodePlanInterface(plan_id=p.id, kind=it.kind, name=it.name,
                                         spec=it.spec or {}, sort=i))
@@ -243,6 +273,7 @@ async def update_plan(pid: str, body: PlanIn, db: AsyncSession = Depends(get_db)
     p = await _get_or_404(db, pid)
     src, key = _resolve_key(body)
     await _check_unique(db, body, src, key, exclude=pid)
+    await _check_unique_owner(db, body, exclude=pid)
 
     # install_id/ztp_device_id 允许在首次为空时补，但不允许把一台机器改成另一台
     if body.install_id and p.install_id and body.install_id != p.install_id:
@@ -519,6 +550,13 @@ async def apply_plan(pid: str, body: dict = None, db: AsyncSession = Depends(get
         info = deploy_bundle(_ssh_for(body, target), bundle["files"], change_id)
     except SshError as e:
         raise HTTPException(status_code=502, detail="下发失败（未改动任何配置）：%s" % e)
+    except Exception as e:                            # noqa: BLE001
+        # 任何"连不上/钥匙不在容器里/权限不对"都要变成 502 人话，而不是 500 ——
+        # 真机验收时就是 key 不在容器里，结果给了个 500，看起来像代码坏了。
+        raise HTTPException(
+            status_code=502,
+            detail="下发失败（未改动任何配置）：%s: %s。常见原因：SSH 私钥必须放在"
+                   "**容器内可见**的路径（宿主 /tmp 默认不在容器里）。" % (type(e).__name__, e))
 
     p.change_id = change_id
     p.status = "applying"

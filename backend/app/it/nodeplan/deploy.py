@@ -27,9 +27,10 @@ class SshRunner:
     """极薄的 paramiko 封装；只做"写文件 / 跑命令 / 读文件"。"""
 
     def __init__(self, host: str, user: str, *, key_path: str = "", password: str = "",
-                 port: int = 22, timeout: int = 15):
+                 port: int = 22, timeout: int = 15, use_sudo: bool = True):
         self.host, self.user, self.port = host, user, port
         self.key_path, self.password, self.timeout = key_path, password, timeout
+        self.use_sudo = use_sudo
 
     def _connect(self):
         import paramiko
@@ -44,7 +45,9 @@ class SshRunner:
         c.connect(self.host, **kw)
         return c
 
-    def run(self, cmd: str) -> tuple[int, str, str]:
+    def run(self, cmd: str, sudo: bool = False) -> tuple[int, str, str]:
+        if sudo and self.use_sudo:
+            cmd = "sudo -n bash -lc " + shlex.quote(cmd)
         c = self._connect()
         try:
             _i, o, e = c.exec_command(cmd, timeout=60)
@@ -54,20 +57,36 @@ class SshRunner:
         finally:
             c.close()
 
-    def write_file(self, path: str, content: str, mode: int = 0o755) -> None:
+    def write_file(self, path: str, content: str, mode: int = 0o755, sudo: bool = False) -> None:
         c = self._connect()
         try:
+            tmp = "/tmp/.opstk-%d-%s" % (abs(hash(content)) % 10**8,
+                                          posixpath.basename(path).replace("/", "_"))
             sftp = c.open_sftp()
-            d = posixpath.dirname(path)
-            c.exec_command("mkdir -p " + shlex.quote(d))[1].read()
-            with sftp.open(path, "w") as f:
+            with sftp.open(tmp, "w") as f:
                 f.write(content)
-            sftp.chmod(path, mode)
             sftp.close()
+            if sudo and self.use_sudo:
+                d = posixpath.dirname(path)
+                code, out, err = self.run(
+                    "mkdir -p %s && install -m %o %s %s"
+                    % (shlex.quote(d), mode, shlex.quote(tmp), shlex.quote(path)), sudo=True)
+                self.run("rm -f " + shlex.quote(tmp))
+                if code != 0:
+                    raise SshError("写 %s 失败（sudo）：%s" % (path, (err or out)[:200]))
+            else:
+                code, out, err = self.run("install -m %o %s %s"
+                                          % (mode, shlex.quote(tmp), shlex.quote(path)))
+                if code != 0:
+                    raise SshError("写 %s 失败：%s" % (path, (err or out)[:200]))
         finally:
             c.close()
 
-    def read_file(self, path: str) -> Optional[str]:
+    def read_file(self, path: str, sudo: bool = False) -> Optional[str]:
+        if sudo and self.use_sudo:
+            code, out, _e = self.run("cat " + shlex.quote(path), sudo=True)
+            return out if code == 0 else None
+
         c = self._connect()
         try:
             sftp = c.open_sftp()
@@ -89,7 +108,8 @@ class SshRunner:
 def deploy_bundle(runner: SshRunner, files: dict[str, str], change_id: str) -> dict:
     """把脚本包写到目标机并启动一次性 timer（立刻返回，不等结果）。"""
     state = "%s/%s" % (STATE_DIR, change_id)
-    code, _o, err = runner.run("mkdir -p " + shlex.quote(state) + " && chmod 700 " + shlex.quote(state))
+    code, _o, err = runner.run("mkdir -p " + shlex.quote(state) + " && chmod 700 " + shlex.quote(state),
+                               sudo=True)
     if code != 0:
         raise SshError("建目录失败: " + err[:200])
 
@@ -97,16 +117,16 @@ def deploy_bundle(runner: SshRunner, files: dict[str, str], change_id: str) -> d
         if name.startswith("opstk-netconfig-apply@"):
             continue                      # unit/timer 放 systemd 目录
         runner.write_file(posixpath.join(state, name), content,
-                          mode=0o755 if name.endswith(".sh") else 0o644)
+                          mode=0o755 if name.endswith(".sh") else 0o644, sudo=True)
 
     unit = "%s/opstk-netconfig-apply@%s.service" % (UNIT_DIR, change_id)
     timer = "%s/opstk-netconfig-apply@%s.timer" % (UNIT_DIR, change_id)
-    runner.write_file(unit, files["opstk-netconfig-apply@%s.service" % change_id], mode=0o644)
-    runner.write_file(timer, files["opstk-netconfig-apply@%s.timer" % change_id], mode=0o644)
+    runner.write_file(unit, files["opstk-netconfig-apply@%s.service" % change_id], mode=0o644, sudo=True)
+    runner.write_file(timer, files["opstk-netconfig-apply@%s.timer" % change_id], mode=0o644, sudo=True)
 
     code, out, err = runner.run(
         "systemctl daemon-reload && systemctl start opstk-netconfig-apply@%s.timer && "
-        "systemctl is-active opstk-netconfig-apply@%s.timer" % (change_id, change_id))
+        "systemctl is-active opstk-netconfig-apply@%s.timer" % (change_id, change_id), sudo=True)
     if code != 0:
         raise SshError("启动 timer 失败: " + (err or out)[:300])
     return {"state_dir": state, "timer_active": "active" in out}
@@ -115,13 +135,13 @@ def deploy_bundle(runner: SshRunner, files: dict[str, str], change_id: str) -> d
 def fetch_result(runner: SshRunner, change_id: str) -> dict:
     """读目标机本地结果（result.json + probe.txt）。没有结果 = 还没跑完或机器不可达。"""
     state = "%s/%s" % (STATE_DIR, change_id)
-    raw = runner.read_file(posixpath.join(state, "result.json"))
+    raw = runner.read_file(posixpath.join(state, "result.json"), sudo=True)
     if raw is None:
         return {"ready": False, "reason": "result.json 还不存在（timer 未到/未跑/机器不可达）"}
     try:
         res = json.loads(raw)
     except ValueError:
         return {"ready": False, "reason": "result.json 不是合法 JSON: " + raw[:120]}
-    probe = runner.read_file(posixpath.join(state, "probe.txt")) or ""
-    log = runner.read_file(posixpath.join(state, "apply.log")) or ""
+    probe = runner.read_file(posixpath.join(state, "probe.txt"), sudo=True) or ""
+    log = runner.read_file(posixpath.join(state, "apply.log"), sudo=True) or ""
     return {"ready": True, "result": res, "probe_text": probe, "apply_log": log[-4000:]}

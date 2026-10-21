@@ -36,7 +36,7 @@ class FakeRunner:
         self.probe = probe
         self.fail_connect = fail_connect
 
-    def run(self, cmd):
+    def run(self, cmd, sudo=False):
         if self.fail_connect:
             raise OSError("connection refused")
         self.cmds.append(cmd)
@@ -44,10 +44,10 @@ class FakeRunner:
             return 0, "active\n", ""
         return 0, "", ""
 
-    def write_file(self, path, content, mode=0o755):
+    def write_file(self, path, content, mode=0o755, sudo=False):
         self.written[path] = content
 
-    def read_file(self, path):
+    def read_file(self, path, sudo=False):
         if path.endswith("result.json"):
             return self.result_json
         if path.endswith("probe.txt"):
@@ -56,7 +56,7 @@ class FakeRunner:
             return "APPLY_OK\n"
         return None
 
-    def exists(self, path):
+    def exists(self, path, sudo=False):
         return path in self.written
 
 
