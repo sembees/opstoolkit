@@ -106,3 +106,39 @@ def test_import_accepts_untrusted_serial_with_mac(tmp_path):
     assert out["created"] == 1, out
     p = c.get(BASE + "/plans").json()[0]
     assert p["key_source"] == "mac" and p["serial_trusted"] is False
+
+
+def test_install_id_must_exist(tmp_path):
+    """以前假 install_id 也能建规划；现在建的时候就拦（422 + 人话）。"""
+    c = _client(tmp_path)
+    c.put(BASE + "/settings", json={"enabled": True})
+    r = c.post(BASE + "/plans", json={"install_id": "no-such-record", "serial": "SN-X"})
+    assert r.status_code == 422
+    assert "装机记录不存在" in r.json()["detail"]
+
+
+def test_csv_multi_nic_same_sn_merges(tmp_path):
+    """同一 SN 多行 → 合并成一台机器的多块网卡（CSV 里最常见的 4 口机器）。"""
+    c = _client(tmp_path)
+    c.put(BASE + "/settings", json={"enabled": True})
+    text = ("SN,IP,网卡,主机名\n"
+            "SN-M-1,10.5.5.1,eth0,node-m\n"
+            "SN-M-1,10.5.5.2,eth1,node-m\n")
+    out = _imp(c, text).json()
+    assert out["created"] == 2 and out["skipped"] == 0, out
+    plans = c.get(BASE + "/plans").json()
+    assert len(plans) == 1, plans
+    assert sorted(i["name"] for i in plans[0]["interfaces"]) == ["eth0", "eth1"]
+
+
+def test_csv_routes_column(tmp_path):
+    """routes 列：`10.0.0.0/24>10.5.5.1; 10.9.0.0/16>` → 两条明细路由。"""
+    c = _client(tmp_path)
+    c.put(BASE + "/settings", json={"enabled": True})
+    text = ("SN,IP,网卡,routes\n"
+            "SN-R-1,10.6.6.1,eth0,10.0.0.0/24>10.6.6.254; 10.9.0.0/16>\n")
+    out = _imp(c, text).json()
+    assert out["created"] == 1, out
+    spec = c.get(BASE + "/plans").json()[0]["interfaces"][0]["spec"]
+    assert spec["routes"][0] == {"to": "10.0.0.0/24", "via": "10.6.6.254"}
+    assert spec["routes"][1]["to"] == "10.9.0.0/16" and spec["routes"][1]["via"] is None

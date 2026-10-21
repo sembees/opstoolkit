@@ -37,6 +37,12 @@ def _client(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(models.Base.metadata.create_all)
 
+            # 夹具：存在性校验要求 install_id 真实存在
+            for _iid in ("i1", "i2"):
+                await conn.execute(models.PxeInstall.__table__.insert().values(
+                    id=_iid, profile_id="p1", hostname=_iid, mac="",
+                    ip="10.0.0.9", status="installed"))
+
     asyncio.run(_create())
 
     async def _db():

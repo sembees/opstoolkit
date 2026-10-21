@@ -147,6 +147,9 @@
             <el-input v-model="it.spec.ip" placeholder="IP" style="width: 140px" />
             <el-input-number v-model="it.spec.cidr" :min="1" :max="32" placeholder="掩码" style="width: 100px" />
             <el-input v-model="it.spec.gateway" placeholder="网关" style="width: 140px" />
+            <el-button link type="primary" @click="openRoutes(idx)">
+              路由（{{ (it.spec.routes || []).length }}）
+            </el-button>
           </template>
           <template v-else>
             <el-input v-model="it.specText" type="textarea" :rows="2" placeholder='{"name":"bond0", ...}（生成器入参 JSON）'
@@ -159,6 +162,33 @@
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 明细路由（一个网卡可以挂多条网段） -->
+    <el-dialog v-model="routesVisible" title="明细路由" width="560px">
+      <el-alert type="info" :closable="false" show-icon
+                title="除了默认网关，还可以给这块网卡挂多条网段"
+                description="目标网段写 CIDR（如 10.20.0.0/16），下一跳可留空（表示直连/on-link）。" />
+      <el-table :data="routesDraft" size="small" class="mt-3">
+        <el-table-column label="目标网段">
+          <template #default="{ row }"><el-input v-model="row.to" placeholder="10.20.0.0/16" /></template>
+        </el-table-column>
+        <el-table-column label="下一跳（可空）">
+          <template #default="{ row }"><el-input v-model="row.via" placeholder="10.0.0.254" /></template>
+        </el-table-column>
+        <el-table-column width="70">
+          <template #default="{ $index }">
+            <el-button link type="danger" @click="routesDraft.splice($index, 1)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-button size="small" class="mt-3" @click="routesDraft.push({ to: '', via: '' })">
+        + 添加一条
+      </el-button>
+      <template #footer>
+        <el-button @click="routesVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveRoutes">保存</el-button>
       </template>
     </el-dialog>
 
@@ -339,6 +369,10 @@ const applyForm = ref({ target_ip: '', ssh_user: 'ops', ssh_key_path: '',
 const syncVisible = ref(false)
 const syncOut = ref(null)
 
+const routesVisible = ref(false)
+const routesIndex = ref(-1)
+const routesDraft = ref([])
+
 const deviceApplyVisible = ref(false)
 const applyingDevice = ref(false)
 const deviceTarget = ref(null)
@@ -358,6 +392,23 @@ function onUntrustedChange(v) {
   if (v) form.value.serial_trusted = false
 }
 function onSelect(rows) { selection.value = rows }
+
+function openRoutes(idx) {
+  routesIndex.value = idx
+  const cur = form.value.interfaces[idx]?.spec?.routes || []
+  routesDraft.value = cur.map((r) => ({ to: r.to || '', via: r.via || '' }))
+  routesVisible.value = true
+}
+
+function saveRoutes() {
+  const it = form.value.interfaces[routesIndex.value]
+  if (it) {
+    it.spec.routes = routesDraft.value
+      .filter((r) => (r.to || '').trim())
+      .map((r) => ({ to: r.to.trim(), via: (r.via || '').trim() || null }))
+  }
+  routesVisible.value = false
+}
 
 const canGenerate = (row) => globalOn.value && row.enabled
 

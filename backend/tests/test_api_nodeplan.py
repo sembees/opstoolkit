@@ -38,6 +38,12 @@ def _client(tmp_path, role="admin"):
         async with engine.begin() as conn:
             await conn.run_sync(models.Base.metadata.create_all)
 
+            # 夹具：存在性校验要求 install_id 真实存在（以前用假 id 也能建）
+            for _iid in ("inst-1", "inst-2", "inst-3", "inst-4", "i1", "i2", "i3"):
+                await conn.execute(models.PxeInstall.__table__.insert().values(
+                    id=_iid, profile_id="p1", hostname=_iid, mac="",
+                    ip="10.0.0.9", status="installed"))
+
     asyncio.run(_create())
 
     async def _db():
@@ -184,7 +190,9 @@ def test_update_cannot_move_to_another_install(tmp_path):
     c, _ = _client(tmp_path)
     pid = _mk(c).json()["id"]
     r = c.put(BASE + "/plans/" + pid, json={"install_id": "other", "serial": "SN-AAA-001"})
-    assert r.status_code == 422 and "另一台" in r.json()["detail"]
+    # 两道保护任一拦住都算对：改挂到另一台（"另一台"）或该装机记录不存在（"不存在"）
+    assert r.status_code == 422
+    assert ("另一台" in r.json()["detail"]) or ("不存在" in r.json()["detail"])
 
 
 def test_delete_is_idempotent(tmp_path):

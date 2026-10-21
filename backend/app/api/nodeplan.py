@@ -179,6 +179,26 @@ def _resolve_key(body: PlanIn) -> tuple[str, bool]:
     return src, (serial if src == "serial" else mac)
 
 
+async def _check_owner_exists(db: AsyncSession, body: PlanIn) -> None:
+    """install_id / ztp_device_id 必须**真实存在**。
+
+    以前只校验唯一性，于是 `install_id="inst-1"` 这种拍脑袋的 id 也能建规划 ——
+    之后 apply 时才在"找不到装机记录"上失败，排查成本高。现在建的时候就拦。
+    """
+    if body.install_id:
+        inst = await db.get(models.PxeInstall, body.install_id)
+        if inst is None:
+            raise HTTPException(status_code=422,
+                                detail="装机记录不存在：%s。请从 PXE 装机列表里选一台，"
+                                       "或留空（只按 SN + 规划 IP 登记）" % body.install_id)
+    if body.ztp_device_id:
+        dev = await db.get(models.ZtpDevice, body.ztp_device_id)
+        if dev is None:
+            raise HTTPException(status_code=422,
+                                detail="ZTP 设备不存在：%s。请从 ZTP 设备清单里选一台"
+                                       % body.ztp_device_id)
+
+
 async def _check_unique_owner(db: AsyncSession, body: PlanIn, exclude: str = "") -> None:
     """同一台装机记录 / 同一台 ZTP 设备只能有一条规划（表上也有唯一约束，这里先给出人话）。"""
     if body.install_id:
@@ -247,6 +267,7 @@ async def create_plan(body: PlanIn, db: AsyncSession = Depends(get_db),
     src, key = _resolve_key(body)
     await _check_unique(db, body, src, key)
     await _check_unique_owner(db, body)
+    await _check_owner_exists(db, body)
 
     p = models.NodePlan(
         install_id=body.install_id, ztp_device_id=body.ztp_device_id,
@@ -280,6 +301,7 @@ async def update_plan(pid: str, body: PlanIn, db: AsyncSession = Depends(get_db)
     src, key = _resolve_key(body)
     await _check_unique(db, body, src, key, exclude=pid)
     await _check_unique_owner(db, body, exclude=pid)
+    await _check_owner_exists(db, body)
 
     # install_id/ztp_device_id 允许在首次为空时补，但不允许把一台机器改成另一台
     if body.install_id and p.install_id and body.install_id != p.install_id:
@@ -799,15 +821,29 @@ async def import_plans(body: dict = None, db: AsyncSession = Depends(get_db),
         raise HTTPException(status_code=422, detail=str(e))
 
     created, skipped, errors = 0, 0, []
+    # 同一 SN/MAC 的后续行 → 给同一台机器**追加网卡**（CSV 里最常见：一台机器 4 个口 4 行）
+    seen = {}
     for idx, row in enumerate(rows, start=2):        # 第 2 行起 = 数据行（1 是表头）
         try:
             payload = row_to_body(row)
             p_body = PlanIn(**payload)
+            key0 = (p_body.serial or "").strip() or (p_body.mac or "").strip()
+            if key0 and key0 in seen:
+                owner = await db.get(models.NodePlan, seen[key0])
+                if owner is not None:
+                    for it in p_body.interfaces:
+                        db.add(models.NodePlanInterface(plan_id=owner.id, kind=it.kind,
+                                                        name=it.name, spec=it.spec or {},
+                                                        sort=100))
+                    await db.commit()
+                    created += 1
+                    continue
             if not p_body.install_id and not p_body.ztp_device_id:
                 pass                                  # CSV 允许只按 SN + IP 登记
             src, key = _resolve_key(p_body)
             await _check_unique(db, p_body, src, key)
             await _check_unique_owner(db, p_body)
+            await _check_owner_exists(db, p_body)
             p = models.NodePlan(
                 install_id=p_body.install_id, ztp_device_id=p_body.ztp_device_id,
                 serial=(p_body.serial or "").strip(), serial_trusted=bool(p_body.serial_trusted),
@@ -821,6 +857,8 @@ async def import_plans(body: dict = None, db: AsyncSession = Depends(get_db),
                 db.add(models.NodePlanInterface(plan_id=p.id, kind=it.kind, name=it.name,
                                                 spec=it.spec or {}, sort=i))
             await db.commit()
+            if key0:
+                seen[key0] = p.id
             created += 1
         except HTTPException as e:
             await db.rollback()

@@ -30,6 +30,8 @@ ALIASES = {
     "cidr": ("cidr", "掩码", "prefix"),
     "gateway": ("gateway", "网关"),
     "dns": ("dns", "dns服务器"),
+    "kind": ("kind", "类型", "网卡类型"),
+    "routes": ("routes", "路由", "路由表", "明细路由"),
 }
 
 _TRUE = ("1", "true", "yes", "y", "是", "可信", "")
@@ -75,8 +77,23 @@ def row_to_body(row: dict) -> dict:
     trusted = (row.get("serial_trusted") or "").strip().lower()
     serial_trusted = trusted in _TRUE or trusted == ""
     dns = [d.strip() for d in (row.get("dns") or "").replace(";", ",").split(",") if d.strip()]
+    routes = []
+    for part in (row.get("routes") or "").replace("；", ";").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if ">" in part:
+            to, via = part.split(">", 1)
+        elif "," in part:
+            to, via = part.split(",", 1)
+        else:
+            to, via = part, ""
+        routes.append({"to": to.strip(), "via": (via.strip() or None)})
+    kind = (row.get("kind") or "interface").strip().lower() or "interface"
+    if kind not in ("interface", "bond", "vlan", "bridge"):
+        kind = "interface"
     iface = {
-        "kind": "interface",
+        "kind": kind,
         "name": (row.get("iface") or "eth0").strip() or "eth0",
         "spec": {
             "name": (row.get("iface") or "eth0").strip() or "eth0",
@@ -85,6 +102,7 @@ def row_to_body(row: dict) -> dict:
             "cidr": int(row["cidr"]) if (row.get("cidr") or "").strip().isdigit() else 24,
             "gateway": (row.get("gateway") or "").strip(),
             "dns": dns,
+            "routes": routes,
         },
     }
     body = {
