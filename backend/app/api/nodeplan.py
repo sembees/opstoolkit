@@ -26,6 +26,8 @@ from app.database import get_db
 from app.it.netconfig.generator import generate_netconfig
 from app.it.nodeplan.apply import build_expected, render_bundle
 from app.it.nodeplan.verify import verify_plan
+from app.api.ztp import _to_profile
+from app.ct.ztp.generator import ZtpDevice, generate_all
 from app.it.nodeplan.deploy import (SshError, SshRunner, deploy_bundle,
                                    fetch_result)
 
@@ -619,3 +621,61 @@ async def sync_plan(pid: str, body: dict = None, db: AsyncSession = Depends(get_
                 "apply_log": out.get("apply_log", ""), "tried": tried}
 
     return {"ok": False, "reason": last_err or "目标机不可达", "tried": tried}
+
+
+# ── 网络设备（M4a）：生成正式配置（复用 ZTP 渲染器）────────────────────────
+
+def _device_config_key(files: dict, hostname: str, mac: str) -> str:
+    """从 generate_all 的产物里挑出这台设备的那一份（按主机名/ MAC 匹配）。"""
+    cands = [k for k in files if isinstance(k, str) and k.endswith((".cfg", ".txt"))]
+    for key in cands:
+        low = key.lower()
+        if hostname and hostname.lower() in low:
+            return key
+        if mac and mac.replace(":", "").lower()[:8] in low.replace(":", "").replace("-", ""):
+            return key
+    # 兜底：只有一台设备时通常就一份
+    return cands[0] if len(cands) == 1 else ""
+
+
+@router.post("/plans/{pid}/generate-device")
+async def generate_device(pid: str, db: AsyncSession = Depends(get_db),
+                          _user=Depends(get_current_user)) -> dict:
+    """网络设备规划的 dry-run 生成（H3C / Huawei / Cisco，走 ZTP 模板）。"""
+    await _require_global(db)
+    p = await _get_or_404(db, pid)
+    if not bool(getattr(p, "enabled", False)):
+        raise HTTPException(status_code=409,
+                           detail="这台设备还没开启（请在记录行上点「为该机开启」）")
+    if not p.ztp_device_id:
+        raise HTTPException(status_code=422,
+                           detail="这是 Linux 规划（没有 ztp_device_id）；网络设备请从 ZTP 设备创建规划")
+
+    dev = await db.get(models.ZtpDevice, p.ztp_device_id)
+    if dev is None:
+        raise HTTPException(status_code=404, detail="对应的 ZTP 设备不存在（可能已删除）")
+    tpl = await db.get(models.ZtpTemplate, dev.template_id)
+    if tpl is None:
+        raise HTTPException(status_code=404, detail="对应的 ZTP 模板不存在（可能已删除）")
+
+    try:
+        prof = _to_profile(tpl)
+        zd = ZtpDevice(hostname=(p.planned_hostname or dev.hostname or "").strip(),
+                       mac=dev.mac or "", serial=dev.serial or "",
+                       mgmt_ip=(p.mgmt_ip or dev.mgmt_ip or "").strip())
+        files = generate_all(prof, [zd])
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if not isinstance(files, dict) or not files:
+        raise HTTPException(status_code=502, detail="ZTP 渲染器没有返回任何文件，请检查模板")
+
+    key = _device_config_key(files, zd.hostname, zd.mac)
+    if not key:
+        raise HTTPException(status_code=502,
+                           detail="没能从渲染结果里定位这台设备的配置文件：%s" % sorted(files)[:8])
+    content = files[key]
+    return {"plan_id": pid, "vendor": (prof.vendor or "").lower(), "file_name": key,
+            "sha256": hashlib.sha256(str(content).encode("utf-8")).hexdigest(),
+            "content": content, "all_files": sorted(files),
+            "status_hint": "dry-run：未下发；核对无误后再走设备下发（下一刀）"}
