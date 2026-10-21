@@ -35,7 +35,7 @@ const layoutChildren = [
     path: 'assets',
     name: 'assets',
     redirect: '/assets/list',
-    meta: { title: '资产与凭据', icon: 'Box', group: '基础' },
+    meta: { title: '资产与凭据', icon: 'Box', group: '资源' },
     children: [
       { path: 'list', name: 'assets-list', component: () => import('../views/Assets.vue'), meta: { tab: 'list', title: '资产' } },
       { path: 'credentials', name: 'credentials', component: () => import('../views/Credentials.vue'), meta: { tab: 'credentials', title: '凭据' } },
@@ -49,7 +49,7 @@ const layoutChildren = [
     path: 'inspection',
     name: 'inspection',
     redirect: '/inspection/run',
-    meta: { title: '巡检', icon: 'Monitor', group: '运维' },
+    meta: { title: '巡检', icon: 'Monitor', group: '监控' },
     children: [
       { path: 'run', name: 'inspection-run', component: () => import('../views/Inspection.vue'), meta: { tab: 'run', title: '执行' } },
       { path: 'templates', name: 'inspection-templates', component: () => import('../views/Inspection.vue'), meta: { tab: 'templates', title: '模板' } },
@@ -76,7 +76,7 @@ const layoutChildren = [
   { path: 'netconfig', name: 'netconfig', redirect: '/network/single' },
 
   // ── 告警 ────────────────────────────────────────────────────────────────
-  { path: 'alerts', name: 'alerts', component: () => import('../views/Alerts.vue'), meta: { title: '告警规则', icon: 'Bell', group: '告警' } },
+  { path: 'alerts', name: 'alerts', component: () => import('../views/Alerts.vue'), meta: { title: '告警规则', icon: 'Bell', group: '监控' } },
 
   // ── 工具箱（低频/杂项，后续小功能都往这里加）────────────────────────────
   { path: 'jobaudit', name: 'jobaudit', component: () => import('../views/JobAudit.vue'), meta: { title: '变更审计', icon: 'Tickets', group: '工具箱' } },
@@ -107,7 +107,7 @@ const routes = [
 // 不再让 MainLayout 按 routes[1].children 下标取 —— 那样以后路由数组顺序一变就静默错位。
 // 这里从路由配置**本身**推导：分组顺序显式声明（MENU_GROUP_ORDER），组成员 = meta.group
 // 归属该组的子路由（组内按声明顺序），菜单数据永远和路由表一致。
-const MENU_GROUP_ORDER = ['总览', '基础', '运维', '交付', '网络', '告警', '工具箱']
+const MENU_GROUP_ORDER = ['总览', '资源', '监控', '交付', '网络', '工具箱']
 
 export const menuGroups = MENU_GROUP_ORDER.map((group) => ({
   name: group,
