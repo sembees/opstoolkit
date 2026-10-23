@@ -417,7 +417,7 @@ function statusLabel(s) {
             applied: '已生效', failed: '失败', rolled_back: '已回滚' })[s] || s
 }
 
-async function loadAll(retry = true) {
+async function loadAll(attempt = 0) {
   loading.value = true
   try {
     // _silent：失败由这里统一提示，避免"加载失败"和拦截器的提示重复弹两次
@@ -426,12 +426,14 @@ async function loadAll(retry = true) {
     const r = await http.get('/it/nodeplan/plans', { _silent: true })
     plans.value = r.data
   } catch (e) {
-    if (retry && !e?.response) {          // 没有响应 = 网络/后端重启，重试一次
-      await new Promise((r) => setTimeout(r, 1200))
-      return loadAll(false)
-    }
     const detail = e?.response?.data?.detail
-    ElMessage.error(detail || '加载失败：后端可能正在重启，请点右上角「刷新」重试')
+    // 没有 response = 网络层失败（后端重启/网络抖动）。退避重试 3 次，
+    // 只有 3 次都失败才提示 —— 单次抖动不该给运维弹红条（2026-10-23 用户反馈过一次）。
+    if (!detail && attempt < 3) {
+      await new Promise((r) => setTimeout(r, [800, 2000, 4000][attempt]))
+      return loadAll(attempt + 1)
+    }
+    ElMessage.error(detail || '后端暂时无响应（可能正在重启），已重试 3 次；请点右上角「刷新」再试')
   } finally {
     loading.value = false
   }
