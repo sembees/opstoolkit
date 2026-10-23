@@ -32,17 +32,25 @@ const layoutChildren = [
 
   // ── 资产与凭据（合并：两个子页，靠子路由区分）────────────────────────────
   {
-    path: 'assets',
+    // ★ 不能叫 'assets'：它和前端静态资源目录 /assets 撞了 —— /assets/list 会被后端静态挂载
+    //   当成文件路径接走并 404（2026-10-23 用户反馈"原网络配置页不见了"，
+    //   同时资产页也白屏，根因就是这里）。改用 'resource'。
+    path: 'resource',
     name: 'assets',
-    redirect: '/assets/list',
-    meta: { title: '资产与凭据', icon: 'Box', group: '资源' },
+    component: () => import('../views/SectionLayout.vue'),
+    redirect: '/resource/list',
+    meta: {
+      title: '资产与凭据', icon: 'Box', group: '资源',
+      tabs: [{ name: 'assets-list', label: '资产' }, { name: 'credentials', label: '凭据' }],
+    },
     children: [
       { path: 'list', name: 'assets-list', component: () => import('../views/Assets.vue'), meta: { tab: 'list', title: '资产' } },
       { path: 'credentials', name: 'credentials', component: () => import('../views/Credentials.vue'), meta: { tab: 'credentials', title: '凭据' } },
     ],
   },
-  // 旧路径：书签/文档里的 /credentials 不能 404
-  { path: 'credentials', redirect: '/assets/credentials' },
+  // 旧路径：书签/文档里的 /credentials、/assets 不能 404
+  { path: 'credentials', redirect: '/resource/credentials' },
+  { path: 'assets', redirect: '/resource/list' },
 
   // ── 巡检（沿用既有父子结构，只改名与分组）────────────────────────────────
   {
@@ -64,8 +72,12 @@ const layoutChildren = [
   {
     path: 'network',
     name: 'network',
+    component: () => import('../views/SectionLayout.vue'),
     redirect: '/network/plan',
-    meta: { title: '网络配置', icon: 'Connection', group: '网络' },
+    meta: {
+      title: '网络配置', icon: 'Connection', group: '网络',
+      tabs: [{ name: 'network-plan', label: '规划与下发' }, { name: 'network-single', label: '单机生成' }],
+    },
     children: [
       { path: 'plan', name: 'network-plan', component: () => import('../views/NodePlan.vue'), meta: { tab: 'plan', title: '规划与下发' } },
       { path: 'single', name: 'network-single', component: () => import('../views/NetConfig.vue'), meta: { tab: 'single', title: '单机生成' } },
