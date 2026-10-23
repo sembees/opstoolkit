@@ -31,6 +31,9 @@
       </div>
     </div>
 
+    <el-alert v-if="connecting" type="info" :closable="false" show-icon
+              title="正在连接后端（可能刚重启），会自动重试…" />
+
     <el-alert v-if="!globalOn" type="warning" :closable="false" show-icon
               title="本功能未开启"
               description="它属于额外功能：即使机器已经装好也不会自动启用。开启后仍需在每台机器上单独打开，才允许生成配置。" />
@@ -337,13 +340,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import http from '../api/index.js'
 
 const plans = ref([])
 const loading = ref(false)
+const connecting = ref(false)
 const globalOn = ref(false)
 const switching = ref(false)
 const isAdmin = ref(true)      // 后端会再校验；这里只用于禁用按钮（下面按登录用户纠正）
@@ -425,15 +429,21 @@ async function loadAll(attempt = 0) {
     globalOn.value = !!st.data.enabled
     const r = await http.get('/it/nodeplan/plans', { _silent: true })
     plans.value = r.data
+    connecting.value = false
   } catch (e) {
     const detail = e?.response?.data?.detail
     // 没有 response = 网络层失败（后端重启/网络抖动）。退避重试 3 次，
     // 只有 3 次都失败才提示 —— 单次抖动不该给运维弹红条（2026-10-23 用户反馈过一次）。
-    if (!detail && attempt < 3) {
-      await new Promise((r) => setTimeout(r, [800, 2000, 4000][attempt]))
+    // 覆盖"后端重启"这段窗口：容器重启通常 10~20 秒，3 次×4 秒不够用。
+    // 重试期间只显示轻提示（connecting），全部失败才弹错误。
+    const delay = [1000, 2000, 4000, 8000, 15000][attempt]
+    if (!detail && attempt < 5) {
+      connecting.value = true
+      await new Promise((r) => setTimeout(r, delay))
       return loadAll(attempt + 1)
     }
-    ElMessage.error(detail || '后端暂时无响应（可能正在重启），已重试 3 次；请点右上角「刷新」再试')
+    connecting.value = false
+    ElMessage.error(detail || '后端暂时无响应（可能正在重启），已重试 5 次；请点右上角「刷新」再试')
   } finally {
     loading.value = false
   }
@@ -657,6 +667,18 @@ onMounted(() => {
     isAdmin.value = (u.role || '') === 'admin'
   } catch { isAdmin.value = false }
   loadAll()
+
+  // 后端重启后，用户往往只是切回这个标签页 —— 不应要求他手动点刷新。
+  // 页面重新可见 / 网络恢复时，若数据还是空的就自动再拉一次（失败也不弹错）。
+  const maybeReload = () => {
+    if (document.visibilityState === 'visible' && plans.value.length === 0) loadAll()
+  }
+  document.addEventListener('visibilitychange', maybeReload)
+  window.addEventListener('online', maybeReload)
+  onBeforeUnmount(() => {
+    document.removeEventListener('visibilitychange', maybeReload)
+    window.removeEventListener('online', maybeReload)
+  })
 })
 </script>
 
